@@ -121,7 +121,7 @@ jobs:
               image = release["ID"] + "-" + release["VERSION_ID"]
           else:
               image = os.environ.get("ImageOS", platform.system() + "-" + platform.release())
-          image = re.sub(r"[^A-Za-z0-9_.-]", "-", image)
+          image = re.sub(r"[^A-Za-z0-9_.-]", "-", image + "-" + os.environ.get("ImageVersion", "unknown"))
           print("R cache platform:", image, platform.machine(), "image build", os.environ.get("ImageVersion", "unknown"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"image={image}\n")
@@ -135,8 +135,25 @@ jobs:
         id: r-runtime-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
-          path: /opt/R/4.5.2
-          key: r-runtime-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2
+          path: |
+            /opt/R/4.5.2
+            ${{ runner.temp }}/r-runtime-deps/*.deb
+          key: r-runtime-v2-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2
+      - name: Restore cached R system libraries
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          packages = sorted((Path(os.environ["RUNNER_TEMP"]) / "r-runtime-deps").glob("*.deb"))
+          if packages:
+              print(f"Installing {len(packages)} cached system packages without downloads", flush=True)
+              command = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "dpkg"]
+              subprocess.run(command + ["--unpack", *map(str, packages)], check=True, timeout=60)
+              subprocess.run(command + ["--configure", "--pending"], check=True, timeout=45)
+          PY
       - name: Validate existing Linux R
         if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
         id: r-reuse
@@ -190,7 +207,19 @@ jobs:
               subprocess.run(command, check=True, timeout=remaining)
           run(["curl", "--fail", "--location", "--retry", "1", "--connect-timeout", "10",
                "--max-time", "90", "--output", str(archive), url])
+          packages = Path(os.environ["RUNNER_TEMP"]) / "r-runtime-deps"
+          packages.mkdir(exist_ok=True)
+          sources = Path(os.environ["RUNNER_TEMP"]) / "r-runtime-sources.list"
+          codename = release["VERSION_CODENAME"]
+          sources.write_text(
+              f"deb https://archive.ubuntu.com/ubuntu {codename} main universe\n"
+              f"deb https://archive.ubuntu.com/ubuntu {codename}-updates main universe\n"
+              f"deb https://security.ubuntu.com/ubuntu {codename}-security main universe\n")
           apt = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get",
+                 "-o", "Dir::Etc::sourcelist=" + str(sources), "-o", "Dir::Etc::sourceparts=-",
+                 "-o", "APT::Get::List-Cleanup=0", "-o", "Dir::Cache::archives=" + str(packages),
+                 "-o", "APT::Keep-Downloaded-Packages=true",
+                 "-o", "Binary::apt::APT::Keep-Downloaded-Packages=true",
                  "-o", "Acquire::Retries=1", "-o", "Acquire::http::Timeout=20",
                  "-o", "Acquire::https::Timeout=20"]
           run(apt + ["update"])
@@ -221,7 +250,9 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
-          path: /opt/R/4.5.2
+          path: |
+            /opt/R/4.5.2
+            ${{ runner.temp }}/r-runtime-deps/*.deb
           key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
       - name: Restore R package library
         if: contains(inputs.software, 'acousticts')
