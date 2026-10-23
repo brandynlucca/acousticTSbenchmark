@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "geometry": {"semimajor_m": 0.07, "aspect_ratios": [1.001, 1.01, 5, 10, 50, 100]},
+  "incidences_deg": [0, 37, 90],
+  "boundaries": ["rigid", "pressure_release", "liquid", "gas"],
+  "software": ["prol_spheroid", "acousticts", "acousticscattering", "echosms", "liquid_spheroid"],
+  "frequency": {"start_hz": 1000, "stop_hz": 200000, "step_hz": 2000, "include_stop": true},
+  "medium": {"density_kg_m3": 1026.8, "sound_speed_m_s": 1477.3},
+  "materials": {
+    "liquid": {"density_kg_m3": 1028.9, "sound_speed_m_s": 1480.3},
+    "gas": {"density_kg_m3": 1.24, "sound_speed_m_s": 345.0}
+  },
+  "profiles": {
+    "pilot": {"aspect_ratios": [10], "incidences_deg": [90], "boundaries": ["gas"]},
+    "full": {}
+  },
+  "repetitions": 1,
+  "warmup": true,
+  "case_timeout_seconds": 600,
+  "controls": {
+    "acousticts": {"precision": "quad", "adaptive": true},
+    "prol_spheroid": {"gas_precision_fbs": 0.00001, "liquid_precision_fbs": 0.000001, "linear_tolerance": 0.00001, "linear_maxiter": 100},
+    "echosms": {},
+    "liquid_spheroid": {"M": 4, "N": 4, "precision_bits": 256},
+    "acousticscattering": {
+      "adaptive": true, "target_tol": 0.005, "max_refinements": 8,
+      "rtol": 0.000001, "quadrature_extra": 0, "chief_points": 8,
+      "rigid": {"boundary_order": 7},
+      "pressure_release": {"boundary_order": 7},
+      "liquid": {"order": 8, "boundary_order": 7},
+      "gas": {"order": 6, "boundary_order": 5}
+    }
+  }
+}

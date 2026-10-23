@@ -1,0 +1,41 @@
+using Test
+include(joinpath(@__DIR__, "..", "src", "worker_julia.jl"))
+
+@testset "Public liquid_spheroid receiving coordinates" begin
+    # Legacy second-half angle labels assume a symmetric grid. This asymmetric
+    # fixture forces selection by native eta and azimuth instead of that label.
+    receiver = BigFloat(cosd(37))
+    native_eta = reshape(BigFloat[-1, receiver], :, 1)
+    pattern = [deg2rad(37) 11.0; pi 22.0; 2pi 33.0]
+    selected = liquid_receiver(native_eta, pattern, receiver)
+    @test selected.index == 3
+    @test selected.magnitude == 33
+    @test selected.receiver_theta_radian ≈ deg2rad(37)
+    @test selected.receiver_phi_radian == Float64(pi)
+    @test selected.reported_pattern_angle_radian == 2pi
+    broadside = liquid_receiver(BigFloat[-1, 0, 1],
+        [0.0 1.0; pi/2 2.0; pi 3.0; 3pi/2 4.0; 2pi 5.0], BigFloat(0))
+    @test broadside.index == 4
+    @test broadside.magnitude == 4
+    axial = liquid_receiver(BigFloat[-1, 1], [0.0 1.0; pi 2.0; 2pi 3.0], BigFloat(1))
+    @test axial.index == 3
+    @test_throws ErrorException liquid_receiver(native_eta, pattern, big"0.5")
+    @test_throws ErrorException liquid_receiver(native_eta, pattern, BigFloat(-1))
+end
+
+@testset "Numerical controls and portable diagnostics" begin
+    @test scattering_controls(Dict("boundary" => "gas"))[:order] == 6
+    @test scattering_controls(Dict("boundary" => "liquid"))[:order] == 8
+    @test_throws ErrorException scattering_controls(Dict("boundary" => "rigid",
+        "controls" => Dict("mode_threads" => 2)))
+    @test_throws ErrorException liquid_controls(Dict("controls" => Dict("M" => 4, "N" => 5)))
+    @test_throws ErrorException liquid_controls(Dict("controls" => Dict()))
+    payload = json_safe((finite = 1.2, invalid = Inf, huge = big"1e1000",
+                         amplitude = 2 + 3im, matrix = [1.0 NaN; 2.0 4.0]))
+    roundtrip = JSON3.read(JSON3.write(payload), Dict{String,Any})
+    @test roundtrip["invalid"] === nothing
+    @test roundtrip["huge"] === nothing
+    @test roundtrip["matrix"]["dimensions"] == [2, 2]
+    @test roundtrip["matrix"]["values"] == [1.0, 2.0, nothing, 4.0]
+    @test roundtrip["amplitude"] == Dict("real" => 2, "imag" => 3)
+end
