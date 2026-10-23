@@ -59,6 +59,9 @@ jobs:
   benchmark:
     needs: matrix
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      actions: read
     timeout-minutes: 60
     strategy:
       max-parallel: 1
@@ -70,6 +73,7 @@ jobs:
       SOFTWARE: ${{ inputs.software }}
       REPETITIONS: ${{ inputs.repetitions }}
       BENCHMARK_REFERENCES: ${{ inputs.references }}
+      BENCHMARK_PLATFORM: ${{ matrix.os }}
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
@@ -90,6 +94,14 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as output:
               output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
           PY
+      - name: Publish setup status
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo '[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/)' >> "$GITHUB_STEP_SUMMARY"
+          python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
       - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
         if: contains(inputs.software, 'acousticts')
         with:
@@ -145,6 +157,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish live checkpoint
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 2
         if: ${{ success() && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -164,6 +183,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish live checkpoint
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 3
         if: ${{ success() && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -183,6 +209,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish live checkpoint
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 4
         if: ${{ success() && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -202,6 +235,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish live checkpoint
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 5
         if: ${{ success() && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -221,6 +261,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish live checkpoint
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Final data and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -253,3 +300,10 @@ jobs:
             ${{ runner.temp }}/benchmark-env/julia-liquid_spheroid/LocalPreferences.toml
           if-no-files-found: warn
           retention-days: 90
+      - name: Publish final progress
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed
