@@ -232,9 +232,10 @@ class FileTests(unittest.TestCase):
         for pid in b.read_json(self.path / "worker/child-pids.json"):
             try:
                 process = process_control.psutil.Process(pid)
+                status = process.status()
             except process_control.psutil.NoSuchProcess:
                 continue
-            self.assertEqual(process.status(), process_control.psutil.STATUS_ZOMBIE)
+            self.assertEqual(status, process_control.psutil.STATUS_ZOMBIE)
         self.assertFalse(any(t.name == "prediction-memory" for t in threading.enumerate()))
 
     def test_missing_or_failed_memory_sampler_never_fails_the_prediction(self):
