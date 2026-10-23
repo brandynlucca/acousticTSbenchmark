@@ -21,10 +21,16 @@ unavailable <- dependencies[!vapply(dependencies, function(package) {
   requireNamespace(package, lib.loc = library_path, quietly = TRUE)
 }, logical(1))]
 if (length(unavailable)) stop("R dependencies unavailable after installation: ", paste(unavailable, collapse = ", "))
-status <- system2(file.path(R.home("bin"), "R"),
-  c("CMD", "INSTALL", "--preclean", "--no-multiarch", paste0("--library=", shQuote(library_path)),
-    shQuote(normalizePath(args[[2L]], mustWork = TRUE))))
-if (status != 0L) stop("acousticTS installation failed")
+reuse_compiled <- identical(Sys.getenv("BENCHMARK_R_LIBRARY_CACHE_HIT", unset = ""), "true") &&
+  requireNamespace("acousticTS", lib.loc = library_path, quietly = TRUE)
+if (reuse_compiled) {
+  message("Reusing compiled acousticTS from the exact R library cache")
+} else {
+  status <- system2(file.path(R.home("bin"), "R"),
+    c("CMD", "INSTALL", "--preclean", "--no-multiarch", paste0("--library=", shQuote(library_path)),
+      shQuote(normalizePath(args[[2L]], mustWork = TRUE))))
+  if (status != 0L) stop("acousticTS installation failed")
+}
 packages <- as.data.frame(installed.packages(lib.loc = library_path)[,
   c("Package", "Version", "Built"), drop = FALSE], stringsAsFactors = FALSE)
 compiler_keys <- c("CC", "CFLAGS", "CXX17", "CXX17STD", "CXX17FLAGS", "FC", "FFLAGS", "FLIBS")

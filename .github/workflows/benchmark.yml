@@ -260,7 +260,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
-          key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json') }}
+          key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml') }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(inputs.software, 'acousticscattering') || contains(inputs.software, 'liquid_spheroid')
         timeout-minutes: 5
@@ -325,6 +325,8 @@ jobs:
       - name: Prepare pinned software
         id: prepare
         shell: bash
+        env:
+          BENCHMARK_R_LIBRARY_CACHE_HIT: ${{ steps.r-library-cache.outputs.cache-hit }}
         run: python src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE"
       - name: Check prepared R package library
         if: contains(inputs.software, 'acousticts')

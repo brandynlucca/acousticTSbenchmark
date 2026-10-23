@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +80,44 @@ class PreparationTests(unittest.TestCase):
                 prepare.execute([sys.executable, "-c", f"open({str(output)!r},'w').close()"],
                                 workspace=self.path)
         self.assertFalse(output.exists())
+
+    def test_posix_timeout_does_not_signal_reaped_group_again(self):
+        process = SimpleNamespace(
+            pid=12345,
+            communicate=Mock(side_effect=[subprocess.TimeoutExpired("compiler", 3), ("", None)]),
+            poll=Mock(return_value=-9),
+            returncode=-9,
+        )
+        # macOS can report EPERM when cleanup signals a group ID that has
+        # already been terminated and reaped. That must not mask the timeout.
+        killpg = Mock(side_effect=[None, PermissionError(1, "Operation not permitted")])
+        posix_os = SimpleNamespace(**dict(vars(os), name="posix", killpg=killpg))
+        with patch.object(prepare, "os", posix_os), \
+                patch.object(prepare, "signal", SimpleNamespace(SIGKILL=9)), \
+                patch.object(prepare.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(TimeoutError, "Setup command exceeded 3.0 seconds"):
+                prepare.execute(["compiler"], workspace=self.path, timeout_seconds=3)
+        killpg.assert_called_once_with(process.pid, 9)
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_posix_completed_setup_still_terminates_descendants(self):
+        process = SimpleNamespace(
+            pid=12345, communicate=Mock(return_value=("complete", None)),
+            poll=Mock(return_value=0), returncode=0,
+        )
+        for error in (None, PermissionError(1, "Operation not permitted")):
+            with self.subTest(permission_error=error is not None):
+                killpg = Mock(side_effect=error)
+                posix_os = SimpleNamespace(**dict(vars(os), name="posix", killpg=killpg))
+                with patch.object(prepare, "os", posix_os), \
+                        patch.object(prepare, "signal", SimpleNamespace(SIGKILL=9)), \
+                        patch.object(prepare.subprocess, "Popen", return_value=process):
+                    if error:
+                        with self.assertRaises(PermissionError):
+                            prepare.execute(["compiler"], workspace=self.path)
+                    else:
+                        self.assertEqual(prepare.execute(["compiler"], workspace=self.path), "complete")
+                killpg.assert_called_once_with(process.pid, 9)
 
     def test_reused_source_requires_unchanged_original_files(self):
         source = {"sha": "a" * 40}

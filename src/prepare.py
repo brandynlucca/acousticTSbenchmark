@@ -76,6 +76,20 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
         command = [sys.executable, str(ROOT / "src/process_gate.py"), str(gate), *command]
     process = None
     assigned = False
+    group_terminated = False
+
+    def terminate_posix_group():
+        nonlocal group_terminated
+        if group_terminated:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # After termination and reaping, this numeric group ID can be reused.
+        # Never signal it again during the remaining cleanup.
+        group_terminated = True
+
     try:
         process = subprocess.Popen(command, cwd=cwd, env=env, text=True,
             stdout=subprocess.PIPE if capture_output else None,
@@ -91,10 +105,7 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
             if job:
                 job.terminate()
             else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                terminate_posix_group()
             process.communicate(timeout=10)
             raise TimeoutError(f"Setup command exceeded {timeout:.1f} seconds") from None
         if process.returncode:
@@ -107,20 +118,14 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
             elif job:
                 process.kill()  # The unopened gate has not launched children.
             else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                terminate_posix_group()
             process.wait(timeout=10)
         if job:
             job.close()
         elif process is not None:
             # A setup process must not leave a compiler child competing with
             # the next package installation or timed prediction.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            terminate_posix_group()
         gate.unlink(missing_ok=True)
 
 
