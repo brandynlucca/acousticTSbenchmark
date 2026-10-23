@@ -24,6 +24,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 </style>
 <h1>Spheroid timing progress</h1>
 <div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Open benchmark run</a><span id="run-state"></span></div>
+<p id="setup-status" class="note" hidden></p>
 <p id="connection" role="status" hidden></p><p id="status"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Aspect ratio <select id="aspect"></select></label>
@@ -115,13 +116,15 @@ if(repository){
  document.getElementById('csv-link').textContent='Full data and artifacts';document.getElementById('json-link').hidden=true;
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
  if(!platform.value)platform.value='ubuntu-latest';
- let newestRun=null,lastRunCheck=0,busy=false,revision='';
+ let newestRun=null,newestSetup=null,lastRunCheck=0,busy=false,revision='';
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
   const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
   runLink.href=current?.html_url||data.run_url||workflowURL;
-  runLink.textContent=current?`Open run #${current.run_number}`:data.run_id?`Open run ${data.run_id}`:'Open benchmark runs';
+  runLink.textContent=current?`Benchmark run #${current.run_number}`:data.run_id?`Benchmark run ${data.run_id}`:'Open benchmark runs';
   runState.textContent=current?`${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:`${data.run_state||data.state||''}${data.run_conclusion?' · '+data.run_conclusion:''}`;
+  const setup=document.getElementById('setup-status');setup.hidden=!newestSetup;setup.replaceChildren();
+  if(newestSetup){const link=document.createElement('a');link.href=newestSetup.html_url;link.target='_blank';link.rel='noopener';link.textContent=`Run #${newestSetup.run_number}`;setup.append('Latest setup check: ',link,` · ${newestSetup.status.replaceAll('_',' ')}${newestSetup.conclusion?' · '+newestSetup.conclusion:''}. Setup checks do not produce timing points.`);}
  }
  async function fetchJSON(url){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
@@ -133,7 +136,7 @@ if(repository){
   try{
    if(Date.now()-lastRunCheck>120000){
     lastRunCheck=Date.now();
-    try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok)newestRun=response.value.workflow_runs?.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;}catch(e){}
+    try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
    }
    const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
    const response=await fetchJSON(url+'?t='+Math.floor(Date.now()/30000));

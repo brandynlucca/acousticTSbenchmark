@@ -235,7 +235,39 @@ jobs:
         timeout-minutes: 5
         with:
           version: '1.12.1'
+      - name: Reuse installed Linux GCC 14 compilers
+        if: runner.os == 'Linux'
+        id: compiler-reuse
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, shutil, subprocess
+          compilers = {"FC": "gfortran-14", "CC": "gcc-14", "CXX": "g++-14"}
+          usable = True
+          for variable, compiler in compilers.items():
+              executable = shutil.which(compiler)
+              if executable is None:
+                  print("Compiler unavailable:", compiler)
+                  usable = False
+                  continue
+              try:
+                  result = subprocess.run([executable, "-dumpversion"], capture_output=True,
+                                          text=True, timeout=10)
+                  valid = result.returncode == 0 and result.stdout.strip().split(".")[0] == "14"
+                  print(compiler, "version", result.stdout.strip(), "usable", valid)
+                  usable = usable and valid
+              except (OSError, subprocess.TimeoutExpired) as error:
+                  print("Compiler validation failed:", compiler, error)
+                  usable = False
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"usable={str(usable).lower()}\n")
+          if usable:
+              with open(os.environ["GITHUB_ENV"], "a") as output:
+                  for variable, compiler in compilers.items():
+                      output.write(f"{variable}={compiler}\nFPM_{variable}={compiler}\n")
+          PY
       - uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
+        if: runner.os != 'Linux' || steps.compiler-reuse.outputs.usable != 'true'
         timeout-minutes: 5
         with:
           compiler: gcc
