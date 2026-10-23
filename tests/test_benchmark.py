@@ -52,6 +52,12 @@ class CaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.build_cases(self.config)
 
+    def test_acousticscattering_is_reference_only(self):
+        self.assertNotIn("acousticscattering", self.config["software"])
+        args = b.parser().parse_args(["--software", "acousticscattering", "--plan"])
+        with self.assertRaisesRegex(ValueError, "reference-only"):
+            b.run(args)
+
     def test_balanced_software_order_keeps_each_spectrum_dense(self):
         cases = b.build_cases(self.config)
         count = len(self.config["software"])

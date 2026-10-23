@@ -22,7 +22,8 @@ from benchmark import ROOT, build_cases, read_json
 BRANCH = "benchmark-data"
 PLATFORMS = ("ubuntu-latest", "windows-latest", "macos-latest")
 ROW_FIELDS = ("software", "boundary", "aspect_ratio", "incidence_deg", "frequency_hz",
-              "k0a", "h0", "elapsed_seconds", "ts_db", "delta_ts_db", "status", "repetition")
+              "k0a", "h0", "elapsed_seconds", "ts_db", "delta_ts_db", "status", "repetition",
+              "physical_id", "reference_id", "reference_ts_db", "reference_uncertainty_db")
 MAX_JSON_BYTES = 128 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -87,8 +88,16 @@ class GitHub:
             raise APIError(error.code, error.reason) from None
 
     def archive(self, artifact_id):
+        return self._download_archive(f"/actions/artifacts/{int(artifact_id)}/zip")
+
+    def repository_archive(self, commit_sha):
+        if not re.fullmatch(r"[a-f0-9]{40}", commit_sha):
+            raise ValueError("Repository archives require an exact commit SHA")
+        return self._download_archive(f"/zipball/{commit_sha}")
+
+    def _download_archive(self, path):
         request = Request(
-            f"https://api.github.com/repos/{self.repository}/actions/artifacts/{int(artifact_id)}/zip",
+            f"https://api.github.com/repos/{self.repository}{path}",
             headers={"Authorization": f"Bearer {self.token}",
                      "Accept": "application/vnd.github+json",
                      "X-GitHub-Api-Version": "2022-11-28",
@@ -101,7 +110,7 @@ class GitHub:
             location = error.headers.get("Location", "")
             target = urlparse(location)
             host = target.hostname or ""
-            trusted = (host.endswith(".blob.core.windows.net") or
+            trusted = (host == "codeload.github.com" or host.endswith(".blob.core.windows.net") or
                        host.endswith(".actions.githubusercontent.com") or
                        host.endswith(".githubusercontent.com"))
             if target.scheme != "https" or target.username or not trusted:
@@ -228,7 +237,7 @@ def should_publish(current, proposed):
 def select_artifact(artifacts, platform):
     checkpoint = re.compile(rf"checkpoint-{re.escape(platform)}-\d+-\d+\Z")
     candidates = [artifact for artifact in artifacts if not artifact.get("expired", False)
-                  and (artifact["name"] == f"results-{platform}" or
+                  and (artifact["name"] in (f"results-{platform}", f"compared-results-{platform}") or
                        checkpoint.fullmatch(artifact["name"]))]
     # Artifact IDs are unique identifiers, not a chronological sequence.
     return max(candidates, key=lambda artifact: (artifact.get("created_at", ""),

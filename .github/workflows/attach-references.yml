@@ -1,0 +1,41 @@
+name: Attach cached references
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed benchmark run to refresh without repeating timings
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Join existing measurements to qualified references
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TIMING_RUN_ID: ${{ inputs.run_id }}
+          PLATFORM: ${{ matrix.platform }}
+        run: python src/reference_store.py attach --run-id "$TIMING_RUN_ID" --platform "$PLATFORM" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$RUNNER_TEMP/matched-references.json" --directory "$RUNNER_TEMP/compared-results"
+      - name: Downloadable comparisons
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: compared-results-${{ matrix.platform }}
+          path: ${{ runner.temp }}/compared-results/
+          if-no-files-found: ignore
+          retention-days: 90

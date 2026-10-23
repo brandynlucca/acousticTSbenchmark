@@ -16,7 +16,7 @@ on:
       software:
         description: Comma-separated software identifiers
         type: string
-        default: prol_spheroid,acousticts,acousticscattering,echosms,liquid_spheroid
+        default: prol_spheroid,acousticts,echosms,liquid_spheroid
       repetitions:
         description: Timed repetitions per physical case
         type: choice
@@ -30,10 +30,11 @@ on:
         description: Optional checkpoint artifact name instead of the final platform artifact
         type: string
         default: ''
-      references:
-        description: Optional path to qualified reference JSON in this checkout
-        type: string
-        default: ''
+      reference_budget_minutes:
+        description: Maximum calculation minutes per reference runner (two parallel runners)
+        type: choice
+        options: ['15', '30']
+        default: '15'
       setup_only:
         description: Prepare and cache software without running timing cases
         type: boolean
@@ -45,6 +46,24 @@ concurrency:
   group: spheroid-timing-campaign
   cancel-in-progress: false
 jobs:
+  comparisons:
+    if: ${{ always() && !inputs.setup_only }}
+    needs: [benchmark, references]
+    uses: ./.github/workflows/attach-references.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      run_id: ${{ format('{0}', github.run_id) }}
+  references:
+    if: ${{ !inputs.setup_only }}
+    uses: ./.github/workflows/references.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      profile: ${{ inputs.profile }}
+      budget_minutes: ${{ fromJSON(inputs.reference_budget_minutes) }}
   matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -78,7 +97,6 @@ jobs:
       PROFILE: ${{ inputs.profile }}
       SOFTWARE: ${{ inputs.software }}
       REPETITIONS: ${{ inputs.repetitions }}
-      BENCHMARK_REFERENCES: ${{ inputs.references }}
       BENCHMARK_PLATFORM: ${{ matrix.os }}
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
@@ -99,7 +117,11 @@ jobs:
           import os,time
           with open(os.environ["GITHUB_ENV"], "a") as output:
               output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
+              output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
           PY
+      - name: Check timing selection
+        shell: bash
+        run: python src/benchmark.py --plan --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS"
       - name: Publish setup status
         if: ${{ !inputs.setup_only }}
         continue-on-error: true
@@ -109,6 +131,12 @@ jobs:
         run: |
           echo '[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/)' >> "$GITHUB_STEP_SUMMARY"
           python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
+      - name: Restore matching numerical references
+        if: ${{ !inputs.setup_only }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/reference_store.py restore --profile "$PROFILE" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$BENCHMARK_REFERENCES"
       - name: Identify R cache platform
         if: contains(inputs.software, 'acousticts')
         id: r-cache-platform

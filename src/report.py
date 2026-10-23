@@ -26,6 +26,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Open benchmark run</a><span id="run-state"></span></div>
 <p id="setup-status" class="note" hidden></p>
 <p id="connection" role="status" hidden></p><p id="status"></p>
+<p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Aspect ratio <select id="aspect"></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
@@ -37,7 +38,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
 const repository=data.repository;
-const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',acousticscattering:'#009E73',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
+const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
 const boundaryLabels={rigid:'Fixed rigid',pressure_release:'Pressure release',liquid:'Liquid-filled',gas:'Gas-filled'};
 const aspect=document.getElementById('aspect'),metric=document.getElementById('metric'),axis=document.getElementById('axis');
@@ -66,10 +67,12 @@ function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2
 function render(){
  try{localStorage.setItem('benchmark-aspect',aspect.value);localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);}catch(e){}
  const selected=rows.filter(r=>r.aspect_ratio===Number(aspect.value)), field=metric.value;
+ const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db));
+ document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${compared.length} of ${measured.length} successful measurements have a matched, convergence-checked reference. References run separately and are reused across platforms. Missing references leave gaps in ΔTS.`;
  const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':'';
+ plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':field==='delta_ts_db'&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':'';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
  let low=axisValues.get(allFreq[0]),high=axisValues.get(allFreq.at(-1));
@@ -171,7 +174,7 @@ if(repository){
    const old=newestRun&&runOrder(newestRun,data)>0;
    connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}, attempt ${data.run_attempt}. A newer run or attempt is ${newestRun.status.replaceAll('_',' ')}. Open the run to check its selected platforms.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
    if(cachedFallback)connection.textContent+=' GitHub API unavailable. Using the public feed, which may be delayed by several minutes.';
-   document.getElementById('csv-link').href=(data.run_url||runLink.href)+'#artifacts';
+   document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
   }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 2 minutes. Existing points are retained.`;showRun();}

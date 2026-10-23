@@ -1,5 +1,27 @@
 using Test
-include(joinpath(@__DIR__, "..", "src", "worker_julia.jl"))
+include(joinpath(@__DIR__, "..", "src", "worker_reference.jl"))
+
+@testset "Reference Fourier check uses public solve with expanded resolution" begin
+    request = Dict("controls" => Dict("adaptive" => true, "target_tol" => .005, "mode_threads" => 4),
+                   "policy" => Dict("spatial_tolerance_db" => .005, "mode_increment" => 8),
+                   "incidence_deg" => 37)
+    calls = Dict[]
+    function mock_calculation(request, controls)
+        push!(calls, copy(controls))
+        (status="ok", ts_db=-40.0, amplitude=.01+0im,
+         diagnostics=Dict("solver_report" => (solver_options=(m_max=get(controls,:m_max,20),),)))
+    end
+    value = reference_calculation(request; calculate=mock_calculation)
+    @test length(calls) == 2
+    @test calls[1][:mode_threads] == calls[2][:mode_threads] == 4
+    @test !haskey(calls[1], :m_max)
+    @test calls[2][:m_max] == 28
+    @test value["expanded"].diagnostics["solver_report"].solver_options.m_max == 28
+    empty!(calls)
+    value = reference_calculation(merge(request, Dict("incidence_deg" => 0)); calculate=mock_calculation)
+    @test length(calls) == 1
+    @test value["expanded"] === nothing
+end
 
 @testset "Late-loaded package metadata on Julia 1.12" begin
     function metadata_after_binding_creation()

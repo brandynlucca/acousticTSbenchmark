@@ -351,6 +351,8 @@ def run(args):
     lock = read_json(args.sources_lock)
     cases = build_cases(configuration, args.profile,
                         args.software.split(",") if args.software else None, args.repetitions)
+    if any(case["software"] == "acousticscattering" for case in cases):
+        raise ValueError("AcousticScattering is reference-only. Run the Cached numerical references workflow")
     if args.plan:
         print(json.dumps(dict(cases=len(cases), frequencies=frequencies(configuration),
                               software=sorted({c["software"] for c in cases}),
@@ -372,7 +374,9 @@ def run(args):
                     platform=platform.system(), architecture=platform.machine(),
                     environment_fingerprint=runtime.get("environment_fingerprint"),
                     workload="fresh_process_warmed_distinct_problem_single_prediction")
-    manifest = dict(identity, fingerprint=fingerprint(identity))
+    from references import build_requests
+    manifest = dict(identity, fingerprint=fingerprint(identity),
+                    reference_requests=build_requests(configuration, lock, args.profile))
     manifest_path = directory / "manifest.json"
     if manifest_path.exists():
         if read_json(manifest_path)["fingerprint"] != manifest["fingerprint"]:
