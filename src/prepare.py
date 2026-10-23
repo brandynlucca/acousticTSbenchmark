@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -18,7 +19,12 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from benchmark import ROOT, atomic_json, fingerprint, read_json
+from benchmark import ROOT, atomic_json, build_cases, fingerprint, measure, positive, read_json
+
+
+LIQUID_MPFR_URL = ("https://old-releases.ubuntu.com/ubuntu/pool/main/m/mpfr4/"
+                  "libmpfr4_3.1.6-1_amd64.deb")
+LIQUID_MPFR_SHA256 = "de22baf3dd851a10e16fbf66a243e70149ca46e06b2939fdc79429196cefc090"
 
 
 def compatibility_evidence(evidence, workspace):
@@ -59,6 +65,63 @@ def remaining_budget():
     if remaining <= 0:
         raise TimeoutError("Campaign deadline reached during preparation")
     return remaining
+
+
+def liquid_linux_libraries(executable, workspace):
+    """Provide the stock executable's MPFR ABI without changing system libraries."""
+    archive = workspace / "libmpfr4_3.1.6-1_amd64.deb"
+    if not archive.exists():
+        with urllib.request.urlopen(LIQUID_MPFR_URL, timeout=min(30, remaining_budget())) as response:
+            content = response.read(1024 * 1024 + 1)
+        if len(content) > 1024 * 1024:
+            raise ValueError("Legacy MPFR package exceeds the expected size")
+        archive.write_bytes(content)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != LIQUID_MPFR_SHA256:
+        raise ValueError("Legacy MPFR package checksum does not match the pinned Ubuntu archive")
+    destination = workspace / "liquid-runtime"
+    execute(["dpkg-deb", "--extract", archive, destination], workspace=workspace, timeout_seconds=30)
+    library = destination / "usr/lib/x86_64-linux-gnu/libmpfr.so.4"
+    if not library.is_file():
+        raise ValueError("Legacy MPFR package does not contain libmpfr.so.4")
+    environment = os.environ.copy()
+    existing = environment.get("LD_LIBRARY_PATH", "")
+    environment["LD_LIBRARY_PATH"] = str(library.parent) + (":" + existing if existing else "")
+    dependencies = execute(["ldd", "-r", executable], workspace=workspace, env=environment,
+                           capture_output=True, timeout_seconds=30)
+    if "not found" in dependencies or "undefined symbol" in dependencies:
+        raise ValueError("liquid_spheroid native dependencies are unresolved: " + dependencies)
+    evidence = dict(package="libmpfr4", version="3.1.6-1", url=LIQUID_MPFR_URL,
+                    package_sha256=LIQUID_MPFR_SHA256,
+                    library_sha256=hashlib.sha256(library.read_bytes()).hexdigest(),
+                    loader_dependencies=re.sub(r"\s+\(0x[0-9a-fA-F]+\)", "", dependencies))
+    return str(library.parent), evidence
+
+
+def validate_workers(names, runtime, workspace, timeout_seconds):
+    """Exercise public worker protocols on a small case outside campaign records."""
+    positive(timeout_seconds, "validation_timeout_seconds")
+    configuration = read_json(ROOT / "benchmark.json")
+    configuration["geometry"] = dict(semimajor_m=.001, aspect_ratios=[2])
+    configuration["frequency"] = dict(start_hz=1000, stop_hz=1000, step_hz=1000)
+    configuration["profiles"]["validation"] = dict(aspect_ratios=[2], incidences_deg=[37], boundaries=["gas"])
+    results = []
+    for case in build_cases(configuration, "validation", names, 1):
+        name = case["software"]
+        print("VALIDATE", name, "1 mm semimajor axis, 1 kHz, gas, 37 degrees", flush=True)
+        try:
+            result = measure(case, runtime, workspace / "validation" / name,
+                             min(timeout_seconds, remaining_budget()))
+        except Exception as error:
+            result = dict(status="setup_error", message=str(error))
+        platform_unsupported = runtime.get("availability", {}).get(name, {}).get("status") == "unsupported"
+        results.append(dict(software=name, case=case, result=result,
+                            passed=result["status"] == "ok" or platform_unsupported,
+                            skipped=platform_unsupported))
+        print("VALIDATION", name, result["status"], flush=True)
+    summary = dict(passed=all(item["passed"] for item in results),
+                   purpose="synthetic setup validation, not campaign timing data", workers=results)
+    atomic_json(workspace / "validation.json", summary)
+    return summary["passed"]
 
 
 def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
@@ -197,6 +260,9 @@ def main():
     parser.add_argument("--directory", required=True)
     parser.add_argument("--software", default="prol_spheroid,acousticts,acousticscattering,echosms,liquid_spheroid")
     parser.add_argument("--sources-lock", default=str(ROOT / "sources.lock.json"))
+    parser.add_argument("--validate-workers", action="store_true",
+                        help="Run one small synthetic worker case per requested software after setup")
+    parser.add_argument("--validation-timeout-seconds", type=float, default=120)
     args = parser.parse_args()
     workspace = Path(args.directory).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
@@ -232,7 +298,9 @@ def main():
         if "echosms" in python_names and "echosms" not in runtime["availability"]:
             try:
                 env = os.environ.copy()
-                env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_ECHOSMS"] = "0.0.0+g" + sources["echosms"]["sha"][:12]
+                # hatch-vcs does not pass a distribution name to setuptools-scm.
+                # Limit the generic archive version override to this subprocess.
+                env["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.0.0+g" + sources["echosms"]["sha"][:12]
                 execute([python, "-m", "pip", "install", "--no-build-isolation",
                          "--constraint", ROOT / "src/python-constraints.txt",
                          runtime["source_paths"]["echosms"]], env=env, workspace=workspace)
@@ -314,6 +382,13 @@ def main():
                 executable.chmod(executable.stat().st_mode | 0o111)
                 runtime["native_executables"]["liquid_spheroid"] = str(executable)
                 lock_evidence["liquid_native_sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
+                if platform.system() == "Linux":
+                    try:
+                        library_path, evidence = liquid_linux_libraries(executable, workspace)
+                        runtime["env"]["BENCHMARK_LIQUID_LIBRARY_PATH"] = library_path
+                        lock_evidence["liquid_linux_runtime"] = evidence
+                    except Exception as error:
+                        runtime["availability"]["liquid_spheroid"] = dict(status="setup_error", message=str(error))
     for name in names:
         runtime["availability"].setdefault(name, dict(status="ready"))
     runtime["environment_evidence"] = lock_evidence
@@ -321,6 +396,8 @@ def main():
     runtime["environment_fingerprint"] = fingerprint(runtime["environment_compatibility"])
     atomic_json(workspace / "runtime.json", runtime)
     print(json.dumps(runtime["availability"], indent=2), flush=True)
+    if args.validate_workers and not validate_workers(names, runtime, workspace, args.validation_timeout_seconds):
+        raise SystemExit("Worker setup validation failed. See validation.json and validation/*/worker.log")
 
 
 if __name__ == "__main__":

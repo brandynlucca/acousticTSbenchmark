@@ -1,6 +1,15 @@
 # Single-case worker. All native output goes to the supervisor's process log.
 using JSON3, LinearAlgebra, Printf, DelimitedFiles, SHA
 
+function scattering_package_metadata()
+    # Julia 1.12 also ages newly imported global bindings. Read the module
+    # after the dynamic import in the current world, outside the solve timer.
+    Base.invokelatest() do
+        Dict("package_version" => string(Base.pkgversion(AcousticScattering)),
+             "package_path" => pathof(AcousticScattering))
+    end
+end
+
 function json_safe(value)
     value === nothing && return nothing
     ismissing(value) && return nothing
@@ -96,6 +105,12 @@ function native_run(command::Cmd)
               "-c", c, "-m", m, "-n", n]
     function invoke(task, extra = String[], output = nothing)
         command = Cmd(vcat(common, ["-w", task], extra))
+        library_path = get(ENV, "BENCHMARK_LIQUID_LIBRARY_PATH", "")
+        if Sys.islinux() && !isempty(library_path)
+            existing = get(ENV, "LD_LIBRARY_PATH", "")
+            command = addenv(command, "LD_LIBRARY_PATH" =>
+                (isempty(existing) ? library_path : library_path * ":" * existing))
+        end
         # Some distributed binaries write S1 to Salida_S.dat, others stdout.
         # Never reuse an earlier S1 output after a native failure.
         task == "S1" && isfile("Salida_S.dat") && rm("Salida_S.dat")
@@ -250,8 +265,7 @@ function worker(request, output_path)
             liquid_calculation, liquid_controls(request)
         else
             @eval using AcousticScattering
-            answer["diagnostics"]["package_version"] = string(Base.pkgversion(AcousticScattering))
-            answer["diagnostics"]["package_path"] = pathof(AcousticScattering)
+            merge!(answer["diagnostics"], scattering_package_metadata())
             scattering_calculation, scattering_controls(request)
         end
         answer["diagnostics"]["controls"] = controls

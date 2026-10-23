@@ -1,6 +1,18 @@
 using Test
 include(joinpath(@__DIR__, "..", "src", "worker_julia.jl"))
 
+@testset "Late-loaded package metadata on Julia 1.12" begin
+    function metadata_after_binding_creation()
+        # A self-contained module reproduces the binding age of a dynamic
+        # package import without loading the numerical solver stack.
+        @eval module AcousticScattering end
+        scattering_package_metadata()
+    end
+    metadata = metadata_after_binding_creation()
+    @test metadata["package_version"] == "nothing"
+    @test metadata["package_path"] === nothing
+end
+
 @testset "Public liquid_spheroid receiving coordinates" begin
     # Legacy second-half angle labels assume a symmetric grid. This asymmetric
     # fixture forces selection by native eta and azimuth instead of that label.

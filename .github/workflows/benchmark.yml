@@ -327,7 +327,13 @@ jobs:
         shell: bash
         env:
           BENCHMARK_R_LIBRARY_CACHE_HIT: ${{ steps.r-library-cache.outputs.cache-hit }}
-        run: python src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE"
+          SETUP_ONLY: ${{ inputs.setup_only }}
+        run: |
+          arguments=(src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE")
+          if [[ "$SETUP_ONLY" == "true" ]]; then
+            arguments+=(--validate-workers --validation-timeout-seconds 120)
+          fi
+          python "${arguments[@]}"
       - name: Check prepared R package library
         if: contains(inputs.software, 'acousticts')
         id: r-library-ready
@@ -505,6 +511,8 @@ jobs:
           name: environment-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/benchmark-env/runtime.json
+            ${{ runner.temp }}/benchmark-env/validation.json
+            ${{ runner.temp }}/benchmark-env/validation/**/worker.log
             ${{ runner.temp }}/benchmark-env/python-freeze.txt
             ${{ runner.temp }}/benchmark-env/r-packages.json
             ${{ runner.temp }}/benchmark-env/julia/Project.toml

@@ -225,6 +225,9 @@ class PreparationTests(unittest.TestCase):
 
         def fake_execute(command, **kwargs):
             if str(command[-1]).endswith("echosms") and "install" in command:
+                expected = "0.0.0+g" + prepare.read_json(ROOT / "sources.lock.json")["sources"]["echosms"]["sha"][:12]
+                self.assertEqual(kwargs["env"]["SETUPTOOLS_SCM_PRETEND_VERSION"], expected)
+                self.assertNotIn("SETUPTOOLS_SCM_PRETEND_VERSION", os.environ)
                 raise RuntimeError("echoSMs installation failed")
             return "fixture dependency evidence"
 
@@ -238,6 +241,68 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(runtime["availability"]["echosms"]["status"], "setup_error")
         self.assertEqual(runtime["availability"]["prol_spheroid"]["status"], "ready")
 
+    def test_liquid_legacy_library_is_verified_and_scoped_to_native_loading(self):
+        package = b"verified package fixture"
+        package_hash = hashlib.sha256(package).hexdigest()
+        native = self.path / "pro_sphwv"
+        native.write_bytes(b"unchanged upstream executable")
+        native_hash = hashlib.sha256(native.read_bytes()).hexdigest()
+        calls = []
+
+        def fake_execute(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[0] == "dpkg-deb":
+                library = Path(command[-1]) / "usr/lib/x86_64-linux-gnu/libmpfr.so.4"
+                library.parent.mkdir(parents=True)
+                library.write_bytes(b"real ABI 4 library fixture")
+                return None
+            self.assertEqual(command, ["ldd", "-r", native])
+            self.assertEqual(kwargs["env"]["LD_LIBRARY_PATH"],
+                             str(self.path / "liquid-runtime/usr/lib/x86_64-linux-gnu") + ":/existing")
+            return "libmpfr.so.4 => /fixture/libmpfr.so.4 (0x12345678)\n"
+
+        with patch.object(prepare, "LIQUID_MPFR_SHA256", package_hash), \
+                patch.object(prepare.urllib.request, "urlopen", return_value=io.BytesIO(package)), \
+                patch.object(prepare, "execute", side_effect=fake_execute), \
+                patch.dict(os.environ, {"LD_LIBRARY_PATH": "/existing"}):
+            path, evidence = prepare.liquid_linux_libraries(native, self.path)
+            self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/existing")
+        self.assertEqual(path, str(self.path / "liquid-runtime/usr/lib/x86_64-linux-gnu"))
+        self.assertEqual(evidence["package_sha256"], package_hash)
+        self.assertNotIn("0x", evidence["loader_dependencies"])
+        self.assertEqual(hashlib.sha256(native.read_bytes()).hexdigest(), native_hash)
+        self.assertEqual(len(calls), 2)
+
+    def test_liquid_library_checksum_failure_prevents_extraction(self):
+        (self.path / "libmpfr4_3.1.6-1_amd64.deb").write_bytes(b"incorrect package bytes")
+        with patch.object(prepare, "execute") as execute:
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                prepare.liquid_linux_libraries(self.path / "pro_sphwv", self.path)
+        execute.assert_not_called()
+
+    def test_worker_validation_is_small_serial_and_separate_from_campaign_records(self):
+        runtime = dict(availability={"acousticts": {"status": "ready"}, "echosms": {"status": "ready"}})
+        observed = []
+
+        def measure(case, actual_runtime, directory, timeout):
+            observed.append(case["software"])
+            self.assertIs(actual_runtime, runtime)
+            self.assertEqual((case["semimajor_m"], case["semiminor_m"], case["frequency_hz"]),
+                             (.001, .0005, 1000))
+            self.assertEqual((case["boundary"], case["incidence_deg"]), ("gas", 37))
+            self.assertEqual(directory, self.path / "validation" / case["software"])
+            self.assertLessEqual(timeout, 120)
+            return dict(status="ok" if case["software"] == "acousticts" else "setup_error")
+
+        with patch.object(prepare, "measure", side_effect=measure):
+            self.assertFalse(prepare.validate_workers(["acousticts", "echosms"], runtime, self.path, 120))
+        self.assertEqual(observed, ["acousticts", "echosms"])
+        report = prepare.read_json(self.path / "validation.json")
+        self.assertFalse(report["passed"])
+        self.assertEqual([item["passed"] for item in report["workers"]], [True, False])
+        self.assertFalse((self.path / "records").exists())
+        self.assertFalse((self.path / "results.json").exists())
+
     def test_liquid_only_does_not_download_or_install_acoustic_scattering(self):
         def fake_execute(command, **kwargs):
             self.assertEqual(command[4], "-")
@@ -248,6 +313,7 @@ class PreparationTests(unittest.TestCase):
 
         with patch.object(prepare, "obtain_source", side_effect=self.fake_source) as obtain, \
                 patch.object(prepare, "execute", side_effect=fake_execute), \
+                patch.object(prepare, "liquid_linux_libraries", return_value=("/fixture/libs", {"package": "fixture"})), \
                 patch.object(prepare.platform, "system", return_value="Windows" if os.name == "nt" else "Linux"), \
                 patch.object(prepare.platform, "machine", return_value="x86_64"), \
                 patch.object(sys, "argv", ["prepare.py", "--directory", str(self.path),
