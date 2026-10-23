@@ -41,10 +41,27 @@ class ProgressTests(unittest.TestCase):
             dict(status="ok", aspect_ratio=10, incidence_deg=0, frequency_hz=1000, h0=.1, k0a=.2),
             dict(status="setup_timeout", aspect_ratio=10, incidence_deg=37, frequency_hz=3000, h0=.3, k0a=.6),
             dict(status="pending", aspect_ratio=10, incidence_deg=90, frequency_hz=200000, h0=20, k0a=40)])
-        self.assertEqual(payload["axes"]["10"], dict(frequency_hz=[1000, 200000], h0=[.1, 20], k0a=[.2, 40]))
+        self.assertEqual(payload["axes"]["10"], dict(frequency_hz=[1000, 200000], h0=[.1, 20],
+            k0a=[.2, 40], frequencies_hz=[1000, 3000, 200000]))
         self.assertEqual(payload["aspect_ratios"], [10])
         self.assertEqual(payload["incidences_deg"], [0, 37, 90])
         self.assertEqual(payload["status_counts"], {"ok": 1, "setup_timeout": 1})
+
+    def test_coverage_retains_pending_only_groups_and_interior_frequency_gaps(self):
+        rows = [dict(software="acousticts", boundary="gas", aspect_ratio=10,
+                     frequency_hz=frequency, incidence_deg=90, status=status, elapsed_seconds=elapsed)
+                for frequency, status, elapsed in ((1000, "ok", 1.0), (3000, "pending", None),
+                                                  (5000, "ok", 2.0), (7000, "timeout", None))]
+        rows.append(dict(software="echosms", boundary="rigid", aspect_ratio=10,
+                         frequency_hz=1000, status="pending"))
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows)
+        self.assertEqual(payload["axes"]["10"]["frequencies_hz"], [1000, 3000, 5000, 7000])
+        groups = {group["software"]: group for group in payload["coverage"]}
+        self.assertEqual(groups["acousticts"], dict(software="acousticts", boundary="gas", aspect_ratio=10,
+            planned=4, recorded=3, success=2, other_recorded=1, pending=1, elapsed_seconds_sum=3.0))
+        self.assertEqual(groups["echosms"]["pending"], 1)
+        self.assertEqual(groups["echosms"]["recorded"], 0)
+        self.assertEqual(len(payload["rows"]), 3)
 
     def test_older_runs_attempts_and_regressive_snapshots_are_not_published(self):
         current = self.payload(12, 2)

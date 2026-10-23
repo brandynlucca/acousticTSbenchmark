@@ -53,7 +53,7 @@ function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2
 function render(){
  try{localStorage.setItem('benchmark-aspect',aspect.value);localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);}catch(e){}
  const selected=rows.filter(r=>r.aspect_ratio===Number(aspect.value)), field=metric.value;
- const allFreq=[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
+ const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
@@ -93,10 +93,13 @@ function render(){
  }
  const table=document.getElementById('coverage');table.replaceChildren();
  for(const software of Object.keys(colors))for(const boundary of Object.keys(boundaryLabels)){
-  const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!group.length)continue;
+  const coverage=data.coverage?.find(c=>c.aspect_ratio===Number(aspect.value)&&c.software===software&&c.boundary===boundary);
+  const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!coverage&&!group.length)continue;
   const good=group.filter(r=>r.status==='ok'),pending=group.filter(r=>r.status==='pending');
-  const total=good.reduce((sum,r)=>sum+r.elapsed_seconds,0),shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
-  const tr=document.createElement('tr');for(const value of [labels[software],boundaryLabels[boundary],good.length,group.length-good.length-pending.length,pending.length,shownTotal]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  const total=coverage?.elapsed_seconds_sum??good.reduce((sum,r)=>sum+r.elapsed_seconds,0),shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
+  const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
+  const remaining=coverage?.pending??(repository?'Unknown':pending.length);
+  const tr=document.createElement('tr');for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',render);metric.addEventListener('change',render);axis.addEventListener('change',render);render();
@@ -111,38 +114,46 @@ if(repository){
  runLink.href=workflowURL;document.getElementById('csv-link').href=workflowURL;
  document.getElementById('csv-link').textContent='Full data and artifacts';document.getElementById('json-link').hidden=true;
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
+ if(!platform.value)platform.value='ubuntu-latest';
  let newestRun=null,lastRunCheck=0,busy=false,revision='';
+ function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
-  const current=newestRun&&(!data.run_id||newestRun.id>=data.run_id)?newestRun:null;
+  const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
   runLink.href=current?.html_url||data.run_url||workflowURL;
   runLink.textContent=current?`Open run #${current.run_number}`:data.run_id?`Open run ${data.run_id}`:'Open benchmark runs';
-  runState.textContent=current?`${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:data.run_state||data.state||'';
+  runState.textContent=current?`${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:`${data.run_state||data.state||''}${data.run_conclusion?' · '+data.run_conclusion:''}`;
+ }
+ async function fetchJSON(url){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+  try{const response=await fetch(url,{cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,value:response.ok?await response.json():null};}
+  finally{clearTimeout(timer);}
  }
  async function poll(){
   if(busy)return;busy=true;const chosen=platform.value;
   try{
    if(Date.now()-lastRunCheck>120000){
     lastRunCheck=Date.now();
-    try{const response=await fetch(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=1`,{cache:'no-store'});if(response.ok)newestRun=(await response.json()).workflow_runs?.[0]||null;}catch(e){}
+    try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=1`);if(response.ok)newestRun=response.value.workflow_runs?.[0]||null;}catch(e){}
    }
    const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
-   const response=await fetch(url+'?t='+Math.floor(Date.now()/30000),{cache:'no-store'});
+   const response=await fetchJSON(url+'?t='+Math.floor(Date.now()/30000));
    if(chosen!==platform.value)return;
    if(response.status===404){connection.textContent=`No checkpoint has been published for ${chosen} yet. Setup must finish before measured points appear.`;showRun();return;}
    if(!response.ok)throw new Error(`Progress request returned ${response.status}`);
-   const incoming=await response.json();
+   const incoming=response.value;
    if(incoming.schema_version!==1||!Array.isArray(incoming.rows)||incoming.platform!==chosen)throw new Error('Unexpected progress data');
    const nextRevision=`${incoming.run_id}:${incoming.run_attempt}:${incoming.published_at}`;
-   if(nextRevision!==revision){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateStatus();render();}
-   const old=newestRun&&newestRun.id>data.run_id;
-   connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}. A newer run is ${newestRun.status.replaceAll('_',' ')}. Its ${chosen} checkpoint has not arrived yet.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
+   const order=data.run_id?runOrder(incoming,data):1;
+   if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateStatus();render();}
+   const old=newestRun&&runOrder(newestRun,data)>0;
+   connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}, attempt ${data.run_attempt}. A newer run or attempt is ${newestRun.status.replaceAll('_',' ')}. Open the run to check its selected platforms.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
    document.getElementById('csv-link').href=(data.run_url||runLink.href)+'#artifacts';
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
   }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}
-  finally{busy=false;}
+  finally{busy=false;if(chosen!==platform.value)poll();}
  }
- platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateStatus();render();connection.textContent='Connecting…';poll();});
+ platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();});
  connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);
 }
 </script></html>'''.replace("PAYLOAD", payload)
