@@ -230,7 +230,9 @@ def select_artifact(artifacts, platform):
     candidates = [artifact for artifact in artifacts if not artifact.get("expired", False)
                   and (artifact["name"] == f"results-{platform}" or
                        checkpoint.fullmatch(artifact["name"]))]
-    return max(candidates, key=lambda artifact: int(artifact["id"]), default=None)
+    # Artifact IDs are unique identifiers, not a chronological sequence.
+    return max(candidates, key=lambda artifact: (artifact.get("created_at", ""),
+               int(artifact["id"])), default=None)
 
 
 def artifact_payload(api, platform, run_id, state=None):

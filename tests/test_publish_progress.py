@@ -125,6 +125,11 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(payload["artifact_id"], 7)
         self.assertNotIn("private", json.dumps(payload))
 
+    def test_latest_artifact_uses_creation_time_not_identifier_order(self):
+        artifacts = [dict(id=12530932101, name="checkpoint-ubuntu-latest-1-3", created_at="2026-10-23T20:49:15Z"),
+                     dict(id=12529979373, name="checkpoint-ubuntu-latest-1-5", created_at="2026-10-23T20:49:24Z")]
+        self.assertEqual(progress.select_artifact(artifacts, "ubuntu-latest")["id"], 12529979373)
+
     def test_run_without_checkpoint_publishes_setup_without_measurements(self):
         api = Mock(repository="owner/repo")
         api.request.side_effect = [{"status": "in_progress", "run_attempt": 1, "conclusion": None},

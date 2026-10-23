@@ -51,7 +51,12 @@ function updateAspects(){
 }
 updateAspects();
 try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;}catch(e){}
-function updateStatus(){const s=data.status;document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${s.state||data.state||'running'} · Checkpoint ${s.updated_at||'pending'}`:'Waiting for the first benchmark checkpoint.';}
+function updateStatus(){
+ const s=data.status,counts=s.outcomes||{},success=counts.ok||0,pending=counts.pending??Math.max(0,(s.planned||0)-(s.recorded||0));
+ const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
+ const phase=finished?(pending?'Run stopped with pending cases':other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Preparing software':'Benchmarking';
+ document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
+}
 updateStatus();
 const legend=document.getElementById('legend');
 for(const key of Object.keys(colors)){const s=document.createElement('span');s.style.color=colors[key];s.textContent='● '+labels[key];legend.append(s);}
@@ -117,7 +122,7 @@ if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
  document.getElementById('livebar').hidden=false;document.getElementById('connection').hidden=false;
  document.getElementById('manifest-link').hidden=true;
- document.getElementById('refresh-note').textContent='This dashboard checks for updates every 30 seconds. Checkpoints are published between benchmark chunks, usually every 5–15 minutes after setup. Full CSV and JSON remain available in the run artifacts.';
+ document.getElementById('refresh-note').textContent='This dashboard checks GitHub for data updates every 2 minutes. Checkpoints are published between benchmark chunks, usually every 5–15 minutes after setup. Recorded cases include failures and skips. Only successful measurements appear in the plots. Full CSV and JSON remain available in the run artifacts.';
  const platform=document.getElementById('platform'),connection=document.getElementById('connection'),runLink=document.getElementById('run-link');
  const runState=document.getElementById('run-state');
  const workflowURL=`https://github.com/${repository}/actions/workflows/benchmark.yml`;
@@ -131,24 +136,30 @@ if(repository){
   const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
   runLink.href=current?.html_url||data.run_url||workflowURL;
   runLink.textContent=current?`Benchmark run #${current.run_number}`:data.run_id?`Benchmark run ${data.run_id}`:'Open benchmark runs';
-  runState.textContent=current?`${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:`${data.run_state||data.state||''}${data.run_conclusion?' · '+data.run_conclusion:''}`;
+  const awaiting=current?.status==='completed'&&data.run_id===current.id&&data.state!=='completed';
+  runState.textContent=awaiting?'Workflow finished · waiting for final data':current?`Workflow ${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:`${data.run_state||data.state||''}${data.run_conclusion?' · '+data.run_conclusion:''}`;
   const setup=document.getElementById('setup-status');setup.hidden=!newestSetup;setup.replaceChildren();
   if(newestSetup){const link=document.createElement('a');link.href=newestSetup.html_url;link.target='_blank';link.rel='noopener';link.textContent=`Run #${newestSetup.run_number}`;setup.append('Latest setup check: ',link,` · ${newestSetup.status.replaceAll('_',' ')}${newestSetup.conclusion?' · '+newestSetup.conclusion:''}. Setup checks do not produce timing points.`);}
  }
- async function fetchJSON(url){
+ async function fetchJSON(url,headers={}){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
-  try{const response=await fetch(url,{cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,value:response.ok?await response.json():null};}
+  try{const response=await fetch(url,{headers,cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,value:response.ok?await response.json():null};}
   finally{clearTimeout(timer);}
  }
  async function poll(){
   if(busy)return;busy=true;const chosen=platform.value;
   try{
-   if(Date.now()-lastRunCheck>120000){
+   if(Date.now()-lastRunCheck>300000){
     lastRunCheck=Date.now();
     try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
    }
    const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
-   const response=await fetchJSON(url+'?t='+Math.floor(Date.now()/30000));
+   const contentsURL=`https://api.github.com/repos/${repository}/contents/${chosen}.json?ref=benchmark-data&t=${Math.floor(Date.now()/120000)}`;
+   let response,cachedFallback=false;
+   try{response=await fetchJSON(contentsURL,{Accept:'application/vnd.github.raw+json'});}catch(e){}
+   if(!response||(!response.ok&&response.status!==404)){
+    cachedFallback=true;response=await fetchJSON(url+'?t='+Math.floor(Date.now()/120000));
+   }
    if(chosen!==platform.value)return;
    if(response.status===404){connection.textContent=`No checkpoint has been published for ${chosen} yet. Setup must finish before measured points appear.`;showRun();return;}
    if(!response.ok)throw new Error(`Progress request returned ${response.status}`);
@@ -159,14 +170,15 @@ if(repository){
    if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateStatus();render();}
    const old=newestRun&&runOrder(newestRun,data)>0;
    connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}, attempt ${data.run_attempt}. A newer run or attempt is ${newestRun.status.replaceAll('_',' ')}. Open the run to check its selected platforms.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
+   if(cachedFallback)connection.textContent+=' GitHub API unavailable. Using the public feed, which may be delayed by several minutes.';
    document.getElementById('csv-link').href=(data.run_url||runLink.href)+'#artifacts';
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
-  }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}
+  }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 2 minutes. Existing points are retained.`;showRun();}
   finally{busy=false;if(chosen!==platform.value)poll();}
  }
  platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();});
- connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);
+ connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,120000);
 }
 </script></html>'''.replace("PAYLOAD", payload)
     path = Path(path)
