@@ -2,6 +2,7 @@
 
 import hashlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,9 @@ import subprocess
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -90,6 +93,53 @@ class PreparationTests(unittest.TestCase):
         code.write_text("changed", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "modified"):
             prepare.obtain_source("software", source, self.path)
+
+    def test_archive_preserves_configure_execution_mode_and_source_bytes(self):
+        script = b"#!/bin/sh\nprintf 'configure fixture passed\\n'\n"
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            for name, mode, content in (("configure", 0o104755, script),
+                                        ("README", 0o100644, b"source fixture\n")):
+                member = zipfile.ZipInfo("source-root/" + name)
+                member.create_system = 3
+                member.external_attr = mode << 16
+                output.writestr(member, content)
+        source = dict(repository="owner/repository", sha="b" * 40)
+        applied = {}
+        actual_chmod = Path.chmod
+
+        def chmod(path, mode):
+            applied[path.name] = mode
+            if os.name == "posix":
+                actual_chmod(path, mode)
+
+        # Exercise the POSIX extraction branch on Windows too. POSIX CI also
+        # runs the extracted script and verifies its real filesystem mode.
+        posix_os = SimpleNamespace(**dict(vars(os), name="posix"))
+        with patch.object(prepare.urllib.request, "urlopen", return_value=io.BytesIO(archive.getvalue())), \
+                patch.object(prepare, "os", posix_os), patch.object(Path, "chmod", new=chmod):
+            destination = prepare.obtain_source("software", source, self.path)
+        self.assertEqual(applied, {"configure": 0o755, "README": 0o644})
+        self.assertEqual((destination / "configure").read_bytes(), script)
+        evidence = prepare.read_json(destination / ".benchmark-source.json")
+        self.assertEqual(evidence["files_sha256"]["configure"], hashlib.sha256(script).hexdigest())
+        if os.name == "posix":
+            self.assertEqual((destination / "configure").stat().st_mode & 0o7777, 0o755)
+            completed = subprocess.run([str(destination / "configure")], cwd=destination,
+                                       capture_output=True, text=True, check=True, timeout=5)
+            self.assertEqual(completed.stdout, "configure fixture passed\n")
+
+    def test_archive_still_rejects_symbolic_links(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            member = zipfile.ZipInfo("source-root/configure")
+            member.create_system = 3
+            member.external_attr = 0o120777 << 16
+            output.writestr(member, "../outside")
+        with patch.object(prepare.urllib.request, "urlopen", return_value=io.BytesIO(archive.getvalue())):
+            with self.assertRaisesRegex(ValueError, "symbolic links"):
+                prepare.obtain_source("software", dict(repository="owner/repository", sha="c" * 40), self.path)
+        self.assertFalse((self.path / "software/configure").exists())
 
     def test_resume_uses_build_inputs_and_preserves_output_hash_evidence(self):
         first_root, second_root = r"C:\Runner Temp\first", r"D:\Runner Temp\second"

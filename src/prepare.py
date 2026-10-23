@@ -167,6 +167,12 @@ def obtain_source(name, source, directory):
                 with bundle.open(member) as incoming, target.open("wb") as outgoing:
                     shutil.copyfileobj(incoming, outgoing)
                 file_hashes[relative.as_posix()] = hashlib.sha256(target.read_bytes()).hexdigest()
+                unix_mode = member.external_attr >> 16
+                if os.name == "posix" and unix_mode & 0o170000 == 0o100000:
+                    # GitHub archives retain executable source modes, but
+                    # zipfile extraction does not apply them. Never copy
+                    # setuid, setgid, or sticky bits from an archive.
+                    target.chmod(unix_mode & 0o777)
     atomic_json(marker, dict(source, archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
                             files_sha256=file_hashes))
     return destination
