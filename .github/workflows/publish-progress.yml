@@ -1,0 +1,50 @@
+name: Publish completed benchmark progress
+on:
+  workflow_run:
+    workflows: [Dense spheroid timings]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Benchmark run whose checkpoint should be published
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-completed-benchmark
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Publish platform checkpoints
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BENCHMARK_RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+        run: |
+          python - <<'PY'
+          import json, os, re, subprocess, sys
+          repository = os.environ["GITHUB_REPOSITORY"]
+          run_id = str(int(os.environ["BENCHMARK_RUN_ID"]))
+          pages = json.loads(subprocess.check_output([
+              "gh", "api", "--paginate", "--slurp",
+              f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"], text=True))
+          platforms = set()
+          for page in pages:
+              for job in page["jobs"]:
+                  match = re.fullmatch(r"benchmark \((ubuntu-latest|windows-latest|macos-latest)\)", job["name"])
+                  if match:
+                      platforms.add(match.group(1))
+          for platform in sorted(platforms):
+              subprocess.run([sys.executable, "src/publish_progress.py",
+                  "--repository", repository, "--platform", platform,
+                  "--from-artifact", run_id], check=True)
+          PY
