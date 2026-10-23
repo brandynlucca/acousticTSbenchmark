@@ -232,9 +232,11 @@ jobs:
           key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json') }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(inputs.software, 'acousticscattering') || contains(inputs.software, 'liquid_spheroid')
+        timeout-minutes: 5
         with:
           version: '1.12.1'
       - uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
+        timeout-minutes: 5
         with:
           compiler: gcc
           version: '14'
@@ -265,6 +267,8 @@ jobs:
         if: contains(inputs.software, 'acousticts')
         id: r-library-ready
         shell: bash
+        env:
+          SETUP_ONLY: ${{ inputs.setup_only }}
         run: |
           python - <<'PY'
           import json, os
@@ -274,7 +278,7 @@ jobs:
                    and (Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/r-packages.json").is_file())
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"ready={str(ready).lower()}\n")
-          if not ready:
+          if not ready and os.environ["SETUP_ONLY"] == "true":
               raise SystemExit("acousticTS setup failed. Its package cache will not be saved")
           PY
       - name: Save R packages before benchmarking
