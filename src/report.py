@@ -30,7 +30,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p><label>Aspect ratio <select id="aspect"></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
-<div id="legend"></div><div id="panels"></div>
+<div id="legend"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
 <h2>Coverage by software and boundary</h2><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <script id="data" type="application/json">PAYLOAD</script>
@@ -41,10 +41,17 @@ const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',acousticscattering:'#
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
 const boundaryLabels={rigid:'Fixed rigid',pressure_release:'Pressure release',liquid:'Liquid-filled',gas:'Gas-filled'};
 const aspect=document.getElementById('aspect'),metric=document.getElementById('metric'),axis=document.getElementById('axis');
-function updateAspects(){const previous=aspect.value;aspect.replaceChildren();for(const ratio of data.aspect_ratios||[...new Set(rows.map(r=>r.aspect_ratio))])aspect.add(new Option(ratio,ratio));if([...aspect.options].some(o=>o.value===previous))aspect.value=previous;}
+function updateAspects(){
+ const previous=aspect.value;aspect.replaceChildren();
+ const ratios=data.aspect_ratios||[...new Set(rows.map(r=>r.aspect_ratio))];
+ aspect.disabled=!ratios.length;
+ if(!ratios.length){aspect.add(new Option('Waiting for run configuration',''));return;}
+ for(const ratio of ratios)aspect.add(new Option(ratio,ratio));
+ if([...aspect.options].some(o=>o.value===previous))aspect.value=previous;
+}
 updateAspects();
 try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;}catch(e){}
-function updateStatus(){const s=data.status;document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${s.state} · Checkpoint ${s.updated_at||'pending'}`:'Waiting for the first benchmark checkpoint.';}
+function updateStatus(){const s=data.status;document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${s.state||data.state||'running'} · Checkpoint ${s.updated_at||'pending'}`:'Waiting for the first benchmark checkpoint.';}
 updateStatus();
 const legend=document.getElementById('legend');
 for(const key of Object.keys(colors)){const s=document.createElement('span');s.style.color=colors[key];s.textContent='● '+labels[key];legend.append(s);}
@@ -56,6 +63,8 @@ function render(){
  const selected=rows.filter(r=>r.aspect_ratio===Number(aspect.value)), field=metric.value;
  const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();
+ const plotStatus=document.getElementById('plot-status');
+ plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':'';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
  let low=axisValues.get(allFreq[0]),high=axisValues.get(allFreq.at(-1));

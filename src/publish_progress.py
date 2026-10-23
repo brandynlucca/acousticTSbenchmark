@@ -16,6 +16,8 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
+from benchmark import ROOT, build_cases, read_json
+
 
 BRANCH = "benchmark-data"
 PLATFORMS = ("ubuntu-latest", "windows-latest", "macos-latest")
@@ -189,6 +191,23 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
     return result
 
 
+def pending_setup_cases(config_path, profile, software=None, repetitions=None):
+    """Describe an explicitly selected campaign before any worker is launched."""
+    configuration = read_json(config_path)
+    if not isinstance(configuration, dict) or not isinstance(configuration.get("profiles"), dict):
+        raise ValueError("Invalid campaign configuration: profiles must be an object")
+    if not profile or profile not in configuration["profiles"]:
+        raise ValueError("Setup publication requires a known --profile or PROFILE")
+    try:
+        cases = build_cases(configuration, profile,
+                            software.split(",") if software else None, repetitions)
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ValueError(f"Invalid campaign configuration: {error}") from error
+    if not cases:
+        raise ValueError("The selected campaign contains no cases")
+    return [dict(case, status="pending") for case in cases]
+
+
 def should_publish(current, proposed):
     if current is None:
         return True
@@ -330,6 +349,14 @@ def main():
     parser.add_argument("--run-id", type=int, default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--run-attempt", type=int, default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
     parser.add_argument("--state", choices=("setup", "running", "completed"))
+    parser.add_argument("--config", type=Path, default=ROOT / "benchmark.json",
+                        help="Campaign configuration for setup publication before results exist")
+    parser.add_argument("--profile", default=os.environ.get("PROFILE"),
+                        help="Setup campaign profile, or PROFILE from the workflow")
+    parser.add_argument("--software", default=os.environ.get("SOFTWARE"),
+                        help="Setup software selection, or SOFTWARE from the workflow")
+    parser.add_argument("--repetitions", type=int, default=os.environ.get("REPETITIONS"),
+                        help="Setup repetitions, or REPETITIONS from the workflow")
     args = parser.parse_args()
     api = GitHub(args.repository, os.environ.get("GITHUB_TOKEN"))
     if args.from_artifact is not None:
@@ -342,8 +369,13 @@ def main():
         results_path, status_path = args.directory / "results.json", args.directory / "status.json"
         if not results_path.exists() and args.state != "setup":
             raise ValueError("No results.json is available. Only setup publication can omit results")
-        rows = json.loads(results_path.read_text(encoding="utf-8")) if results_path.exists() else []
-        status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+        if results_path.exists():
+            rows = json.loads(results_path.read_text(encoding="utf-8"))
+            status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+        else:
+            rows = pending_setup_cases(args.config, args.profile, args.software, args.repetitions)
+            status = dict(state="setup", planned=len(rows), recorded=0,
+                          updated_at=datetime.now(timezone.utc).isoformat())
         payload = compact_payload(args.repository, args.platform, args.run_id, args.run_attempt,
                                   rows, status, args.state)
     changed = publish(api, payload)

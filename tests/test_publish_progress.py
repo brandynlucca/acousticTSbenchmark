@@ -4,8 +4,10 @@ import base64
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -16,6 +18,29 @@ import publish_progress as progress
 
 
 class ProgressTests(unittest.TestCase):
+    def setUp(self):
+        scratch = progress.ROOT / ".scratch/codex/dense-benchmark/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+
+    def campaign(self):
+        return dict(geometry=dict(semimajor_m=.07, aspect_ratios=[1.001, 1.01, 5, 10, 50, 100]),
+            incidences_deg=[0, 37, 90], boundaries=["rigid", "pressure_release", "liquid", "gas"],
+            software=["acousticts", "echosms"], repetitions=1, warmup=True,
+            controls=dict(acousticts={}, echosms={}),
+            frequency=dict(start_hz=1000, stop_hz=200000, step_hz=2000, include_stop=True),
+            medium=dict(density_kg_m3=1026.8, sound_speed_m_s=1477.3),
+            materials=dict(liquid=dict(density_kg_m3=1028.9, sound_speed_m_s=1480.3),
+                           gas=dict(density_kg_m3=1.24, sound_speed_m_s=345)),
+            profiles=dict(pilot=dict(aspect_ratios=[10], incidences_deg=[90], boundaries=["gas"]), full={}))
+
+    def config_file(self, configuration=None):
+        path = self.directory / "campaign.json"
+        path.write_text(json.dumps(self.campaign() if configuration is None else configuration), encoding="utf-8")
+        return path
+
     def payload(self, run=12, attempt=1, state="running"):
         return progress.compact_payload("owner/repo", "ubuntu-latest", run, attempt,
             [{"software": "acousticts", "status": "ok", "ts_db": -30,
@@ -110,7 +135,59 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(payload["run_conclusion"])
         self.assertEqual(payload["rows"], [])
         self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["aspect_ratios"], [])
+        self.assertEqual(payload["status"]["planned"], 0)
         api.archive.assert_not_called()
+
+    def test_local_setup_uses_workflow_pilot_selection_without_observations(self):
+        arguments = ["publish_progress.py", "--repository", "owner/repo", "--platform", "ubuntu-latest",
+                     "--directory", str(self.directory / "results"), "--run-id", "99", "--state", "setup",
+                     "--config", str(self.config_file())]
+        with patch.dict(os.environ, dict(PROFILE="pilot", SOFTWARE="acousticts,echosms", REPETITIONS="3")), \
+                patch.object(sys, "argv", arguments), patch.object(progress, "GitHub"), \
+                patch.object(progress, "publish", return_value=True) as publish:
+            progress.main()
+        payload = publish.call_args.args[1]
+        self.assertEqual(payload["aspect_ratios"], [10])
+        self.assertEqual(payload["incidences_deg"], [90])
+        self.assertEqual(payload["axes"]["10"]["frequency_hz"], [1000, 200000])
+        self.assertEqual(len(payload["axes"]["10"]["frequencies_hz"]), 101)
+        self.assertEqual(payload["status"]["planned"], 606)
+        self.assertEqual(payload["status"]["outcomes"], dict(pending=606))
+        self.assertEqual(payload["status"]["state"], "setup")
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["rows"], [])
+        self.assertEqual(payload["status_counts"], {})
+        self.assertEqual({group["boundary"] for group in payload["coverage"]}, {"gas"})
+        self.assertTrue(all(group["pending"] == 303 and group["recorded"] == 0
+                            and group["elapsed_seconds_sum"] == 0 for group in payload["coverage"]))
+        self.assertFalse((self.directory / "results").exists())
+
+    def test_full_setup_plan_keeps_all_aspects_without_measurements(self):
+        pending = progress.pending_setup_cases(self.config_file(), "full", "echosms", 1)
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 99, 1,
+                                           pending, state="setup")
+        self.assertEqual(payload["aspect_ratios"], [1.001, 1.01, 5, 10, 50, 100])
+        self.assertEqual(payload["incidences_deg"], [0, 37, 90])
+        self.assertEqual(payload["status"]["planned"], 6 * 3 * 4 * 101)
+        self.assertEqual(len(payload["coverage"]), 6 * 4)
+        self.assertEqual(payload["rows"], [])
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertTrue(all(axis["frequency_hz"] == [1000, 200000] for axis in payload["axes"].values()))
+
+    def test_setup_plan_rejects_missing_profile_and_invalid_configuration(self):
+        path = self.config_file()
+        for profile in (None, "unknown"):
+            with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "profile"):
+                progress.pending_setup_cases(path, profile)
+        invalid = self.campaign()
+        invalid["frequency"]["step_hz"] = 0
+        with self.assertRaisesRegex(ValueError, "step_hz"):
+            progress.pending_setup_cases(self.config_file(invalid), "pilot")
+        with self.assertRaisesRegex(ValueError, "configuration"):
+            progress.pending_setup_cases(self.config_file({"profiles": {"pilot": {}}}), "pilot")
+        with self.assertRaisesRegex(ValueError, "repetitions"):
+            progress.pending_setup_cases(self.config_file(), "pilot", repetitions=0)
 
     def test_artifact_redirect_does_not_forward_github_token(self):
         api = progress.GitHub("owner/repo", "test-token")
