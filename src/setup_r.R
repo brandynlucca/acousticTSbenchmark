@@ -2,9 +2,23 @@ args <- commandArgs(trailingOnly = TRUE)
 stopifnot(length(args) == 3L)
 library_path <- normalizePath(args[[1L]], mustWork = TRUE)
 .libPaths(c(library_path, .libPaths()))
-options(repos = c(CRAN = "https://cloud.r-project.org"), Ncpus = 1L)
+repository <- Sys.getenv("RSPM", unset = "")
+if (!nzchar(repository)) repository <- "https://cloud.r-project.org"
+options(repos = c(CRAN = repository), Ncpus = 1L)
 dependencies <- c("jsonlite", "pbapply", "Rcpp", "BH", "RcppArmadillo", "testthat")
-install.packages(dependencies, lib = library_path)
+missing <- dependencies[!vapply(dependencies, function(package) {
+  requireNamespace(package, lib.loc = library_path, quietly = TRUE)
+}, logical(1))]
+if (length(missing)) {
+  message("Installing missing R dependencies: ", paste(missing, collapse = ", "))
+  install.packages(missing, lib = library_path)
+} else {
+  message("Reusing all cached R dependencies")
+}
+unavailable <- dependencies[!vapply(dependencies, function(package) {
+  requireNamespace(package, lib.loc = library_path, quietly = TRUE)
+}, logical(1))]
+if (length(unavailable)) stop("R dependencies unavailable after installation: ", paste(unavailable, collapse = ", "))
 status <- system2(file.path(R.home("bin"), "R"),
   c("CMD", "INSTALL", "--preclean", "--no-multiarch", paste0("--library=", shQuote(library_path)),
     shQuote(normalizePath(args[[2L]], mustWork = TRUE))))
