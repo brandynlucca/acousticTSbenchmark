@@ -5,9 +5,11 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -155,6 +157,43 @@ class StoreTests(unittest.TestCase):
         row = b.read_json(self.work / "results.json")[0]
         self.assertIsNone(row["delta_ts_db"])
         self.assertNotIn("reference_ts_db", row)
+
+    def test_live_controller_attaches_new_references_without_remeasuring(self):
+        self.save(0)
+        store.publish_cache(self.api, self.jobs, self.work / "cache")
+        directory = self.work / "benchmark-results"
+        cases = b.build_cases(self.config, software=["echosms"])
+        measurements = {cases[0]["case_id"]: dict(status="ok", elapsed_seconds=.123,
+                                                memory_delta_peak_bytes=4096, ts_db=-39.0)}
+        b.export(directory, cases, measurements, {}, "budget_paused")
+        b.atomic_json(directory / "manifest.json", dict(reference_requests=self.jobs))
+        configuration = self.work / "configuration.json"
+        b.atomic_json(configuration, self.config)
+        selected = self.work / "references.json"
+        b.atomic_json(selected, dict(references=[]))
+        workflow = (b.ROOT / ".github/workflows/benchmark.yml").read_text()
+        block = workflow.split("      - name: Prepare bounded timing controller\n", 1)[1]
+        source = block.split("<<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        namespace = {"__name__": "reference_controller_fixture"}
+        exec(compile(textwrap.dedent(source), "reference-controller", "exec"), namespace)
+        environment = dict(RUNNER_TEMP=str(self.work), BENCHMARK_CONFIG=str(configuration),
+            BENCHMARK_REFERENCES=str(selected), BENCHMARK_DEADLINE="0", PROFILE="pilot",
+            SOFTWARE="echosms", REPETITIONS="1", GITHUB_REPOSITORY="owner/repo",
+            GITHUB_TOKEN="fixture", BENCHMARK_PLATFORM="ubuntu-latest",
+            GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+        published = []
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["controller", "30"]), \
+             patch.object(namespace["subprocess"], "run", side_effect=AssertionError("must not measure")), \
+             patch.dict(namespace, GitHub=lambda *a, **k: self.api,
+                        publish=lambda api, payload: published.append(payload)):
+            namespace["main"]()
+        rows = b.read_json(directory / "results.json")
+        self.assertEqual(rows[0]["elapsed_seconds"], .123)
+        self.assertEqual(rows[0]["memory_delta_peak_bytes"], 4096)
+        self.assertEqual(rows[0]["delta_ts_db"], 1.0)
+        self.assertEqual(rows[1]["status"], "pending")
+        self.assertEqual(published[0]["rows"][0]["delta_ts_db"], 1.0)
+        self.assertEqual(len(b.read_json(selected)["references"]), 1)
 
 
 if __name__ == "__main__":

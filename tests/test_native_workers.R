@@ -2,6 +2,27 @@
 library(testthat)
 source(file.path("src", "worker_acousticts.R"))
 
+test_that("memory boundaries signal the actual worker and fail independently", {
+  skip_if_not_installed("jsonlite")
+  directory <- tempfile("memory-protocol-")
+  dir.create(directory)
+  on.exit(unlink(directory, recursive = TRUE))
+  request <- setNames(lapply(c("ready", "ready_ack", "done", "done_ack", "failed"),
+    function(name) file.path(directory, name)),
+    paste0("memory_", c("ready", "ready_ack", "done", "done_ack", "failed"), "_path"))
+  file.create(request$memory_ready_ack_path, request$memory_done_ack_path)
+  memory_boundary(request, "ready")
+  expect_equal(jsonlite::read_json(request$memory_ready_path)$pid, Sys.getpid())
+  expect_false(file.exists(request$memory_done_path))
+  memory_boundary(request, "done")
+  expect_true(file.exists(request$memory_done_path))
+  expect_false(file.exists(request$memory_failed_path))
+  expect_silent(memory_boundary(list(), "ready"))
+  request$memory_ready_path <- directory
+  suppressWarnings(memory_boundary(request, "ready"))
+  expect_true(file.exists(request$memory_failed_path))
+})
+
 test_that("public PSMS results retain metre normalization for every boundary", {
   skip_if_not_installed("acousticTS")
   request <- list(software = "acousticts", frequency_hz = 1000,

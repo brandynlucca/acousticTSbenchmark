@@ -1,29 +1,57 @@
 name: Dense spheroid timings
-run-name: ${{ inputs.setup_only && 'Prepare environments' || 'Dense spheroid timings' }} (${{ inputs.platform }})
+run-name: ${{ inputs.mode == 'prepare' && format('Prepare environments ({0})', inputs.platform) || inputs.mode == 'resume' && format('Resume benchmark {0}', inputs.resume_run_id) || format('New benchmark ({0})', inputs.platform) }}
 on:
   workflow_dispatch:
     inputs:
-      profile:
-        description: Dense gas broadside AR10 pilot or the full case matrix
+      mode:
+        description: New benchmark, resume saved cases, or prepare cached environments
         type: choice
-        options: [pilot, full]
-        default: pilot
+        options: [new, resume, prepare]
+        default: new
       platform:
-        description: Runner platform
+        description: New-run platform (resume restores the original platforms and settings)
         type: choice
         options: [ubuntu-latest, windows-latest, macos-latest, all]
         default: ubuntu-latest
       software:
-        description: Comma-separated software identifiers
+        description: Software CSV (acousticts, prol_spheroid, echosms, liquid_spheroid)
         type: string
-        default: prol_spheroid,acousticts,echosms,liquid_spheroid
+        default: acousticts,prol_spheroid
+      frequency_start_khz:
+        description: Starting frequency in kHz
+        type: string
+        default: '1'
+      frequency_end_khz:
+        description: Ending frequency in kHz (always included)
+        type: string
+        default: '300'
+      frequency_interval_khz:
+        description: Frequency interval in kHz
+        type: string
+        default: '2'
+      semimajor_m:
+        description: Fixed semimajor axis a in metres (total length is 2a)
+        type: string
+        default: '0.07'
+      aspect_ratios:
+        description: Aspect ratios a/b, comma-separated, each greater than 1
+        type: string
+        default: '10'
+      incidences_deg:
+        description: Incidences from the major axis in degrees, e.g. 0,37,90
+        type: string
+        default: '90'
+      boundaries:
+        description: Boundaries CSV (rigid, pressure_release, liquid, gas)
+        type: string
+        default: gas
       repetitions:
         description: Timed repetitions per physical case
         type: choice
         options: ['1', '3', '5']
         default: '1'
       resume_run_id:
-        description: Optional earlier run ID with a matching final artifact
+        description: Required in resume mode (all new-run settings are ignored)
         type: string
         default: ''
       resume_artifact:
@@ -35,10 +63,6 @@ on:
         type: choice
         options: ['15', '30']
         default: '15'
-      setup_only:
-        description: Prepare and cache software without running timing cases
-        type: boolean
-        default: false
 permissions:
   contents: read
   actions: read
@@ -47,7 +71,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   comparisons:
-    if: ${{ always() && !inputs.setup_only }}
+    if: ${{ always() && inputs.mode != 'prepare' }}
     needs: [benchmark, references]
     uses: ./.github/workflows/attach-references.yml
     permissions:
@@ -56,47 +80,57 @@ jobs:
     with:
       run_id: ${{ format('{0}', github.run_id) }}
   references:
-    if: ${{ !inputs.setup_only }}
+    if: ${{ inputs.mode != 'prepare' }}
     uses: ./.github/workflows/references.yml
+    needs: matrix
     permissions:
       contents: write
       actions: read
     with:
-      profile: ${{ inputs.profile }}
+      profile: ${{ needs.matrix.outputs.profile }}
+      configuration_json: ${{ needs.matrix.outputs.configuration }}
+      source_ref: ${{ needs.matrix.outputs.source_ref }}
       budget_minutes: ${{ fromJSON(inputs.reference_budget_minutes) }}
   matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       platforms: ${{ steps.choose.outputs.platforms }}
+      configuration: ${{ steps.choose.outputs.configuration }}
+      profile: ${{ steps.choose.outputs.profile }}
+      software: ${{ steps.choose.outputs.software }}
+      repetitions: ${{ steps.choose.outputs.repetitions }}
+      source_ref: ${{ steps.choose.outputs.source_ref }}
+      resume_artifacts: ${{ steps.choose.outputs.resume_artifacts }}
+      resume_run_id: ${{ steps.choose.outputs.resume_run_id }}
     steps:
-      - id: choose
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Resolve and validate campaign
+        id: choose
         env:
-          PLATFORM: ${{ inputs.platform }}
-        run: |
-          python - <<'PY'
-          import json, os
-          selected = os.environ["PLATFORM"]
-          values = ["ubuntu-latest", "windows-latest", "macos-latest"] if selected == "all" else [selected]
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("platforms=" + json.dumps(values) + "\n")
-          PY
+          CAMPAIGN_INPUTS: ${{ toJSON(inputs) }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/campaign.py --output "$RUNNER_TEMP/campaign.json"
   benchmark:
-    name: ${{ inputs.setup_only && 'prepare' || 'benchmark' }} (${{ matrix.os }})
+    name: ${{ inputs.mode == 'prepare' && 'prepare' || 'benchmark' }} (${{ matrix.os }})
     needs: matrix
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
       actions: read
-    timeout-minutes: ${{ inputs.setup_only && 15 || 60 }}
+    timeout-minutes: ${{ inputs.mode == 'prepare' && 15 || 60 }}
     strategy:
       max-parallel: 1
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.matrix.outputs.platforms) }}
     env:
-      PROFILE: ${{ inputs.profile }}
-      SOFTWARE: ${{ inputs.software }}
-      REPETITIONS: ${{ inputs.repetitions }}
+      PROFILE: ${{ needs.matrix.outputs.profile }}
+      SOFTWARE: ${{ needs.matrix.outputs.software }}
+      REPETITIONS: ${{ needs.matrix.outputs.repetitions }}
       BENCHMARK_PLATFORM: ${{ matrix.os }}
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
@@ -118,91 +152,39 @@ jobs:
               output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
               output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
           PY
-      - name: Verify continuation run
-        if: inputs.resume_run_id != '' && !inputs.setup_only
-        id: continuation-run
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
-        run: |
-          python - <<'PY'
-          import json, os, re
-          from urllib.request import Request, urlopen
-          run_id = os.environ["RESUME_RUN_ID"]
-          if not run_id.isdecimal() or int(run_id) < 1:
-              raise SystemExit("resume_run_id must be a positive workflow run ID")
-          repository = os.environ["GITHUB_REPOSITORY"]
-          request = Request(f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
-              headers={"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
-                       "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
-          with urlopen(request, timeout=15) as response:
-              run = json.load(response)
-          if (run.get("repository", {}).get("full_name") != repository or
-                  (run.get("head_repository") or {}).get("full_name") != repository or
-                  run.get("event") != "workflow_dispatch" or run.get("status") != "completed" or
-                  run.get("path") != ".github/workflows/benchmark.yml"):
-              raise SystemExit("Resume requires this repository's completed timing workflow run")
-          revision = run.get("head_sha", "")
-          if not re.fullmatch(r"[0-9a-f]{40}", revision):
-              raise SystemExit("Continuation run does not identify an exact source revision")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"head_sha={revision}\n")
-          PY
       - name: Restore previous checkpoints
-        if: inputs.resume_run_id != '' && !inputs.setup_only
+        if: inputs.mode == 'resume'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: ${{ inputs.resume_artifact || format('results-{0}', matrix.os) }}
-          run-id: ${{ inputs.resume_run_id }}
+          name: ${{ fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] }}
+          run-id: ${{ needs.matrix.outputs.resume_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/benchmark-results
-      - name: Resolve benchmark source revision
-        id: benchmark-source
-        shell: bash
-        env:
-          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
-          SETUP_ONLY: ${{ inputs.setup_only }}
-          RESUME_HEAD_SHA: ${{ steps.continuation-run.outputs.head_sha }}
-        run: |
-          python - <<'PY'
-          import json, os, re
-          from pathlib import Path
-          repository = os.environ["GITHUB_REPOSITORY"]
-          directory = Path(os.environ["RUNNER_TEMP"]) / "benchmark-results"
-          revision = os.environ["GITHUB_SHA"]
-          if os.environ["RESUME_RUN_ID"] and os.environ["SETUP_ONLY"] != "true":
-              manifest = directory / "manifest.json"
-              status_file = directory / "status.json"
-              if not manifest.is_file() or not status_file.is_file():
-                  raise SystemExit("Continuation artifact lacks a timing manifest or status")
-              status = json.loads(status_file.read_text())
-              if len(list((directory / "records").glob("*.json"))) != status.get("recorded"):
-                  raise SystemExit("Continuation artifact must contain every recorded case")
-              sidecar = directory / "benchmark-source.json"
-              if sidecar.is_file():
-                  if sidecar.stat().st_size > 16384:
-                      raise SystemExit("Continuation source metadata is too large")
-                  source = json.loads(sidecar.read_text())
-                  if source.get("schema_version") != 1 or source.get("repository") != repository:
-                      raise SystemExit("Continuation source metadata belongs to a different repository or schema")
-                  revision = source.get("source_ref", "")
-              else:
-                  revision = os.environ["RESUME_HEAD_SHA"]
-          if not re.fullmatch(r"[0-9a-f]{40}", revision):
-              raise SystemExit("Benchmark source must be an exact commit SHA")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"source_ref={revision}\n")
-          PY
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ steps.benchmark-source.outputs.source_ref }}
-      - name: Record benchmark source provenance
-        if: ${{ !inputs.setup_only }}
+          ref: ${{ needs.matrix.outputs.source_ref }}
+      - name: Write resolved campaign configuration
         shell: bash
         env:
-          SOURCE_REF: ${{ steps.benchmark-source.outputs.source_ref }}
-          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          CONFIGURATION_JSON: ${{ needs.matrix.outputs.configuration }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["RUNNER_TEMP"]) / "benchmark-config.json"
+          path.write_text(json.dumps(json.loads(os.environ["CONFIGURATION_JSON"]), indent=2) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"BENCHMARK_CONFIG={path}\n")
+          PY
+      - name: Install memory observer
+        shell: bash
+        run: python -m pip install psutil==7.2.2
+      - name: Record benchmark source provenance
+        if: ${{ inputs.mode != 'prepare' }}
+        shell: bash
+        env:
+          SOURCE_REF: ${{ needs.matrix.outputs.source_ref }}
+          RESUME_RUN_ID: ${{ needs.matrix.outputs.resume_run_id }}
         run: |
           python - <<'PY'
           import json, os, subprocess
@@ -220,24 +202,24 @@ jobs:
           PY
       - name: Check timing selection
         shell: bash
-        run: python src/benchmark.py --plan --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS"
+        run: python src/benchmark.py --plan --config "$BENCHMARK_CONFIG" --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS"
       - name: Publish setup status
-        if: ${{ !inputs.setup_only }}
+        if: ${{ inputs.mode != 'prepare' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo '[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/)' >> "$GITHUB_STEP_SUMMARY"
-          python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
+          python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
       - name: Restore matching numerical references
-        if: ${{ !inputs.setup_only }}
+        if: ${{ inputs.mode != 'prepare' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/reference_store.py restore --profile "$PROFILE" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$BENCHMARK_REFERENCES"
+        run: python src/reference_store.py restore --config "$BENCHMARK_CONFIG" --profile "$PROFILE" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$BENCHMARK_REFERENCES"
       - name: Identify R cache platform
-        if: contains(inputs.software, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts')
         id: r-cache-platform
         shell: bash
         run: |
@@ -254,11 +236,11 @@ jobs:
               output.write(f"image={image}\n")
           PY
       - name: Prepare Linux R cache destination
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
         shell: bash
         run: sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" /opt/R/4.5.2
       - name: Restore Linux R 4.5.2
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
         id: r-runtime-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
@@ -267,7 +249,7 @@ jobs:
             ${{ runner.temp }}/r-runtime-deps/*.deb
           key: r-runtime-v2-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2
       - name: Restore cached R system libraries
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit == 'true'
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit == 'true'
         timeout-minutes: 2
         shell: bash
         run: |
@@ -282,7 +264,7 @@ jobs:
               subprocess.run(command + ["--configure", "--pending"], check=True, timeout=45)
           PY
       - name: Validate existing Linux R
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
         id: r-reuse
         shell: bash
         run: |
@@ -307,7 +289,7 @@ jobs:
                   output.write(str(executable.parent) + "\n")
           PY
       - name: Install minimal Linux R runtime
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-reuse.outputs.usable != 'true'
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-reuse.outputs.usable != 'true'
         timeout-minutes: 5
         shell: bash
         run: |
@@ -358,14 +340,14 @@ jobs:
           PY
       - name: Set up R 4.5.2 environment
         uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
-        if: contains(inputs.software, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts')
         timeout-minutes: 5
         with:
           r-version: '4.5.2'
           install-r: ${{ runner.os != 'Linux' }}
           use-public-rspm: true
       - name: Verify requested R runtime
-        if: contains(inputs.software, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts')
         timeout-minutes: 1
         shell: Rscript {0}
         run: |
@@ -373,7 +355,7 @@ jobs:
           library(stats)
           cat(R.version.string, "\n")
       - name: Save Linux R immediately
-        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
@@ -382,14 +364,14 @@ jobs:
             ${{ runner.temp }}/r-runtime-deps/*.deb
           key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
       - name: Restore R package library
-        if: contains(inputs.software, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts')
         id: r-library-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
           key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml') }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
-        if: contains(inputs.software, 'acousticscattering') || contains(inputs.software, 'liquid_spheroid')
+        if: contains(env.SOFTWARE, 'acousticscattering') || contains(env.SOFTWARE, 'liquid_spheroid')
         timeout-minutes: 5
         with:
           version: '1.12.1'
@@ -446,7 +428,7 @@ jobs:
         shell: bash
         env:
           BENCHMARK_R_LIBRARY_CACHE_HIT: ${{ steps.r-library-cache.outputs.cache-hit }}
-          SETUP_ONLY: ${{ inputs.setup_only }}
+          SETUP_ONLY: ${{ inputs.mode == 'prepare' }}
         run: |
           arguments=(src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE")
           if [[ "$SETUP_ONLY" == "true" ]]; then
@@ -454,11 +436,11 @@ jobs:
           fi
           python "${arguments[@]}"
       - name: Check prepared R package library
-        if: contains(inputs.software, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts')
         id: r-library-ready
         shell: bash
         env:
-          SETUP_ONLY: ${{ inputs.setup_only }}
+          SETUP_ONLY: ${{ inputs.mode == 'prepare' }}
         run: |
           python - <<'PY'
           import json, os
@@ -479,7 +461,7 @@ jobs:
           path: ${{ runner.temp }}/benchmark-env/r-library
           key: ${{ steps.r-library-cache.outputs.cache-primary-key }}
       - name: Prepare bounded timing controller
-        if: ${{ !inputs.setup_only }}
+        if: ${{ inputs.mode != 'prepare' }}
         shell: bash
         run: |
           cat > "$RUNNER_TEMP/benchmark-controller.py" <<'PY'
@@ -491,15 +473,17 @@ jobs:
           import time
 
           sys.path.insert(0, str(Path.cwd() / "src"))
-          from benchmark import build_cases, read_json
+          from benchmark import atomic_json, build_cases, read_json
           from publish_progress import GitHub, compact_payload, publish
+          from reference_store import join_directory, restore_cache
+          from references import export_references
 
           def main():
               duration = float(sys.argv[1])
               if duration <= 0:
                   raise ValueError("Controller duration must be positive")
               directory = Path(os.environ["RUNNER_TEMP"]) / "benchmark-results"
-              configuration = read_json("benchmark.json")
+              configuration = read_json(os.environ["BENCHMARK_CONFIG"])
               timeout = configuration["case_timeout_seconds"]
               deadline = float(os.environ["BENCHMARK_DEADLINE"])
               stop = time.monotonic() + duration
@@ -511,12 +495,44 @@ jobs:
                   path = directory / "status.json"
                   return read_json(path) if path.is_file() else {"recorded": 0}
 
+              def refresh_references():
+                  reference_path = os.environ.get("BENCHMARK_REFERENCES")
+                  manifest_path = directory / "manifest.json"
+                  if not reference_path or not manifest_path.is_file() or not (directory / "results.json").is_file():
+                      return
+                  jobs = read_json(manifest_path).get("reference_requests", [])
+                  previous = read_json(reference_path).get("references", []) if Path(reference_path).is_file() else []
+                  if not jobs or len(previous) >= len(jobs):
+                      return
+                  poll_path = Path(os.environ["RUNNER_TEMP"]) / "reference-poll.json"
+                  poll = read_json(poll_path) if poll_path.is_file() else {}
+                  if time.time() - poll.get("checked_at", 0) < 120:
+                      return
+                  poll["checked_at"] = time.time()
+                  atomic_json(poll_path, poll)
+                  try:
+                      api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], timeout_seconds=30)
+                      head = api.request("GET", "/git/ref/heads/reference-data")["object"]["sha"]
+                      if head == poll.get("head"):
+                          return
+                      cache = Path(os.environ["RUNNER_TEMP"]) / "reference-cache"
+                      restore_cache(api, jobs, cache)
+                      records = export_references(jobs, cache, Path(reference_path))["references"]
+                      if len(records) > len(previous):
+                          join_directory(directory, Path(reference_path))
+                          print(f"Updated reference comparisons: {len(records)}/{len(jobs)} qualified", flush=True)
+                      poll["head"] = head
+                      atomic_json(poll_path, poll)
+                  except Exception as error:
+                      print(f"Reference refresh deferred ({type(error).__name__})", file=sys.stderr, flush=True)
+
               def publish_snapshot(*, first=False, force=False):
                   nonlocal next_publish, retry_after
                   now = time.monotonic()
                   if not force and (now < retry_after or (not first and now < next_publish)):
                       return
                   try:
+                      refresh_references()
                       result_path = directory / "results.json"
                       rows = read_json(result_path) if result_path.is_file() else [
                           dict(case, status="pending") for case in build_cases(configuration,
@@ -538,7 +554,7 @@ jobs:
               worker_environment = os.environ.copy()
               for key in ("GITHUB_TOKEN", "GH_TOKEN"):
                   worker_environment.pop(key, None)
-              command = [sys.executable, "src/benchmark.py", "--profile", os.environ["PROFILE"],
+              command = [sys.executable, "src/benchmark.py", "--config", os.environ["BENCHMARK_CONFIG"], "--profile", os.environ["PROFILE"],
                   "--software", os.environ["SOFTWARE"], "--repetitions", os.environ["REPETITIONS"],
                   "--runtime", str(Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/runtime.json"),
                   "--output", str(directory), "--budget-seconds", "2700"]
@@ -565,14 +581,14 @@ jobs:
               main()
           PY
       - name: Benchmark chunk 1
-        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 1
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-1
@@ -587,21 +603,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 2
-        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 2
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-2
@@ -616,21 +632,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 3
-        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 3
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-3
@@ -645,21 +661,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 4
-        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 4
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-4
@@ -674,21 +690,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark remaining campaign budget
-        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python "$RUNNER_TEMP/benchmark-controller.py" 2700
       - name: Save checkpoint 5
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-5
@@ -703,14 +719,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Final data and logs
-        if: ${{ always() && !inputs.setup_only }}
+        if: ${{ always() && inputs.mode != 'prepare' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: results-${{ matrix.os }}
@@ -745,9 +761,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Publish final progress
-        if: ${{ always() && !inputs.setup_only }}
+        if: ${{ always() && inputs.mode != 'prepare' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed
+        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed

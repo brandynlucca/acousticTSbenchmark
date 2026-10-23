@@ -14,6 +14,7 @@ def render_report(path, rows, status, repository=None):
 body{font:16px system-ui,sans-serif;color:#20252b;background:#fafaf8;margin:28px auto;max-width:1300px;padding:0 20px}
 h1{font-size:25px}label{margin-right:24px}select{font:inherit;padding:5px}a{color:#005b88}
 #panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr));gap:16px}
+#panels.paired{grid-template-columns:1fr}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr));gap:14px}h3{font-size:14px;font-weight:500;margin:12px 0 0}.empty{fill:#626a70}
 section{background:white;border:1px solid #d6dadb;padding:14px}h2{font-size:17px;margin:0}
 svg{width:100%;height:auto}text{font:12px system-ui}table{border-collapse:collapse;margin-top:20px;width:100%;font-size:14px}
 th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{display:inline-block;margin:10px 16px 12px 0}
@@ -29,10 +30,12 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Aspect ratio <select id="aspect"></select></label>
+<label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
-<label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
+<label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
 <div id="legend"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
+<p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage by software and boundary</h2><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
@@ -41,7 +44,7 @@ const repository=data.repository;
 const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
 const boundaryLabels={rigid:'Fixed rigid',pressure_release:'Pressure release',liquid:'Liquid-filled',gas:'Gas-filled'};
-const aspect=document.getElementById('aspect'),metric=document.getElementById('metric'),axis=document.getElementById('axis');
+const aspect=document.getElementById('aspect'),metric=document.getElementById('metric'),axis=document.getElementById('axis'),layout=document.getElementById('layout');
 function updateAspects(){
  const previous=aspect.value;aspect.replaceChildren();
  const ratios=data.aspect_ratios||[...new Set(rows.map(r=>r.aspect_ratio))];
@@ -51,7 +54,7 @@ function updateAspects(){
  if([...aspect.options].some(o=>o.value===previous))aspect.value=previous;
 }
 updateAspects();
-try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;}catch(e){}
+try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;layout.value=localStorage.getItem('benchmark-layout')||'paired';}catch(e){}
 function updateStatus(){
  const s=data.status,counts=s.outcomes||{},success=counts.ok||0,pending=counts.pending??Math.max(0,(s.planned||0)-(s.recorded||0));
  const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
@@ -60,53 +63,95 @@ function updateStatus(){
 }
 updateStatus();
 const legend=document.getElementById('legend');
-for(const key of Object.keys(colors)){const s=document.createElement('span');s.style.color=colors[key];s.textContent='● '+labels[key];legend.append(s);}
-const angles=document.createElement('span');angles.textContent='0° solid · 37° dashed · 90° dotted';legend.append(angles);
+for(const key of Object.keys(colors)){const s=document.createElement('span');s.dataset.software=key;s.style.color=colors[key];s.textContent='● '+labels[key];legend.append(s);}
+const angles=document.createElement('span');legend.append(angles);
 function svgElement(name,attrs={},text){const e=document.createElementNS('http://www.w3.org/2000/svg',name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;}
 function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2?values[(n-1)/2]:(values[n/2-1]+values[n/2])/2;}
+const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_bytes:'Additional RAM per prediction (MiB)',ts_db:'TS (dB)',delta_ts_db:'ΔTS (dB, software minus reference)'};
+function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
+function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
+function formatted(value){return Math.abs(value)>0&&Math.abs(value)<.01?value.toExponential(2):value.toFixed(2);}
+function extentFor(values,zero=false){let lo=values.length?values.reduce((a,b)=>Math.min(a,b)):0,hi=values.length?values.reduce((a,b)=>Math.max(a,b)):1;if(zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}if(lo===hi){lo-=.5;hi+=.5;}const padding=(hi-lo)*.08;return [lo-padding,hi+padding];}
+function dashFor(angle){return angle===0?'':angle===37?'8 4':angle===90?'2 4':'8 3 2 3';}
+function point(svg,x,y,angle,color,title,scatter=false){
+ let node;
+ if(scatter&&angle===37)node=svgElement('path',{d:`M ${x} ${y-4} L ${x-4} ${y+3} L ${x+4} ${y+3} Z`,fill:color});
+ else if(scatter&&angle===90)node=svgElement('rect',{x:x-3,y:y-3,width:6,height:6,fill:color});
+ else node=svgElement('circle',{cx:x,cy:y,r:scatter?3.3:2.5,fill:color});
+ node.classList.add('observation');node.append(svgElement('title',{},title));svg.append(node);
+}
+function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=false){
+ const chart=document.createElement('div'),heading=document.createElement('h3');heading.textContent=title;chart.append(heading);parent.append(chart);
+ const svg=svgElement('svg',{viewBox:'0 0 560 300',role:'img','aria-label':label});chart.append(svg);
+ const x=v=>70+450*(v-xrange[0])/(xrange[1]-xrange[0]),y=v=>250-220*(v-yrange[0])/(yrange[1]-yrange[0]);
+ for(let tick=0;tick<=4;tick++){
+  const xx=70+450*tick/4,yy=250-220*tick/4,xv=xrange[0]+(xrange[1]-xrange[0])*tick/4,yv=yrange[0]+(yrange[1]-yrange[0])*tick/4;
+  svg.append(svgElement('line',{x1:70,x2:520,y1:yy,y2:yy,stroke:'#e3e5e5'}));
+  svg.append(svgElement('text',{x:xx,y:272,'text-anchor':'middle'},formatted(xlog?10**xv:xv)));
+  svg.append(svgElement('text',{x:63,y:yy+4,'text-anchor':'end'},formatted(ylog?10**yv:yv)));
+ }
+ svg.append(svgElement('text',{x:295,y:295,'text-anchor':'middle'},xlabel));
+ return {svg,x,y};
+}
 function render(){
- try{localStorage.setItem('benchmark-aspect',aspect.value);localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);}catch(e){}
+ if(layout.value!=='single'&&!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))metric.value='elapsed_seconds';
+ axis.disabled=layout.value==='tradeoff';
+ try{localStorage.setItem('benchmark-aspect',aspect.value);localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
  const selected=rows.filter(r=>r.aspect_ratio===Number(aspect.value)), field=metric.value;
  const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db));
+ const selectedSoftware=new Set([...selected.map(r=>r.software),...(data.coverage||[]).map(r=>r.software)]);
+ for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
+ document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${compared.length} of ${measured.length} successful measurements have a matched, convergence-checked reference. References run separately and are reused across platforms. Missing references leave gaps in ΔTS.`;
  const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
- const panels=document.getElementById('panels');panels.replaceChildren();
+ const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
+ const selectedAngles=data.incidences_deg||[...new Set(selected.map(r=>r.incidence_deg))].sort((a,b)=>a-b);
+ angles.textContent=layout.value==='tradeoff'?selectedAngles.map(a=>`${a}° ${a===37?'triangle':a===90?'square':'circle'}`).join(' · '):selectedAngles.map(a=>`${a}° ${a===0?'solid':a===37?'dashed':a===90?'dotted':'dash-dot'}`).join(' · ');
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':field==='delta_ts_db'&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':'';
+ plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
  let low=axisValues.get(allFreq[0]),high=axisValues.get(allFreq.at(-1));
  const extent=data.axes?.[aspect.value]?.[axis.value];if(extent){low=extent[0];high=extent[1];if(axis.value==='frequency_hz'){low/=1000;high/=1000;}}
  if(low===high){const margin=Math.abs(low)*.1||.5;low-=margin;high+=margin;}
- const transform=v=>field==='elapsed_seconds'?Math.log10(v):v;
- const valid=selected.filter(r=>r.status==='ok'&&Number.isFinite(r[field])&&(field!=='elapsed_seconds'||r[field]>0));
- const values=valid.map(r=>transform(r[field]));let ymin=values.length?values.reduce((a,b)=>Math.min(a,b)):0,ymax=values.length?values.reduce((a,b)=>Math.max(a,b)):1;
  const grouped=new Map();
- for(const row of valid){const key=JSON.stringify([row.boundary,row.software,row.incidence_deg,row.frequency_hz]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(row);}
- if(ymin===ymax){ymin-=0.5;ymax+=0.5;}const pad=(ymax-ymin)*.08;ymin-=pad;ymax+=pad;
- for(const boundary of ['rigid','pressure_release','liquid','gas']){
+ for(const row of measured){const key=JSON.stringify([row.boundary,row.software,row.incidence_deg,row.frequency_hz]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(row);}
+ const visibleBoundaries=new Set([...selected.map(r=>r.boundary),...(data.coverage||[]).filter(r=>r.aspect_ratio===Number(aspect.value)).map(r=>r.boundary)]);
+ for(const boundary of Object.keys(boundaryLabels).filter(b=>visibleBoundaries.has(b))){
   const section=document.createElement('section'),title=document.createElement('h2');title.textContent=boundaryLabels[boundary];section.append(title);
-  const svg=svgElement('svg',{viewBox:'0 0 560 300',role:'img','aria-label':`${title.textContent} ${field} against frequency`});section.append(svg);panels.append(section);
-  const x=f=>65+460*(axisValues.get(f)-low)/(high-low||1), y=v=>255-225*(transform(v)-ymin)/(ymax-ymin);
-  for(let tick=0;tick<=4;tick++){
-   const xx=65+460*tick/4,yy=255-225*tick/4,v=ymin+(ymax-ymin)*tick/4;
-   svg.append(svgElement('line',{x1:65,x2:525,y1:yy,y2:yy,stroke:'#e3e5e5'}));
-   const xv=low+(high-low)*tick/4;
-   svg.append(svgElement('text',{x:xx,y:275,'text-anchor':'middle'},Math.abs(xv)>0&&Math.abs(xv)<.01?xv.toExponential(2):xv.toFixed(2)));
-   svg.append(svgElement('text',{x:58,y:yy+4,'text-anchor':'end'},field==='elapsed_seconds'?(10**v).toPrecision(2):v.toFixed(2)));
-  }
-  svg.append(svgElement('text',{x:295,y:295,'text-anchor':'middle'},axis.options[axis.selectedIndex].text));
-  for(const software of Object.keys(colors))for(const angle of [...new Set(selected.map(r=>r.incidence_deg))]){
-   let path='';
-   for(const frequency of allFreq){
-    const observations=grouped.get(JSON.stringify([boundary,software,angle,frequency]))||[];
-    if(!observations.length){path='';continue;}
-    const value=median(observations.map(r=>r[field]));const xx=x(frequency),yy=y(value);
-    if(path)svg.append(svgElement('path',{d:`M ${path} L ${xx} ${yy}`,fill:'none',stroke:colors[software],'stroke-width':1.7,'stroke-dasharray':angle===37?'8 4':angle===90?'2 4':''}));
-    path=`${xx} ${yy}`;
-    const dot=svgElement('circle',{cx:xx,cy:yy,r:2.5,fill:colors[software]});
-    dot.append(svgElement('title',{},`${labels[software]}, ${angle}°, ${frequency/1000} kHz: ${value}, n=${observations.length}`));svg.append(dot);
+  const charts=document.createElement('div');charts.className='charts';section.append(charts);panels.append(section);
+  if(layout.value==='tradeoff'){
+   const matched=measured.filter(r=>validValue(r,field)&&validValue(r,'delta_ts_db'));
+   const transform=v=>field==='elapsed_seconds'?Math.log10(v):v;
+   const xr=extentFor(matched.map(r=>transform(valueFor(r,field)))),yr=extentFor(matched.map(r=>Math.abs(r.delta_ts_db)),true);yr[0]=0;
+   const {svg,x,y}=chartFrame(charts,'Absolute ΔTS (dB)',`${title.textContent}: cost versus absolute ΔTS`,measures[field],xr,yr,field==='elapsed_seconds');
+   let count=0;
+   for(const observations of grouped.values()){
+    const pairs=observations.filter(r=>r.boundary===boundary&&validValue(r,field)&&validValue(r,'delta_ts_db'));if(!pairs.length)continue;
+    const row=pairs[0],cost=median(pairs.map(r=>valueFor(r,field))),error=median(pairs.map(r=>Math.abs(r.delta_ts_db)));
+    point(svg,x(transform(cost)),y(error),row.incidence_deg,colors[row.software],`${labels[row.software]}, ${row.incidence_deg}°, ${row.frequency_hz/1000} kHz: ${formatted(cost)} ${field==='elapsed_seconds'?'s':'MiB'}, |ΔTS| ${formatted(error)} dB, n=${pairs.length}`,true);count++;
    }
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},'Waiting for matched cost and reference data'));
+   continue;
+  }
+  for(const measure of layout.value==='paired'?[field,'delta_ts_db']:[field]){
+   const transform=v=>measure==='elapsed_seconds'?Math.log10(v):v;
+   const valid=measured.filter(r=>validValue(r,measure)),yr=extentFor(valid.map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
+   const {svg,x,y}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
+   if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
+   let count=0;
+   for(const software of Object.keys(colors))for(const angle of selectedAngles){
+    let path='';
+    for(const frequency of allFreq){
+     const observations=(grouped.get(JSON.stringify([boundary,software,angle,frequency]))||[]).filter(r=>validValue(r,measure));
+     if(!observations.length){path='';continue;}
+     const value=median(observations.map(r=>valueFor(r,measure))),xx=x(axisValues.get(frequency)),yy=y(transform(value));
+     if(path)svg.append(svgElement('path',{d:`M ${path} L ${xx} ${yy}`,fill:'none',stroke:colors[software],'stroke-width':1.7,'stroke-dasharray':dashFor(angle)}));
+     path=`${xx} ${yy}`;point(svg,xx,yy,angle,colors[software],`${labels[software]}, ${angle}°, ${frequency/1000} kHz: ${formatted(value)}, n=${observations.length}`);count++;
+    }
+   }
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?'Waiting for qualified reference comparisons':'Waiting for measurements'));
   }
  }
  const table=document.getElementById('coverage');table.replaceChildren();
@@ -120,7 +165,7 @@ function render(){
   const tr=document.createElement('tr');for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
-aspect.addEventListener('change',render);metric.addEventListener('change',render);axis.addEventListener('change',render);render();
+aspect.addEventListener('change',render);metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
 if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
  document.getElementById('livebar').hidden=false;document.getElementById('connection').hidden=false;

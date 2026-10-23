@@ -72,6 +72,18 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(payload["incidences_deg"], [0, 37, 90])
         self.assertEqual(payload["status_counts"], {"ok": 1, "setup_timeout": 1})
 
+    def test_prediction_memory_preserves_zero_and_missing_observations(self):
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, [
+            dict(status="ok", memory_delta_peak_bytes=0, memory_baseline_rss_bytes=1048576,
+                 memory_peak_rss_bytes=1048576, memory_status="ok", memory_samples=2,
+                 memory_method="prediction_incremental_process_tree_rss", memory_sample_interval_seconds=.01),
+            dict(status="ok", memory_delta_peak_bytes=None, memory_status="unavailable")])
+        self.assertEqual(payload["rows"][0]["memory_delta_peak_bytes"], 0)
+        self.assertEqual(payload["rows"][0]["memory_baseline_rss_bytes"], 1048576)
+        self.assertEqual(payload["rows"][0]["memory_sample_interval_seconds"], .01)
+        self.assertIsNone(payload["rows"][1]["memory_delta_peak_bytes"])
+        self.assertEqual(payload["rows"][1]["memory_status"], "unavailable")
+
     def test_coverage_retains_pending_only_groups_and_interior_frequency_gaps(self):
         rows = [dict(software="acousticts", boundary="gas", aspect_ratio=10,
                      frequency_hz=frequency, incidence_deg=90, status=status, elapsed_seconds=elapsed)

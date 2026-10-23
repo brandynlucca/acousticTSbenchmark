@@ -16,6 +16,29 @@ import traceback
 from types import SimpleNamespace
 
 
+def memory_boundary(case, phase):
+    """Acknowledge memory samples outside the public prediction timer."""
+    signal = case.get(f"memory_{phase}_path")
+    if not signal:
+        return
+    try:
+        if phase == "ready":
+            Path(signal).write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        else:
+            Path(signal).touch()
+        acknowledgement = Path(case[f"memory_{phase}_ack_path"])
+        deadline = time.monotonic() + 5
+        while not acknowledgement.exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Memory sampler did not acknowledge the prediction boundary")
+            time.sleep(.01)
+    except Exception:
+        try:
+            Path(case["memory_failed_path"]).touch()
+        except Exception:
+            pass
+
+
 class NoPlot:
     """Disable upstream plotting without changing numerical operations."""
 
@@ -125,20 +148,24 @@ def main():
             solve(warm)
             warmup_seconds = time.perf_counter() - before
         result["warmup_seconds"] = warmup_seconds
+        memory_boundary(case, "ready")
         Path(case["timing_started_path"]).write_text(json.dumps({"started_epoch": time.time()}))
         started = time.perf_counter()
         prediction = solve(case)
         result["elapsed_seconds"] = time.perf_counter() - started
+        memory_boundary(case, "done")
         result.update(prediction)
         if not math.isfinite(result["ts_db"]):
             result.update(status="numerical_error", ts_db=None, message="Nonfinite public TS")
         else:
             result["status"] = "ok"
     except Exception as error:
-        traceback.print_exc()
         if started is not None:
-            result["elapsed_seconds"] = time.perf_counter() - started
+            if result["elapsed_seconds"] is None:
+                result["elapsed_seconds"] = time.perf_counter() - started
+            memory_boundary(case, "done")
             result["status"] = "numerical_error"
+        traceback.print_exc()
         result["message"] = f"{type(error).__name__}: {error}"
     output.write_text(json.dumps(result, allow_nan=False, indent=2) + "\n", encoding="utf-8")
 

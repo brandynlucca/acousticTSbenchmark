@@ -1,6 +1,32 @@
 # Single-case worker. All native output goes to the supervisor's process log.
 using JSON3, LinearAlgebra, Printf, DelimitedFiles, SHA
 
+function memory_boundary(request, phase)
+    signal = get(request, "memory_$(phase)_path", nothing)
+    signal === nothing && return
+    try
+        if phase == "ready"
+            open(signal, "w") do io
+                JSON3.write(io, Dict("pid" => getpid()))
+            end
+        else
+            touch(signal)
+        end
+        acknowledgement = request["memory_$(phase)_ack_path"]
+        deadline = time_ns() + 5_000_000_000
+        while !isfile(acknowledgement)
+            time_ns() >= deadline && error("Memory sampler acknowledgement timed out")
+            sleep(.01)
+        end
+    catch
+        try
+            touch(request["memory_failed_path"])
+        catch
+        end
+    end
+    nothing
+end
+
 function scattering_package_metadata()
     # Julia 1.12 also ages newly imported global bindings. Read the module
     # after the dynamic import in the current world, outside the solve timer.
@@ -295,6 +321,7 @@ function worker(request, output_path)
         GC.gc()
         work_dir = dirname(abspath(output_path))
         software == "liquid_spheroid" && mkpath(joinpath(work_dir, "data"))
+        memory_boundary(request, "ready")
         phase = "solve"
         println("SOLVE ", request["frequency_hz"], " Hz, ", request["incidence_deg"], " deg")
         flush(stdout)
@@ -308,6 +335,7 @@ function worker(request, output_path)
             Base.invokelatest(calculate, request, controls)
         end
         answer["elapsed_seconds"] = (time_ns() - started) / 1e9
+        memory_boundary(request, "done")
         phase = "postprocess"
         answer["status"], answer["ts_db"] = value.status, value.ts_db
         if value.amplitude !== nothing
@@ -317,7 +345,10 @@ function worker(request, output_path)
         merge!(answer["diagnostics"], value.diagnostics)
         value.status != "ok" && (answer["message"] = "Finite-value or spatial convergence checks failed")
     catch exception
-        started !== nothing && (answer["elapsed_seconds"] = (time_ns() - started) / 1e9)
+        if started !== nothing
+            answer["elapsed_seconds"] === nothing && (answer["elapsed_seconds"] = (time_ns() - started) / 1e9)
+            memory_boundary(request, "done")
+        end
         detail = sprint(showerror, exception)
         nonconverged = occursin(r"(?i)did not converge|failed to converge|failed convergence|refinement budget", detail)
         answer["status"] = phase in ("setup", "warmup") ? "setup_error" :

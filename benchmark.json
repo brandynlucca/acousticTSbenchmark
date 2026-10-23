@@ -3,8 +3,8 @@
   "geometry": {"semimajor_m": 0.07, "aspect_ratios": [1.001, 1.01, 5, 10, 50, 100]},
   "incidences_deg": [0, 37, 90],
   "boundaries": ["rigid", "pressure_release", "liquid", "gas"],
-  "software": ["prol_spheroid", "acousticts", "echosms", "liquid_spheroid"],
-  "frequency": {"start_hz": 1000, "stop_hz": 200000, "step_hz": 2000, "include_stop": true},
+  "software": ["acousticts", "prol_spheroid"],
+  "frequency": {"start_hz": 1000, "stop_hz": 300000, "step_hz": 2000, "include_stop": true},
   "medium": {"density_kg_m3": 1026.8, "sound_speed_m_s": 1477.3},
   "materials": {
     "liquid": {"density_kg_m3": 1028.9, "sound_speed_m_s": 1480.3},

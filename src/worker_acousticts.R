@@ -1,6 +1,27 @@
 # One fresh public PSMS calculation. Runtime startup and a distinct warmup case
 # are outside elapsed_seconds. The supervisor owns process-tree timeouts.
 
+memory_boundary <- function(request, phase) {
+  signal <- request[[paste0("memory_", phase, "_path")]]
+  if (is.null(signal)) return(invisible(NULL))
+  tryCatch({
+    if (phase == "ready") {
+      jsonlite::write_json(list(pid = Sys.getpid()), signal, auto_unbox = TRUE)
+    } else {
+      if (!file.create(signal)) stop("Cannot signal memory boundary")
+    }
+    acknowledgement <- request[[paste0("memory_", phase, "_ack_path")]]
+    deadline <- proc.time()[["elapsed"]] + 5
+    while (!file.exists(acknowledgement)) {
+      if (proc.time()[["elapsed"]] >= deadline) stop("Memory sampler acknowledgement timed out")
+      Sys.sleep(0.01)
+    }
+  }, error = function(error) {
+    try(file.create(request$memory_failed_path), silent = TRUE)
+  })
+  invisible(NULL)
+}
+
 psms_controls <- function(request) {
   controls <- modifyList(list(precision = "quad", adaptive = TRUE,
                               simplify_Amn = FALSE), request$controls)
@@ -66,6 +87,7 @@ psms_worker <- function(request) {
       answer$warmup_seconds <- proc.time()[["elapsed"]] - warm_started
     }
     gc(verbose = FALSE)
+    memory_boundary(request, "ready")
     phase <- "solve"
     if (!is.null(request$timing_started_path)) {
       jsonlite::write_json(list(started_epoch = as.numeric(Sys.time()), phase = phase),
@@ -74,6 +96,7 @@ psms_worker <- function(request) {
     started <- proc.time()[["elapsed"]]
     value <- psms_calculation(request, controls)
     answer$elapsed_seconds <- proc.time()[["elapsed"]] - started
+    memory_boundary(request, "done")
     phase <- "postprocess"
     finite <- is.finite(value$ts_db) && is.finite(value$amplitude)
     answer$status <- if (finite) "ok" else "numerical_error"
@@ -86,7 +109,10 @@ psms_worker <- function(request) {
     warnings <<- c(warnings, conditionMessage(warning))
     invokeRestart("muffleWarning")
   }), error = function(error) {
-    if (!is.null(started)) answer$elapsed_seconds <<- proc.time()[["elapsed"]] - started
+    if (!is.null(started)) {
+      if (is.null(answer$elapsed_seconds)) answer$elapsed_seconds <<- proc.time()[["elapsed"]] - started
+      memory_boundary(request, "done")
+    }
     detail <- conditionMessage(error)
     answer$message <<- paste0(phase, ": ", detail)
     answer$status <<- if (phase %in% c("setup", "warmup")) "setup_error" else

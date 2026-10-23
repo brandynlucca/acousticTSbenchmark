@@ -1,6 +1,25 @@
 using Test
 include(joinpath(@__DIR__, "..", "src", "worker_reference.jl"))
 
+@testset "Prediction memory boundaries are optional and isolated" begin
+    mktempdir() do directory
+        request = Dict("memory_$(name)_path" => joinpath(directory, name)
+                       for name in ("ready", "ready_ack", "done", "done_ack", "failed"))
+        touch(request["memory_ready_ack_path"])
+        touch(request["memory_done_ack_path"])
+        memory_boundary(request, "ready")
+        @test JSON3.read(read(request["memory_ready_path"], String))["pid"] == getpid()
+        @test !isfile(request["memory_done_path"])
+        memory_boundary(request, "done")
+        @test isfile(request["memory_done_path"])
+        @test !isfile(request["memory_failed_path"])
+        @test memory_boundary(Dict(), "ready") === nothing
+        request["memory_ready_path"] = directory
+        @test memory_boundary(request, "ready") === nothing
+        @test isfile(request["memory_failed_path"])
+    end
+end
+
 @testset "Reference Fourier check uses public solve with expanded resolution" begin
     request = Dict("controls" => Dict("adaptive" => true, "target_tol" => .005, "mode_threads" => 4),
                    "policy" => Dict("spatial_tolerance_db" => .005, "mode_increment" => 8),

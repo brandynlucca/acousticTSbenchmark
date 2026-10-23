@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 import benchmark as b
+import process_control
 
 
 class CaseTests(unittest.TestCase):
@@ -24,10 +26,10 @@ class CaseTests(unittest.TestCase):
 
     def test_dense_grid_and_fixed_major_axis(self):
         grid = b.frequencies(self.config)
-        self.assertEqual((grid[0], grid[-1], len(grid)), (1000, 200000, 101))
+        self.assertEqual((grid[0], grid[-1], len(grid)), (1000, 300000, 151))
         self.assertTrue(all(y - x == 2000 for x, y in zip(grid[:-2], grid[1:-1])))
         cases = b.build_cases(self.config, "full", ["acousticts"])
-        self.assertEqual(len(cases), 4 * 6 * 3 * 101)
+        self.assertEqual(len(cases), 4 * 6 * 3 * 151)
         self.assertEqual({c["semimajor_m"] for c in cases}, {0.07})
         for case in cases:
             self.assertAlmostEqual(case["semimajor_m"] / case["semiminor_m"], case["aspect_ratio"])
@@ -38,13 +40,13 @@ class CaseTests(unittest.TestCase):
                 self.assertIsNone(case["hs"])
 
     def test_case_identity_tracks_physics_and_controls_separately(self):
-        case = b.build_cases(self.config)[0]
+        case = b.build_cases(self.config, software=["prol_spheroid"])[0]
         self.config["controls"][case["software"]]["linear_maxiter"] += 1
-        changed = b.build_cases(self.config)[0]
+        changed = b.build_cases(self.config, software=["prol_spheroid"])[0]
         self.assertNotEqual(case["case_id"], changed["case_id"])
         self.assertEqual(case["physical_id"], changed["physical_id"])
         self.config["medium"]["sound_speed_m_s"] += 1
-        different = b.build_cases(self.config)[0]
+        different = b.build_cases(self.config, software=["prol_spheroid"])[0]
         self.assertNotEqual(changed["physical_id"], different["physical_id"])
 
     def test_invalid_geometry_and_duplicate_selection(self):
@@ -87,11 +89,13 @@ class FileTests(unittest.TestCase):
         runtime = {"executables": {"echosms": [sys.executable]}}
         fixture = ROOT / "tests/worker_fixture.py"
         with patch.object(b, "command_for", side_effect=lambda c, r, q, s: [sys.executable, str(fixture), str(q), str(s)]):
-            result = b.measure(self.case, runtime, self.path / "worker", 3)
+            # Windows process-gate and interpreter startup can exceed 3 s.
+            # Allow startup to finish so this tests a timeout during the solve.
+            result = b.measure(self.case, runtime, self.path / "worker", 10)
         self.assertEqual(result["status"], "timeout")
         self.assertIsNone(result["elapsed_seconds"])
         self.assertGreater(result["solve_lower_bound_seconds"], 0)
-        self.assertLess(result["wall_seconds"], 8)
+        self.assertLess(result["wall_seconds"], 15)
 
     def test_setup_timeout_is_not_a_solve_time(self):
         self.case["controls"] = {"behavior": "startup_sleep"}
@@ -121,6 +125,11 @@ class FileTests(unittest.TestCase):
             args.max_cases = None
             b.run(args)
             b.run(args)
+            self.assertEqual(measure.call_count, 3)
+            changed_observer = dict(b.memory_provenance(), psutil_version="different-observer-version")
+            with patch.object(b, "memory_provenance", return_value=changed_observer):
+                with self.assertRaisesRegex(ValueError, "Resume refused"):
+                    b.run(args)
             self.assertEqual(measure.call_count, 3)
             self.config["geometry"]["semimajor_m"] = 0.08
             b.atomic_json(config_path, self.config)
@@ -177,6 +186,71 @@ class FileTests(unittest.TestCase):
             result = b.measure(self.case, runtime, self.path / "worker", 10)
         self.assertEqual(result["status"], "setup_error")
         launch.assert_called_once()
+
+    def memory_fixture(self, behavior, timeout=8):
+        self.case["controls"] = {"behavior": behavior}
+        fixture = ROOT / "tests/worker_fixture.py"
+        with patch.object(b, "command_for", side_effect=lambda c, r, q, s: [sys.executable, str(fixture), str(q), str(s)]):
+            return b.measure(self.case, {}, self.path / "worker", timeout)
+
+    @unittest.skipIf(process_control.psutil is None, "psutil is not installed")
+    def test_prediction_memory_excludes_warmup_and_postprocessing_even_for_fast_calls(self):
+        result = self.memory_fixture("memory_fast")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["memory_status"], "ok", result)
+        self.assertGreater(result["memory_baseline_rss_bytes"], 32 * 1024 * 1024)
+        self.assertGreater(result["memory_delta_peak_bytes"], 24 * 1024 * 1024)
+        self.assertLess(result["memory_delta_peak_bytes"], 80 * 1024 * 1024)
+        self.assertEqual(result["memory_delta_peak_bytes"],
+                         result["memory_peak_rss_bytes"] - result["memory_baseline_rss_bytes"])
+        self.assertGreaterEqual(result["memory_samples"], 1)
+        self.assertEqual(result["memory_method"], "prediction_incremental_process_tree_rss")
+        self.assertEqual(result["memory_sample_interval_seconds"], .01)
+        self.assertFalse(any(t.name == "prediction-memory" for t in threading.enumerate()))
+
+    @unittest.skipIf(process_control.psutil is None, "psutil is not installed")
+    def test_prediction_memory_records_peak_of_allocation_freed_before_return(self):
+        result = self.memory_fixture("memory_release")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["memory_status"], "ok", result)
+        self.assertGreater(result["memory_delta_peak_bytes"], 24 * 1024 * 1024)
+        self.assertLess(result["memory_delta_peak_bytes"], 80 * 1024 * 1024)
+
+    @unittest.skipIf(process_control.psutil is None, "psutil is not installed")
+    def test_prediction_memory_includes_native_style_child_and_timeout_is_censored(self):
+        result = self.memory_fixture("memory_child")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["memory_status"], "ok", result)
+        self.assertGreater(result["memory_delta_peak_bytes"], 40 * 1024 * 1024)
+        # Allow for three interpreter startups on Windows before testing the
+        # actual timeout. Production deadlines are independent of this fixture.
+        result = self.memory_fixture("memory_child_timeout", timeout=10)
+        self.assertEqual(result["status"], "timeout", result)
+        self.assertEqual(result["memory_status"], "censored", result)
+        self.assertIsNone(result["elapsed_seconds"])
+        self.assertGreater(result["memory_delta_peak_bytes"], 40 * 1024 * 1024)
+        for pid in b.read_json(self.path / "worker/child-pids.json"):
+            try:
+                process = process_control.psutil.Process(pid)
+            except process_control.psutil.NoSuchProcess:
+                continue
+            self.assertEqual(process.status(), process_control.psutil.STATUS_ZOMBIE)
+        self.assertFalse(any(t.name == "prediction-memory" for t in threading.enumerate()))
+
+    def test_missing_or_failed_memory_sampler_never_fails_the_prediction(self):
+        with patch.object(process_control, "psutil", None):
+            result = self.memory_fixture("memory_fast")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["memory_status"], "unavailable")
+        self.assertIsNone(result["memory_delta_peak_bytes"])
+        if process_control.psutil is not None:
+            with patch.object(process_control.PredictionMemory, "_rss", side_effect=OSError("fixture access denied")):
+                result = self.memory_fixture("memory_fast")
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(result["memory_status"], "sampling_error", result)
+            self.assertIsNone(result["memory_delta_peak_bytes"])
+            self.assertIsNone(result["memory_peak_rss_bytes"])
+        self.assertFalse(any(t.name == "prediction-memory" for t in threading.enumerate()))
 
 
 class ProgressTests(unittest.TestCase):
@@ -298,6 +372,7 @@ class CampaignWorkflowTests(unittest.TestCase):
             GITHUB_REPOSITORY="owner/repo", GITHUB_TOKEN="publication-only", GH_TOKEN="also-private",
             BENCHMARK_PLATFORM="ubuntu-latest", GITHUB_RUN_ID="456", GITHUB_RUN_ATTEMPT="1",
             PROFILE="pilot", SOFTWARE="echosms", REPETITIONS="1")
+        self.environment["BENCHMARK_CONFIG"] = str(ROOT / "benchmark.json")
 
     def execute(self, advance, duration=2700):
         clock, commands, published = [0.0], [], []
@@ -355,25 +430,6 @@ class CampaignWorkflowTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.namespace["main"]()
         self.assertEqual(b.read_json(self.directory / "status.json")["recorded"], 123)
-
-    def test_resume_source_survives_a_second_continuation_and_rejects_missing_records(self):
-        b.atomic_json(self.directory / "manifest.json", {})
-        b.atomic_json(self.directory / "status.json", dict(recorded=0))
-        source = self.script("Resolve benchmark source revision")
-        environment = dict(self.environment, GITHUB_SHA="b" * 40, RESUME_HEAD_SHA="a" * 40,
-                           RESUME_RUN_ID="123", SETUP_ONLY="false", GITHUB_OUTPUT=str(self.path / "output"))
-        with patch.dict(os.environ, environment):
-            exec(compile(source, "source-resolution", "exec"), {})
-        self.assertIn("source_ref=" + "a" * 40, (self.path / "output").read_text())
-        b.atomic_json(self.directory / "benchmark-source.json",
-                      dict(schema_version=1, repository="owner/repo", source_ref="c" * 40))
-        with patch.dict(os.environ, environment):
-            exec(compile(source, "source-resolution", "exec"), {})
-        self.assertTrue((self.path / "output").read_text().endswith("source_ref=" + "c" * 40 + "\n"))
-        b.atomic_json(self.directory / "status.json", dict(recorded=123))
-        with patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, "every recorded case"):
-            exec(compile(source, "source-resolution", "exec"), {})
-
 
 if __name__ == "__main__":
     unittest.main()

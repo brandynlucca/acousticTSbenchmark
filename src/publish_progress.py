@@ -24,6 +24,8 @@ PLATFORMS = ("ubuntu-latest", "windows-latest", "macos-latest")
 ROW_FIELDS = ("software", "boundary", "aspect_ratio", "incidence_deg", "frequency_hz",
               "k0a", "h0", "elapsed_seconds", "ts_db", "delta_ts_db", "status", "repetition",
               "physical_id", "reference_id", "reference_ts_db", "reference_uncertainty_db")
+ROW_FIELDS += ("memory_delta_peak_bytes", "memory_baseline_rss_bytes", "memory_peak_rss_bytes",
+               "memory_sample_interval_seconds", "memory_samples", "memory_status", "memory_method")
 MAX_JSON_BYTES = 128 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024

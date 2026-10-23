@@ -146,7 +146,7 @@ class ReferenceTests(unittest.TestCase):
                                           "--output", str(directory / "plan.json")])
             self.assertEqual(r.run(args), 0)
             plan = b.read_json(directory / "plan.json")
-            self.assertEqual(plan["planned"], 101)
+            self.assertEqual(plan["planned"], 151)
             self.assertNotIn("ts_db", plan["requests"][0])
             self.assertEqual(plan["requests"][0]["signature"]["controls"]["mode_threads"], 4)
             self.assertFalse((directory / "cache").exists())

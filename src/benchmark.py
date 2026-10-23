@@ -16,6 +16,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from process_control import PredictionMemory, memory_provenance
+
 ROOT = Path(__file__).resolve().parents[1]
 BOUNDARIES = ("rigid", "pressure_release", "liquid", "gas")
 CAPABILITIES = {
@@ -156,7 +158,7 @@ def environment():
                 image_version=os.getenv("ImageVersion"), runner_name=os.getenv("RUNNER_NAME"),
                 github_run_id=os.getenv("GITHUB_RUN_ID"),
                 github_run_attempt=os.getenv("GITHUB_RUN_ATTEMPT"),
-                threads=1)
+                threads=1, memory_measurement=memory_provenance())
 
 
 def adapter_hashes():
@@ -205,6 +207,8 @@ def measure(case, runtime, directory, timeout_seconds):
     payload = dict(case, source_path=runtime.get("source_paths", {}).get(name),
                    work_directory=str(directory), timing_started_path=str(marker),
                    native_executable=runtime.get("native_executables", {}).get(name))
+    memory = PredictionMemory(directory)
+    payload.update(memory.request_fields())
     atomic_json(request, payload)
     try:
         command = command_for(case, runtime, request, response)
@@ -244,25 +248,31 @@ def measure(case, runtime, directory, timeout_seconds):
                 process.wait(timeout=10)
                 job.close()
                 raise
+        memory.start(process.pid)
+        memory_result = None
         try:
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
+            memory_result = memory.finish(censored=True)
             stop_process(process, job)
             timing = read_json(marker) if marker.exists() else {}
             return dict(status="timeout" if timing else "setup_timeout", elapsed_seconds=None,
                         wall_seconds=time.monotonic() - started,
                         solve_lower_bound_seconds=max(0, time.time() - timing["started_epoch"])
-                        if timing else None, message=f"Worker exceeded {timeout_seconds:g} seconds")
+                        if timing else None, message=f"Worker exceeded {timeout_seconds:g} seconds", **memory_result)
         except BaseException:
+            memory_result = memory.finish(censored=True)
             stop_process(process, job)
             raise
         finally:
+            if memory_result is None:
+                memory_result = memory.finish()
             if job:
                 job.close()
     wall_seconds = time.monotonic() - started
     if process.returncode or not response.exists():
         return dict(status="worker_error", elapsed_seconds=None, wall_seconds=wall_seconds,
-                    message=f"Worker exit {process.returncode}, see worker.log")
+                    message=f"Worker exit {process.returncode}, see worker.log", **memory_result)
     try:
         result = read_json(response)
         if result.get("status") not in STATUSES:
@@ -274,8 +284,8 @@ def measure(case, runtime, directory, timeout_seconds):
         json.dumps(result, allow_nan=False)
     except (ValueError, KeyError, TypeError) as error:
         return dict(status="worker_error", elapsed_seconds=None, wall_seconds=wall_seconds,
-                    message=f"Invalid worker result: {error}")
-    return dict(result, wall_seconds=wall_seconds)
+                    message=f"Invalid worker result: {error}", **memory_result)
+    return dict(result, wall_seconds=wall_seconds, **memory_result)
 
 
 def load_references(path):
@@ -415,7 +425,8 @@ def run(args):
     identity = dict(configuration=configuration, sources=lock, profile=args.profile,
                     cases=[c["case_id"] for c in cases], adapter_hashes=adapter_hashes(),
                     platform=platform.system(), architecture=platform.machine(),
-                    environment_fingerprint=runtime.get("environment_fingerprint"),
+                    environment_fingerprint=fingerprint(dict(
+                        runtime=runtime["environment_fingerprint"], memory_observer=memory_provenance())),
                     workload="fresh_process_warmed_distinct_problem_single_prediction")
     from references import build_requests
     manifest = dict(identity, fingerprint=fingerprint(identity),
