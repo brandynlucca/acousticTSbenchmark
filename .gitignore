@@ -12,7 +12,5 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .scratch/
-DECISIONS.md
-WORKLOG.md
 .DS_Store
 Thumbs.db
