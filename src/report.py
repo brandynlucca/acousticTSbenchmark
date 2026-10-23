@@ -55,7 +55,7 @@ try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!as
 function updateStatus(){
  const s=data.status,counts=s.outcomes||{},success=counts.ok||0,pending=counts.pending??Math.max(0,(s.planned||0)-(s.recorded||0));
  const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
- const phase=finished?(pending?'Run stopped with pending cases':other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Preparing software':'Benchmarking';
+ const phase=finished?(pending?'Run stopped with pending cases':other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
  document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
 }
 updateStatus();
@@ -125,7 +125,7 @@ if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
  document.getElementById('livebar').hidden=false;document.getElementById('connection').hidden=false;
  document.getElementById('manifest-link').hidden=true;
- document.getElementById('refresh-note').textContent='This dashboard checks GitHub for data updates every 2 minutes. Checkpoints are published between benchmark chunks, usually every 5–15 minutes after setup. Recorded cases include failures and skips. Only successful measurements appear in the plots. Full CSV and JSON remain available in the run artifacts.';
+ document.getElementById('refresh-note').textContent='This dashboard checks for updates every 30 seconds. New runs publish completed results between cases at 30-second intervals. A long-running case appears when it finishes. Older runs publish only between chunks. GitHub caching can add delay. Full CSV and JSON remain available in the run artifacts.';
  const platform=document.getElementById('platform'),connection=document.getElementById('connection'),runLink=document.getElementById('run-link');
  const runState=document.getElementById('run-state');
  const workflowURL=`https://github.com/${repository}/actions/workflows/benchmark.yml`;
@@ -133,7 +133,7 @@ if(repository){
  document.getElementById('csv-link').textContent='Full data and artifacts';document.getElementById('json-link').hidden=true;
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
  if(!platform.value)platform.value='ubuntu-latest';
- let newestRun=null,newestSetup=null,lastRunCheck=0,busy=false,revision='';
+ let newestRun=null,newestSetup=null,lastRunCheck=0,lastContentsCheck=0,busy=false,revision='';
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
   const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
@@ -157,11 +157,15 @@ if(repository){
     try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
    }
    const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
-   const contentsURL=`https://api.github.com/repos/${repository}/contents/${chosen}.json?ref=benchmark-data&t=${Math.floor(Date.now()/120000)}`;
-   let response,cachedFallback=false;
-   try{response=await fetchJSON(contentsURL,{Accept:'application/vnd.github.raw+json'});}catch(e){}
+   const contentsURL=`https://api.github.com/repos/${repository}/contents/${chosen}.json?ref=benchmark-data&t=${Date.now()}`;
+   let response,publicFeed=false;
+   // Keep REST requests below the anonymous hourly limit while polling the public feed more often.
+   if(Date.now()-lastContentsCheck>=120000){
+    lastContentsCheck=Date.now();
+    try{response=await fetchJSON(contentsURL,{Accept:'application/vnd.github.raw+json'});}catch(e){}
+   }
    if(!response||(!response.ok&&response.status!==404)){
-    cachedFallback=true;response=await fetchJSON(url+'?t='+Math.floor(Date.now()/120000));
+    publicFeed=true;response=await fetchJSON(url+'?t='+Date.now());
    }
    if(chosen!==platform.value)return;
    if(response.status===404){connection.textContent=`No checkpoint has been published for ${chosen} yet. Setup must finish before measured points appear.`;showRun();return;}
@@ -173,15 +177,15 @@ if(repository){
    if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateStatus();render();}
    const old=newestRun&&runOrder(newestRun,data)>0;
    connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}, attempt ${data.run_attempt}. A newer run or attempt is ${newestRun.status.replaceAll('_',' ')}. Open the run to check its selected platforms.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
-   if(cachedFallback)connection.textContent+=' GitHub API unavailable. Using the public feed, which may be delayed by several minutes.';
+   if(publicFeed)connection.textContent+=' Using the public feed, which GitHub may cache for several minutes.';
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
-  }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 2 minutes. Existing points are retained.`;showRun();}
+  }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}
   finally{busy=false;if(chosen!==platform.value)poll();}
  }
  platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();});
- connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,120000);
+ connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);
 }
 </script></html>'''.replace("PAYLOAD", payload)
     path = Path(path)

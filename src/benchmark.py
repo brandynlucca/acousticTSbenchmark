@@ -212,6 +212,9 @@ def measure(case, runtime, directory, timeout_seconds):
         return dict(status="setup_error", elapsed_seconds=None, message=str(error))
     env = os.environ.copy()
     env.update(runtime.get("env", {}))
+    # Publishing credentials belong only to this supervisor, never to solvers.
+    for key in ("GITHUB_TOKEN", "GH_TOKEN"):
+        env.pop(key, None)
     env.update(OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
                JULIA_NUM_THREADS="1", VECLIB_MAXIMUM_THREADS="1", NUMEXPR_NUM_THREADS="1",
                MPLBACKEND="Agg", PYTHONDONTWRITEBYTECODE="1")
@@ -344,6 +347,46 @@ def export(directory, cases, records, references, state):
     return status
 
 
+class ProgressPublisher:
+    """Publish synchronously between workers, with bounded requests and backoff."""
+
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self.next_update = float("-inf")
+        self.retry_after = float("-inf")
+        required = ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "BENCHMARK_PLATFORM", "GITHUB_RUN_ID")
+        if enabled and not all(os.environ.get(key) for key in required):
+            print("Progress publication disabled: GitHub run settings are incomplete", file=sys.stderr)
+            self.enabled = False
+
+    def due(self, *, first_result=False, force=False):
+        now = time.monotonic()
+        return self.enabled and (force or (now >= self.retry_after and
+                                           (first_result or now >= self.next_update)))
+
+    def publish(self, directory, status, *, first_result=False, force=False):
+        if not self.due(first_result=first_result, force=force):
+            return
+        try:
+            from publish_progress import GitHub, compact_payload, publish
+
+            # A new API instance gives each publication its own short deadline.
+            repository = os.environ["GITHUB_REPOSITORY"]
+            api = GitHub(repository, os.environ["GITHUB_TOKEN"], timeout_seconds=15)
+            payload = compact_payload(repository, os.environ["BENCHMARK_PLATFORM"],
+                int(os.environ["GITHUB_RUN_ID"]), int(os.getenv("GITHUB_RUN_ATTEMPT", "1")),
+                read_json(directory / "results.json"), status, "running")
+            publish(api, payload)
+            self.retry_after = float("-inf")
+        except Exception as error:
+            # Error messages can contain URLs or credentials supplied by libraries.
+            # Report only the exception type and keep every recorded measurement.
+            print(f"Progress publication failed ({type(error).__name__}), retrying after 30 seconds",
+                  file=sys.stderr, flush=True)
+            self.retry_after = time.monotonic() + 30
+        self.next_update = time.monotonic() + 30
+
+
 def run(args):
     positive(args.budget_seconds, "budget_seconds")
     positive(args.chunk_seconds, "chunk_seconds")
@@ -402,7 +445,9 @@ def run(args):
         expected = {c["case_id"] for c in cases}
         if records.keys() - expected:
             raise ValueError("Checkpoint contains cases outside manifest")
-        export(directory, cases, records, references, "running")
+        status = export(directory, cases, records, references, "running")
+        publisher = ProgressPublisher(args.publish_progress)
+        publisher.publish(directory, status, force=True)
         last_export = time.monotonic()
         blocked = {}
         def setup_group(case):
@@ -444,12 +489,16 @@ def run(args):
             atomic_json(checkpoint_directory / f"{case['case_id']}.json", record)
             records[case["case_id"]] = record
             completed += 1
-            if time.monotonic() - last_export >= 30:
-                export(directory, cases, records, references, "running")
+            publish_now = publisher.due(first_result=completed == 1)
+            if publish_now or time.monotonic() - last_export >= 30:
+                status = export(directory, cases, records, references, "running")
                 last_export = time.monotonic()
             print(f"DONE {len(records)}/{len(cases)} {result['status']} "
                   f"solve_seconds={result.get('elapsed_seconds')}", flush=True)
+            if publish_now:
+                publisher.publish(directory, status, first_result=completed == 1)
         status = export(directory, cases, records, references, state)
+        publisher.publish(directory, status, force=True)
         print(json.dumps(status), flush=True)
     finally:
         mutex.unlink(missing_ok=True)
@@ -470,6 +519,8 @@ def parser():
     result.add_argument("--budget-seconds", type=float, default=2700)
     result.add_argument("--chunk-seconds", type=float, default=300)
     result.add_argument("--max-cases", type=int)
+    result.add_argument("--publish-progress", action="store_true",
+                        help="Publish running snapshots between workers using GitHub workflow settings")
     return result
 
 

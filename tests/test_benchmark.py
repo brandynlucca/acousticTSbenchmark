@@ -1,6 +1,7 @@
 """Tests for scientific case identity, resumability and bounded execution."""
 
 import copy
+import io
 import json
 import math
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +159,118 @@ class FileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.atomic_json(record, {"elapsed_seconds": float("nan")})
         self.assertEqual(b.read_json(record)["elapsed_seconds"], 1.0)
+
+    def test_publication_credentials_never_reach_solver_environment(self):
+        runtime = dict(executables={"echosms": ["fixture"]},
+                       env={"GITHUB_TOKEN": "runtime-secret", "GH_TOKEN": "runtime-gh-secret",
+                            "BENCHMARK_CUSTOM": "retained"})
+
+        def inspect(command, **kwargs):
+            self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
+            self.assertNotIn("GH_TOKEN", kwargs["env"])
+            self.assertEqual(kwargs["env"]["BENCHMARK_CUSTOM"], "retained")
+            raise OSError("fixture stops before launching a process")
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "parent-secret", "GH_TOKEN": "parent-gh-secret"}), \
+             patch.object(b.subprocess, "Popen", side_effect=inspect) as launch:
+            result = b.measure(self.case, runtime, self.path / "worker", 10)
+        self.assertEqual(result["status"], "setup_error")
+        launch.assert_called_once()
+
+
+class ProgressTests(unittest.TestCase):
+    def setUp(self):
+        root = ROOT / ".scratch/codex/dense-benchmark/tests"
+        root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=root)
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name)
+        self.environment = dict(GITHUB_TOKEN="secret-for-publication", GITHUB_REPOSITORY="owner/repo",
+                                BENCHMARK_PLATFORM="ubuntu-latest", GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2")
+
+    def arguments(self):
+        config = b.read_json(ROOT / "benchmark.json")
+        config["frequency"] = dict(start_hz=1000, stop_hz=5000, step_hz=1000)
+        config["case_timeout_seconds"] = 1
+        b.atomic_json(self.path / "config.json", config)
+        sha = b.read_json(ROOT / "sources.lock.json")["sources"]["echosms"]["sha"]
+        b.atomic_json(self.path / "runtime.json", dict(source_shas={"echosms": sha}, environment_fingerprint="test"))
+        return b.parser().parse_args(["--config", str(self.path / "config.json"), "--software", "echosms",
+            "--runtime", str(self.path / "runtime.json"), "--output", str(self.path / "run"), "--publish-progress"])
+
+    def test_publish_initial_first_and_rate_limited_results_only_between_workers(self):
+        import publish_progress
+
+        args = self.arguments()
+        clock, active, measurements, published, events = [0.0], [False], [], [], []
+        finishes = iter((1, 10, 30, 32, 40))
+
+        def measure(case, runtime, directory, timeout):
+            active[0] = True
+            events.append(("measure", len(measurements) + 1))
+            clock[0] = next(finishes)
+            measurements.append(case["case_id"])
+            active[0] = False
+            return dict(status="ok", elapsed_seconds=0.1, ts_db=-40)
+
+        def publish(api, payload):
+            self.assertFalse(active[0], "Network publication must never overlap a timed worker")
+            count = payload["status"]["recorded"]
+            self.assertEqual(count, len(measurements))
+            self.assertEqual(len(payload["rows"]), count)
+            self.assertEqual(payload["state"], "running")
+            published.append((count, clock[0]))
+            events.append(("publish", count))
+
+        with patch.dict(os.environ, self.environment), patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(b, "measure", side_effect=measure), patch.object(publish_progress, "GitHub") as api, \
+             patch.object(publish_progress, "publish", side_effect=publish):
+            self.assertEqual(b.run(args), 0)
+        self.assertEqual(published, [(0, 0), (1, 1), (4, 32), (5, 40)])
+        self.assertEqual(events[:3], [("publish", 0), ("measure", 1), ("publish", 1)])
+        self.assertEqual(api.call_count, 4)
+        self.assertTrue(all(call.kwargs["timeout_seconds"] == 15 for call in api.call_args_list))
+        self.assertEqual(b.read_json(self.path / "run/manifest.json")["workload"],
+                         "fresh_process_warmed_distinct_problem_single_prediction")
+
+    def test_failure_backoff_preserves_measurements_and_redacts_error_details(self):
+        import publish_progress
+
+        args = self.arguments()
+        clock, attempts, count = [0.0], [], [0]
+        finishes = iter((1, 10, 29, 31, 32))
+
+        def measure(*args):
+            clock[0] = next(finishes)
+            count[0] += 1
+            return dict(status="ok", elapsed_seconds=0.1, ts_db=-40)
+
+        def fail(api, payload):
+            attempts.append((payload["status"]["recorded"], clock[0]))
+            raise RuntimeError("secret-for-publication and private signed URL")
+
+        errors = io.StringIO()
+        with patch.dict(os.environ, self.environment), patch.object(b.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(b, "measure", side_effect=measure), patch.object(publish_progress, "GitHub"), \
+             patch.object(publish_progress, "publish", side_effect=fail), redirect_stderr(errors):
+            self.assertEqual(b.run(args), 0)
+        self.assertEqual(attempts, [(0, 0), (4, 31), (5, 32)])  # Final checkpoint is always attempted.
+        self.assertEqual(count[0], 5)
+        self.assertEqual(b.read_json(self.path / "run/status.json")["recorded"], 5)
+        self.assertNotIn("secret-for-publication", errors.getvalue())
+        self.assertNotIn("private signed URL", errors.getvalue())
+        self.assertIn("retrying after 30 seconds", errors.getvalue())
+
+    def test_publication_is_opt_in(self):
+        import publish_progress
+
+        args = self.arguments()
+        args.publish_progress = False
+        with patch.dict(os.environ, self.environment), \
+             patch.object(b, "measure", return_value=dict(status="ok", elapsed_seconds=0.1, ts_db=-40)), \
+             patch.object(publish_progress, "GitHub") as api:
+            self.assertEqual(b.run(args), 0)
+        api.assert_not_called()
 
 
 if __name__ == "__main__":
