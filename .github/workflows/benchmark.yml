@@ -106,7 +106,6 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       MPLBACKEND: Agg
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -118,6 +117,106 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a") as output:
               output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
               output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
+          PY
+      - name: Verify continuation run
+        if: inputs.resume_run_id != '' && !inputs.setup_only
+        id: continuation-run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from urllib.request import Request, urlopen
+          run_id = os.environ["RESUME_RUN_ID"]
+          if not run_id.isdecimal() or int(run_id) < 1:
+              raise SystemExit("resume_run_id must be a positive workflow run ID")
+          repository = os.environ["GITHUB_REPOSITORY"]
+          request = Request(f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
+              headers={"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
+                       "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+          with urlopen(request, timeout=15) as response:
+              run = json.load(response)
+          if (run.get("repository", {}).get("full_name") != repository or
+                  (run.get("head_repository") or {}).get("full_name") != repository or
+                  run.get("event") != "workflow_dispatch" or run.get("status") != "completed" or
+                  run.get("path") != ".github/workflows/benchmark.yml"):
+              raise SystemExit("Resume requires this repository's completed timing workflow run")
+          revision = run.get("head_sha", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", revision):
+              raise SystemExit("Continuation run does not identify an exact source revision")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"head_sha={revision}\n")
+          PY
+      - name: Restore previous checkpoints
+        if: inputs.resume_run_id != '' && !inputs.setup_only
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ inputs.resume_artifact || format('results-{0}', matrix.os) }}
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/benchmark-results
+      - name: Resolve benchmark source revision
+        id: benchmark-source
+        shell: bash
+        env:
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+          SETUP_ONLY: ${{ inputs.setup_only }}
+          RESUME_HEAD_SHA: ${{ steps.continuation-run.outputs.head_sha }}
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          repository = os.environ["GITHUB_REPOSITORY"]
+          directory = Path(os.environ["RUNNER_TEMP"]) / "benchmark-results"
+          revision = os.environ["GITHUB_SHA"]
+          if os.environ["RESUME_RUN_ID"] and os.environ["SETUP_ONLY"] != "true":
+              manifest = directory / "manifest.json"
+              status_file = directory / "status.json"
+              if not manifest.is_file() or not status_file.is_file():
+                  raise SystemExit("Continuation artifact lacks a timing manifest or status")
+              status = json.loads(status_file.read_text())
+              if len(list((directory / "records").glob("*.json"))) != status.get("recorded"):
+                  raise SystemExit("Continuation artifact must contain every recorded case")
+              sidecar = directory / "benchmark-source.json"
+              if sidecar.is_file():
+                  if sidecar.stat().st_size > 16384:
+                      raise SystemExit("Continuation source metadata is too large")
+                  source = json.loads(sidecar.read_text())
+                  if source.get("schema_version") != 1 or source.get("repository") != repository:
+                      raise SystemExit("Continuation source metadata belongs to a different repository or schema")
+                  revision = source.get("source_ref", "")
+              else:
+                  revision = os.environ["RESUME_HEAD_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", revision):
+              raise SystemExit("Benchmark source must be an exact commit SHA")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"source_ref={revision}\n")
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ steps.benchmark-source.outputs.source_ref }}
+      - name: Record benchmark source provenance
+        if: ${{ !inputs.setup_only }}
+        shell: bash
+        env:
+          SOURCE_REF: ${{ steps.benchmark-source.outputs.source_ref }}
+          RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["SOURCE_REF"]:
+              raise SystemExit("Checked-out source does not match continuation provenance")
+          directory = Path(os.environ["RUNNER_TEMP"]) / "benchmark-results"
+          directory.mkdir(parents=True, exist_ok=True)
+          source = dict(schema_version=1, repository=os.environ["GITHUB_REPOSITORY"], source_ref=revision,
+                        workflow_ref=os.environ["GITHUB_WORKFLOW_REF"], workflow_sha=os.environ["GITHUB_SHA"],
+                        run_id=int(os.environ["GITHUB_RUN_ID"]),
+                        resumed_from_run_id=int(os.environ["RESUME_RUN_ID"]) if os.environ["RESUME_RUN_ID"] else None)
+          (directory / "benchmark-source.json").write_text(json.dumps(source, indent=2) + "\n")
           PY
       - name: Check timing selection
         shell: bash
@@ -342,14 +441,6 @@ jobs:
             ~/.julia/packages
             ~/.julia/registries
           key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
-      - name: Restore previous checkpoints
-        if: inputs.resume_run_id != '' && !inputs.setup_only
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: ${{ inputs.resume_artifact || format('results-{0}', matrix.os) }}
-          run-id: ${{ inputs.resume_run_id }}
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/benchmark-results
       - name: Prepare pinned software
         id: prepare
         shell: bash
@@ -387,13 +478,99 @@ jobs:
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
           key: ${{ steps.r-library-cache.outputs.cache-primary-key }}
+      - name: Prepare bounded timing controller
+        if: ${{ !inputs.setup_only }}
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/benchmark-controller.py" <<'PY'
+          """Continue an immutable campaign and publish only between workers."""
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from benchmark import build_cases, read_json
+          from publish_progress import GitHub, compact_payload, publish
+
+          def main():
+              duration = float(sys.argv[1])
+              if duration <= 0:
+                  raise ValueError("Controller duration must be positive")
+              directory = Path(os.environ["RUNNER_TEMP"]) / "benchmark-results"
+              configuration = read_json("benchmark.json")
+              timeout = configuration["case_timeout_seconds"]
+              deadline = float(os.environ["BENCHMARK_DEADLINE"])
+              stop = time.monotonic() + duration
+              next_publish = float("-inf")
+              retry_after = float("-inf")
+              first_result = True
+
+              def status():
+                  path = directory / "status.json"
+                  return read_json(path) if path.is_file() else {"recorded": 0}
+
+              def publish_snapshot(*, first=False, force=False):
+                  nonlocal next_publish, retry_after
+                  now = time.monotonic()
+                  if not force and (now < retry_after or (not first and now < next_publish)):
+                      return
+                  try:
+                      result_path = directory / "results.json"
+                      rows = read_json(result_path) if result_path.is_file() else [
+                          dict(case, status="pending") for case in build_cases(configuration,
+                              os.environ["PROFILE"], os.environ["SOFTWARE"].split(","),
+                              int(os.environ["REPETITIONS"]))]
+                      api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
+                                   timeout_seconds=15)
+                      payload = compact_payload(os.environ["GITHUB_REPOSITORY"],
+                          os.environ["BENCHMARK_PLATFORM"], int(os.environ["GITHUB_RUN_ID"]),
+                          int(os.environ["GITHUB_RUN_ATTEMPT"]), rows, status(), "running")
+                      publish(api, payload)
+                      retry_after = float("-inf")
+                  except Exception as error:
+                      print(f"Progress publication failed ({type(error).__name__}), retrying after 30 seconds",
+                            file=sys.stderr, flush=True)
+                      retry_after = time.monotonic() + 30
+                  next_publish = time.monotonic() + 30
+
+              worker_environment = os.environ.copy()
+              for key in ("GITHUB_TOKEN", "GH_TOKEN"):
+                  worker_environment.pop(key, None)
+              command = [sys.executable, "src/benchmark.py", "--profile", os.environ["PROFILE"],
+                  "--software", os.environ["SOFTWARE"], "--repetitions", os.environ["REPETITIONS"],
+                  "--runtime", str(Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/runtime.json"),
+                  "--output", str(directory), "--budget-seconds", "2700"]
+              publish_snapshot(force=True)
+              try:
+                  while time.monotonic() < stop:
+                      before = status()
+                      if before.get("state") == "complete" or deadline - time.time() < timeout:
+                          break
+                      seconds = min(30, max(1, stop - time.monotonic()))
+                      arguments = command + ["--chunk-seconds", str(seconds)]
+                      if first_result:
+                          arguments += ["--max-cases", "1"]
+                      subprocess.run(arguments, check=True, env=worker_environment)
+                      after = status()
+                      publish_snapshot(first=first_result)
+                      first_result = False
+                      if after.get("state") == "complete" or after["recorded"] <= before["recorded"]:
+                          break
+              finally:
+                  publish_snapshot(force=True)
+
+          if __name__ == "__main__":
+              main()
+          PY
       - name: Benchmark chunk 1
         if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300 --publish-progress
+          python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 1
         if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -401,6 +578,7 @@ jobs:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-1
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -421,7 +599,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300 --publish-progress
+          python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 2
         if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -429,6 +607,7 @@ jobs:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-2
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -449,7 +628,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300 --publish-progress
+          python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 3
         if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -457,6 +636,7 @@ jobs:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-3
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -477,7 +657,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300 --publish-progress
+          python "$RUNNER_TEMP/benchmark-controller.py" 300
       - name: Save checkpoint 4
         if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -485,6 +665,7 @@ jobs:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-4
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -499,13 +680,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
-      - name: Benchmark chunk 5
+      - name: Benchmark remaining campaign budget
         if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300 --publish-progress
+          python "$RUNNER_TEMP/benchmark-controller.py" 2700
       - name: Save checkpoint 5
         if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -513,6 +694,7 @@ jobs:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-5
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -534,6 +716,7 @@ jobs:
           name: results-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
+            ${{ runner.temp }}/benchmark-results/benchmark-source.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html

@@ -55,7 +55,7 @@ try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!as
 function updateStatus(){
  const s=data.status,counts=s.outcomes||{},success=counts.ok||0,pending=counts.pending??Math.max(0,(s.planned||0)-(s.recorded||0));
  const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
- const phase=finished?(pending?'Run stopped with pending cases':other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
+ const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
  document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
 }
 updateStatus();

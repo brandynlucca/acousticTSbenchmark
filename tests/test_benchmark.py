@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
@@ -271,6 +272,107 @@ class ProgressTests(unittest.TestCase):
              patch.object(publish_progress, "GitHub") as api:
             self.assertEqual(b.run(args), 0)
         api.assert_not_called()
+
+
+class CampaignWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def script(step):
+        workflow = (ROOT / ".github/workflows/benchmark.yml").read_text()
+        block = workflow.split(f"      - name: {step}\n", 1)[1].split("\n      - ", 1)[0]
+        source = block.split("<<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        return textwrap.dedent(source)
+
+    def setUp(self):
+        root = ROOT / ".scratch/codex/dense-benchmark/tests"
+        root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=root)
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name)
+        self.directory = self.path / "benchmark-results"
+        self.directory.mkdir()
+        b.atomic_json(self.directory / "status.json", dict(state="budget_paused", recorded=123))
+        b.atomic_json(self.directory / "results.json", [])
+        self.namespace = {"__name__": "workflow_controller_fixture"}
+        exec(compile(self.script("Prepare bounded timing controller"), "workflow-controller", "exec"), self.namespace)
+        self.environment = dict(RUNNER_TEMP=str(self.path), BENCHMARK_DEADLINE="3700",
+            GITHUB_REPOSITORY="owner/repo", GITHUB_TOKEN="publication-only", GH_TOKEN="also-private",
+            BENCHMARK_PLATFORM="ubuntu-latest", GITHUB_RUN_ID="456", GITHUB_RUN_ATTEMPT="1",
+            PROFILE="pilot", SOFTWARE="echosms", REPETITIONS="1")
+
+    def execute(self, advance, duration=2700):
+        clock, commands, published = [0.0], [], []
+
+        def run(command, **kwargs):
+            self.assertTrue(kwargs["check"])
+            self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
+            self.assertNotIn("GH_TOKEN", kwargs["env"])
+            self.assertNotIn("--publish-progress", command)
+            self.assertLessEqual(float(command[command.index("--chunk-seconds") + 1]), 30)
+            commands.append(command)
+            clock[0] += 90
+            status = b.read_json(self.directory / "status.json")
+            status["recorded"] += advance
+            b.atomic_json(self.directory / "status.json", status)
+
+        def payload(*args):
+            self.assertEqual(args[-1], "running")
+            return args[-2]
+
+        with patch.dict(os.environ, self.environment), patch.object(sys, "argv", ["controller", str(duration)]), \
+             patch.object(self.namespace["time"], "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(self.namespace["time"], "time", side_effect=lambda: 1000 + clock[0]), \
+             patch.object(self.namespace["subprocess"], "run", side_effect=run), \
+             patch.dict(self.namespace, GitHub=lambda *a, **k: None, compact_payload=payload,
+                        publish=lambda api, data: published.append(data["recorded"])):
+            self.namespace["main"]()
+        return clock[0], commands, published
+
+    def test_continuation_preserves_count_and_uses_remaining_budget_after_five_minutes(self):
+        elapsed, commands, published = self.execute(1)
+        self.assertGreater(elapsed, 300)
+        self.assertLess(elapsed, 2700)
+        self.assertEqual(published[0], 123)
+        self.assertEqual(published[-1], 123 + len(commands))
+        self.assertIn("--max-cases", commands[0])
+        self.assertTrue(all("--max-cases" not in command for command in commands[1:]))
+        self.assertEqual(b.read_json(self.directory / "status.json")["recorded"], published[-1])
+
+    def test_no_progress_or_expired_deadline_does_not_loop(self):
+        _, commands, published = self.execute(0)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(set(published), {123})
+        self.environment["BENCHMARK_DEADLINE"] = "1000"
+        _, commands, _ = self.execute(1)
+        self.assertEqual(commands, [])
+
+    def test_worker_failure_propagates_after_final_publication(self):
+        import subprocess
+        with patch.dict(os.environ, self.environment), patch.object(sys, "argv", ["controller", "2700"]), \
+             patch.object(self.namespace["time"], "time", return_value=1000), \
+             patch.object(self.namespace["subprocess"], "run", side_effect=subprocess.CalledProcessError(2, "worker")), \
+             patch.dict(self.namespace, GitHub=lambda *a, **k: None, compact_payload=lambda *a: a[-2]), \
+             patch.dict(self.namespace, publish=lambda api, data: None):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.namespace["main"]()
+        self.assertEqual(b.read_json(self.directory / "status.json")["recorded"], 123)
+
+    def test_resume_source_survives_a_second_continuation_and_rejects_missing_records(self):
+        b.atomic_json(self.directory / "manifest.json", {})
+        b.atomic_json(self.directory / "status.json", dict(recorded=0))
+        source = self.script("Resolve benchmark source revision")
+        environment = dict(self.environment, GITHUB_SHA="b" * 40, RESUME_HEAD_SHA="a" * 40,
+                           RESUME_RUN_ID="123", SETUP_ONLY="false", GITHUB_OUTPUT=str(self.path / "output"))
+        with patch.dict(os.environ, environment):
+            exec(compile(source, "source-resolution", "exec"), {})
+        self.assertIn("source_ref=" + "a" * 40, (self.path / "output").read_text())
+        b.atomic_json(self.directory / "benchmark-source.json",
+                      dict(schema_version=1, repository="owner/repo", source_ref="c" * 40))
+        with patch.dict(os.environ, environment):
+            exec(compile(source, "source-resolution", "exec"), {})
+        self.assertTrue((self.path / "output").read_text().endswith("source_ref=" + "c" * 40 + "\n"))
+        b.atomic_json(self.directory / "status.json", dict(recorded=123))
+        with patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, "every recorded case"):
+            exec(compile(source, "source-resolution", "exec"), {})
 
 
 if __name__ == "__main__":
