@@ -23,6 +23,7 @@ ROW_FIELDS = ("software", "boundary", "aspect_ratio", "incidence_deg", "frequenc
               "k0a", "h0", "elapsed_seconds", "ts_db", "delta_ts_db", "status", "repetition")
 MAX_JSON_BYTES = 128 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 class APIError(RuntimeError):
@@ -243,17 +244,29 @@ def existing_snapshot(api, platform):
             return None, None
         raise
     # The Contents API omits inline content for files larger than 1 MB.
+    if int(content.get("size", 0)) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Existing progress snapshot exceeds the supported size")
     value = content
-    if not content.get("content"):
+    if content.get("encoding") == "none" or not content.get("content"):
         value = api.request("GET", f"/git/blobs/{content['sha']}")
     if value.get("encoding") != "base64":
         raise ValueError("GitHub returned an unsupported content encoding")
-    return json.loads(base64.b64decode(value["content"])), content["sha"]
+    encoded = "".join(value["content"].split())
+    if (int(value.get("size", 0)) > MAX_SNAPSHOT_BYTES or
+            len(encoded) > 4 * ((MAX_SNAPSHOT_BYTES + 2) // 3)):
+        raise ValueError("Existing progress snapshot exceeds the supported size")
+    decoded = base64.b64decode(encoded, validate=True)
+    if len(decoded) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Existing progress snapshot exceeds the supported size")
+    return json.loads(decoded), content["sha"]
 
 
 def publish(api, payload):
     platform = payload["platform"]
-    encoded = base64.b64encode(json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()).decode()
+    serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    if len(serialized) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Progress snapshot exceeds the supported size")
+    encoded = base64.b64encode(serialized).decode()
     message = f"Update {platform} progress for run {payload['run_id']} attempt {payload['run_attempt']}"
     for _ in range(4):
         try:

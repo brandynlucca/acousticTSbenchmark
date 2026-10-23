@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 import zipfile
 
@@ -122,6 +122,31 @@ class ProgressTests(unittest.TestCase):
         puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
         self.assertEqual(len(puts), 1)
         self.assertEqual(puts[0].args[2]["sha"], "old-sha")
+
+    def test_large_snapshot_uses_blob_when_contents_omits_inline_data(self):
+        payload = dict(self.payload(), padding="x" * (1024 * 1024))
+        serialized = json.dumps(payload).encode()
+        api = Mock()
+        api.request.side_effect = [dict(sha="large-sha", encoding="none", content="", size=len(serialized)),
+            dict(sha="large-sha", encoding="base64", size=len(serialized),
+                 content=base64.b64encode(serialized).decode())]
+        restored, sha = progress.existing_snapshot(api, "ubuntu-latest")
+        self.assertEqual(restored, payload)
+        self.assertEqual(sha, "large-sha")
+        self.assertEqual(api.request.call_args_list[1].args, ("GET", "/git/blobs/large-sha"))
+
+    def test_snapshot_size_is_checked_before_fetch_and_after_encoding(self):
+        api = Mock()
+        api.request.return_value = dict(sha="large-sha", encoding="none", content="",
+                                       size=progress.MAX_SNAPSHOT_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "size"):
+            progress.existing_snapshot(api, "ubuntu-latest")
+        self.assertEqual(api.request.call_count, 1)
+        api.request.return_value = dict(sha="large-sha", encoding="base64", size=0,
+                                       content=base64.b64encode(b"x" * 129).decode())
+        with patch.object(progress, "MAX_SNAPSHOT_BYTES", 128):
+            with self.assertRaisesRegex(ValueError, "size"):
+                progress.existing_snapshot(api, "ubuntu-latest")
 
     def test_bootstrap_commit_contains_only_platform_data_and_no_parent(self):
         api = Mock()
