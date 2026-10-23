@@ -1,4 +1,5 @@
 name: Dense spheroid timings
+run-name: ${{ inputs.setup_only && 'Prepare environments' || 'Dense spheroid timings' }} (${{ inputs.platform }})
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +34,10 @@ on:
         description: Optional path to qualified reference JSON in this checkout
         type: string
         default: ''
+      setup_only:
+        description: Prepare and cache software without running timing cases
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -57,12 +62,13 @@ jobs:
               output.write("platforms=" + json.dumps(values) + "\n")
           PY
   benchmark:
+    name: ${{ inputs.setup_only && 'prepare' || 'benchmark' }} (${{ matrix.os }})
     needs: matrix
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
       actions: read
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.setup_only && 15 || 60 }}
     strategy:
       max-parallel: 1
       fail-fast: false
@@ -95,6 +101,7 @@ jobs:
               output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
           PY
       - name: Publish setup status
+        if: ${{ !inputs.setup_only }}
         continue-on-error: true
         shell: bash
         env:
@@ -102,11 +109,127 @@ jobs:
         run: |
           echo '[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/)' >> "$GITHUB_STEP_SUMMARY"
           python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
-      - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
+      - name: Identify R cache platform
         if: contains(inputs.software, 'acousticts')
+        id: r-cache-platform
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, platform, re
+          if platform.system() == "Linux":
+              release = platform.freedesktop_os_release()
+              image = release["ID"] + "-" + release["VERSION_ID"]
+          else:
+              image = os.environ.get("ImageOS", platform.system() + "-" + platform.release())
+          image = re.sub(r"[^A-Za-z0-9_.-]", "-", image)
+          print("R cache platform:", image, platform.machine(), "image build", os.environ.get("ImageVersion", "unknown"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"image={image}\n")
+          PY
+      - name: Prepare Linux R cache destination
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        shell: bash
+        run: sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" /opt/R/4.5.2
+      - name: Restore Linux R 4.5.2
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        id: r-runtime-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: /opt/R/4.5.2
+          key: r-runtime-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2
+      - name: Validate existing Linux R
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts')
+        id: r-reuse
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          executable = Path("/opt/R/4.5.2/bin/Rscript")
+          usable = False
+          if executable.is_file():
+              try:
+                  result = subprocess.run([str(executable), "--vanilla", "-e",
+                      'stopifnot(getRversion() == "4.5.2"); library(stats); cat(R.version.string, "\\n")'],
+                      capture_output=True, text=True, timeout=20)
+                  print(result.stdout, result.stderr)
+                  usable = result.returncode == 0
+              except (OSError, subprocess.TimeoutExpired) as error:
+                  print("Existing R requires installation:", error)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"usable={str(usable).lower()}\n")
+          if usable:
+              with open(os.environ["GITHUB_PATH"], "a") as output:
+                  output.write(str(executable.parent) + "\n")
+          PY
+      - name: Install minimal Linux R runtime
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-reuse.outputs.usable != 'true'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, platform, subprocess, time, urllib.parse, urllib.request
+          from pathlib import Path
+          deadline = time.monotonic() + 270
+          release = platform.freedesktop_os_release()
+          if release["ID"] != "ubuntu" or platform.machine() != "x86_64":
+              raise SystemExit("The minimal R installer requires an Ubuntu x86_64 runner")
+          resolver = "https://api.r-hub.io/rversions/resolve/4.5.2/linux-ubuntu-" + release["VERSION_ID"] + "/x86_64"
+          with urllib.request.urlopen(resolver, timeout=15) as response:
+              resolved = json.load(response)
+          url = resolved["url"]
+          parsed = urllib.parse.urlparse(url)
+          if resolved["version"] != "4.5.2" or parsed.scheme != "https" or parsed.hostname != "cdn.posit.co":
+              raise SystemExit("Unexpected R binary resolution")
+          print("Installing official R 4.5.2 binary:", url, flush=True)
+          archive = Path(os.environ["RUNNER_TEMP"]) / "r-4.5.2.deb"
+          def run(command):
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise SystemExit("R installation exceeded its deadline")
+              subprocess.run(command, check=True, timeout=remaining)
+          run(["curl", "--fail", "--location", "--retry", "1", "--connect-timeout", "10",
+               "--max-time", "90", "--output", str(archive), url])
+          apt = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get",
+                 "-o", "Acquire::Retries=1", "-o", "Acquire::http::Timeout=20",
+                 "-o", "Acquire::https::Timeout=20"]
+          run(apt + ["update"])
+          run(apt + ["install", "--yes", "--no-install-recommends", str(archive)])
+          run(["/opt/R/4.5.2/bin/Rscript", "--vanilla", "-e",
+               'stopifnot(getRversion() == "4.5.2"); library(stats); cat(R.version.string, "\\n")'])
+          with open(os.environ["GITHUB_PATH"], "a") as output:
+              output.write("/opt/R/4.5.2/bin\n")
+          PY
+      - name: Set up R 4.5.2 environment
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
+        if: contains(inputs.software, 'acousticts')
+        timeout-minutes: 5
         with:
           r-version: '4.5.2'
+          install-r: ${{ runner.os != 'Linux' }}
           use-public-rspm: true
+      - name: Verify requested R runtime
+        if: contains(inputs.software, 'acousticts')
+        timeout-minutes: 1
+        shell: Rscript {0}
+        run: |
+          stopifnot(getRversion() == "4.5.2")
+          library(stats)
+          cat(R.version.string, "\n")
+      - name: Save Linux R immediately
+        if: runner.os == 'Linux' && contains(inputs.software, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: /opt/R/4.5.2
+          key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
+      - name: Restore R package library
+        if: contains(inputs.software, 'acousticts')
+        id: r-library-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/benchmark-env/r-library
+          key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json') }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(inputs.software, 'acousticscattering') || contains(inputs.software, 'liquid_spheroid')
         with:
@@ -127,7 +250,7 @@ jobs:
             ~/.julia/registries
           key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
       - name: Restore previous checkpoints
-        if: inputs.resume_run_id != ''
+        if: inputs.resume_run_id != '' && !inputs.setup_only
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ inputs.resume_artifact || format('results-{0}', matrix.os) }}
@@ -138,13 +261,36 @@ jobs:
         id: prepare
         shell: bash
         run: python src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE"
+      - name: Check prepared R package library
+        if: contains(inputs.software, 'acousticts')
+        id: r-library-ready
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          runtime = json.loads((Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/runtime.json").read_text())
+          ready = (runtime.get("availability", {}).get("acousticts", {}).get("status") == "ready"
+                   and (Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/r-packages.json").is_file())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"ready={str(ready).lower()}\n")
+          if not ready:
+              raise SystemExit("acousticTS setup failed. Its package cache will not be saved")
+          PY
+      - name: Save R packages before benchmarking
+        if: steps.r-library-ready.outputs.ready == 'true' && steps.r-library-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: ${{ runner.temp }}/benchmark-env/r-library
+          key: ${{ steps.r-library-cache.outputs.cache-primary-key }}
       - name: Benchmark chunk 1
-        if: ${{ success() && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300
       - name: Save checkpoint 1
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-1
@@ -158,19 +304,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 2
-        if: ${{ success() && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300
       - name: Save checkpoint 2
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-2
@@ -184,19 +330,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 3
-        if: ${{ success() && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300
       - name: Save checkpoint 3
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-3
@@ -210,19 +356,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 4
-        if: ${{ success() && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300
       - name: Save checkpoint 4
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-4
@@ -236,19 +382,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 5
-        if: ${{ success() && steps.prepare.outcome == 'success' }}
+        if: ${{ success() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           python src/benchmark.py --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --output "$RUNNER_TEMP/benchmark-results" --budget-seconds 2700 --chunk-seconds 300
       - name: Save checkpoint 5
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: checkpoint-${{ matrix.os }}-${{ github.run_attempt }}-5
@@ -262,14 +408,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Publish live checkpoint
-        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        if: ${{ always() && !inputs.setup_only && steps.prepare.outcome == 'success' }}
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/publish_progress.py --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Final data and logs
-        if: always()
+        if: ${{ always() && !inputs.setup_only }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: results-${{ matrix.os }}
@@ -301,7 +447,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Publish final progress
-        if: always()
+        if: ${{ always() && !inputs.setup_only }}
         continue-on-error: true
         shell: bash
         env:

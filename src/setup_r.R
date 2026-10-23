@@ -4,7 +4,9 @@ library_path <- normalizePath(args[[1L]], mustWork = TRUE)
 .libPaths(c(library_path, .libPaths()))
 repository <- Sys.getenv("RSPM", unset = "")
 if (!nzchar(repository)) repository <- "https://cloud.r-project.org"
-options(repos = c(CRAN = repository), Ncpus = 1L)
+options(repos = c(CRAN = repository), Ncpus = 1L,
+        HTTPUserAgent = sprintf("R/%s R (%s) on GitHub Actions", getRversion(),
+          paste(getRversion(), R.version$platform, R.version$arch, R.version$os)))
 dependencies <- c("jsonlite", "pbapply", "Rcpp", "BH", "RcppArmadillo", "testthat")
 missing <- dependencies[!vapply(dependencies, function(package) {
   requireNamespace(package, lib.loc = library_path, quietly = TRUE)

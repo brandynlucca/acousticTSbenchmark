@@ -133,7 +133,7 @@ if(repository){
   try{
    if(Date.now()-lastRunCheck>120000){
     lastRunCheck=Date.now();
-    try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=1`);if(response.ok)newestRun=response.value.workflow_runs?.[0]||null;}catch(e){}
+    try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok)newestRun=response.value.workflow_runs?.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;}catch(e){}
    }
    const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
    const response=await fetchJSON(url+'?t='+Math.floor(Date.now()/30000));
