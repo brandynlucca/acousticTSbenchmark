@@ -6,7 +6,10 @@ from pathlib import Path
 
 
 def render_report(path, rows, status, repository=None):
-    payload = json.dumps({"rows": rows, "status": status, "repository": repository}, allow_nan=False).replace("<", "\\u003c")
+    from reference_curves import curves_from_rows
+
+    payload = json.dumps({"rows": rows, "status": status, "repository": repository,
+                          "reference_curves": curves_from_rows(rows)}, allow_nan=False).replace("<", "\\u003c")
     document = '''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="refresh" content="30"><title>Spheroid timing progress</title>
@@ -50,12 +53,22 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
+let externalReferenceCurves=[];
 const repository=data.repository;
+const referenceColor='#228B22';
 const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
 const boundaryLabels={rigid:'Fixed rigid',pressure_release:'Pressure release',liquid:'Liquid-filled',gas:'Gas-filled'};
 const semimajor=document.getElementById('semimajor'),aspect=document.getElementById('aspect'),incidence=document.getElementById('incidence'),metric=document.getElementById('metric'),axis=document.getElementById('axis'),layout=document.getElementById('layout');
 const sizeOptions=[.001,.01,.07,.1,.5];
+function referenceCurves(){
+ const unique=new Map();
+ for(const row of [...(data.reference_curves||[]),...externalReferenceCurves]){
+  if(!row||typeof row.physical_id!=='string'||typeof row.reference_id!=='string'||!Number.isFinite(row.ts_db)||!Number.isFinite(row.semimajor_m)||row.semimajor_m<=0||!Number.isFinite(row.aspect_ratio)||!Number.isFinite(row.incidence_deg)||!Number.isFinite(row.frequency_hz))continue;
+  unique.set(`${row.physical_id}:${row.reference_id}`,row);
+ }
+ return [...unique.values()];
+}
 let preferredSize='';
 try{const saved=Number(localStorage.getItem('benchmark-semimajor'));if(Number.isFinite(saved)&&saved>0)preferredSize=String(saved);}catch(e){}
 function snapshotSize(snapshot){
@@ -64,7 +77,7 @@ function snapshotSize(snapshot){
  return values.length===1?values[0]:null;
 }
 function updateSizes(){
- const known=[snapshotSize(data),...rows.map(r=>r.semimajor_m)].filter(a=>Number.isFinite(a)&&a>0);
+ const known=[snapshotSize(data),...rows.map(r=>r.semimajor_m),...referenceCurves().map(r=>r.semimajor_m)].filter(a=>Number.isFinite(a)&&a>0);
  const values=[...new Set([...sizeOptions,...known,...(preferredSize?[Number(preferredSize)]:[])])].sort((a,b)=>a-b);
  semimajor.replaceChildren(...values.map(a=>new Option(String(a),String(a))));
  if(!preferredSize&&known.length)preferredSize=String(known[0]);
@@ -74,7 +87,7 @@ function matchesSize(row){return (Number.isFinite(row.semimajor_m)?row.semimajor
 let availableIncidences=[],preferredIncidence='all',preferredAspect='';
 try{preferredIncidence=localStorage.getItem('benchmark-incidence')||'all';preferredAspect=localStorage.getItem('benchmark-aspect')||'';}catch(e){}
 function updateIncidences(){
- availableIncidences=[...new Set(data.incidences_deg||rows.filter(matchesSize).map(r=>r.incidence_deg))].filter(Number.isFinite).sort((a,b)=>a-b);
+ availableIncidences=[...new Set([...(data.incidences_deg||rows.filter(matchesSize).map(r=>r.incidence_deg)),...referenceCurves().filter(matchesSize).map(r=>r.incidence_deg)])].filter(Number.isFinite).sort((a,b)=>a-b);
  incidence.replaceChildren(new Option('All angles','all'));
  for(const angle of availableIncidences)incidence.add(new Option(`${angle}°`,String(angle)));
  incidence.disabled=!availableIncidences.length;
@@ -82,7 +95,7 @@ function updateIncidences(){
 }
 function updateAspects(){
  const previous=preferredAspect||aspect.value;aspect.replaceChildren();
- const ratios=data.aspect_ratios||[...new Set(rows.filter(matchesSize).map(r=>r.aspect_ratio))];
+ const ratios=[...new Set([...(data.aspect_ratios||rows.filter(matchesSize).map(r=>r.aspect_ratio)),...referenceCurves().filter(matchesSize).map(r=>r.aspect_ratio)])].sort((a,b)=>a-b);
  aspect.disabled=!ratios.length;
  if(!ratios.length){aspect.add(new Option('Waiting for run configuration',''));return;}
  for(const ratio of ratios)aspect.add(new Option(ratio,ratio));
@@ -108,6 +121,7 @@ function updateStatus(){
 updateStatus();
 const legend=document.getElementById('legend');
 for(const key of Object.keys(colors)){const s=document.createElement('span');s.dataset.software=key;s.style.color=colors[key];s.textContent='● '+labels[key];legend.append(s);}
+const referenceLegend=document.createElement('span');referenceLegend.id='reference-legend';referenceLegend.style.color=referenceColor;referenceLegend.textContent='━ BEM / FEM-BEM reference';referenceLegend.hidden=true;legend.append(referenceLegend);
 const angles=document.getElementById('angle-legend');
 function svgElement(name,attrs={},text){const e=document.createElementNS('http://www.w3.org/2000/svg',name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;}
 function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2?values[(n-1)/2]:(values[n/2-1]+values[n/2])/2;}
@@ -185,6 +199,9 @@ function render(){
  try{localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
  const selected=rows.filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
+ const selectedReferences=referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
+ const showReferences=layout.value==='single'&&field==='ts_db';
+ referenceLegend.hidden=!showReferences||!selectedReferences.length;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
  const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>r.aspect_ratio===Number(aspect.value));
  const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db)),failures=selected.filter(timedFailure);
@@ -192,8 +209,8 @@ function render(){
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
- document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${compared.length} of ${measured.length} successful measurements have a matched, convergence-checked reference. References run separately and are reused across platforms. Missing references leave gaps in ΔTS.`;
- const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
+ document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} qualified predictions available for this selection. ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. References run separately and are reused across platforms.`;
+ const allFreq=[...new Set([...(data.axes?.[aspect.value]?.frequencies_hz||selected.map(r=>r.frequency_hz)),...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
  renderAngles(selectedAngles);
@@ -202,15 +219,17 @@ function render(){
  const plotStatus=document.getElementById('plot-status');
  plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
  if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
+ if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
- const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
- let low=axisValues.get(allFreq[0]),high=axisValues.get(allFreq.at(-1));
- const extent=data.axes?.[aspect.value]?.[axis.value];if(extent){low=extent[0];high=extent[1];if(axis.value==='frequency_hz'){low/=1000;high/=1000;}}
+ const axisValues=new Map([...selected,...selectedReferences].map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
+ const coordinates=[...axisValues.values()].filter(Number.isFinite),extent=data.axes?.[aspect.value]?.[axis.value];
+ if(extent)coordinates.push(...extent.map(value=>axis.value==='frequency_hz'?value/1000:value));
+ let low=coordinates.length?Math.min(...coordinates):0,high=coordinates.length?Math.max(...coordinates):1;
  if(low===high){const margin=Math.abs(low)*.1||.5;low-=margin;high+=margin;}
  const grouped=new Map();
  for(const row of measured){const key=JSON.stringify([row.boundary,row.software,row.incidence_deg,row.frequency_hz]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(row);}
- const visibleBoundaries=new Set([...selected.map(r=>r.boundary),...plannedGroups.map(r=>r.boundary)]);
+ const visibleBoundaries=new Set([...selected.map(r=>r.boundary),...plannedGroups.map(r=>r.boundary),...(showReferences?selectedReferences.map(r=>r.boundary):[])]);
  for(const boundary of Object.keys(boundaryLabels).filter(b=>visibleBoundaries.has(b))){
   const section=document.createElement('section'),title=document.createElement('h2');title.textContent=boundaryLabels[boundary];section.append(title);
   const charts=document.createElement('div');charts.className='charts';section.append(charts);panels.append(section);
@@ -232,10 +251,23 @@ function render(){
   for(const measure of layout.value==='paired'?[field,'delta_ts_db']:[field]){
    const transform=v=>measure==='elapsed_seconds'?Math.log10(v):v;
    const valid=measured.filter(r=>validValue(r,measure)),timedFailures=measure==='elapsed_seconds'?failures:[];
-   const yr=extentFor([...valid,...timedFailures].map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
+   const curveRows=measure==='ts_db'?selectedReferences:[];
+   const yr=extentFor([...valid,...timedFailures,...curveRows].map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
    const {svg,x,y}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
    if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
    let count=0;
+   if(curveRows.length)for(const angle of selectedAngles){
+    const byFrequency=new Map(curveRows.filter(r=>r.boundary===boundary&&r.incidence_deg===angle).map(r=>[r.frequency_hz,r]));
+    let previous=null;
+    for(let index=0;index<allFreq.length;index++){
+     const frequency=allFreq[index],row=byFrequency.get(frequency),coordinate=axisValues.get(frequency);
+     if(!row||!Number.isFinite(coordinate)){previous=null;continue;}
+     const xx=x(coordinate),yy=y(row.ts_db),title=`${row.method==='bem'?'BEM':'FEM-BEM'} reference, ${angle}°, ${frequency/1000} kHz: ${formatted(row.ts_db)} dB`;
+     if(previous){const segment=svgElement('path',{class:'reference-segment','data-incidence':angle,'data-boundary':boundary,'data-start-frequency':previous.frequency,'data-end-frequency':frequency,d:`M ${previous.x} ${previous.y} L ${xx} ${yy}`,fill:'none',stroke:referenceColor,'stroke-width':1,'stroke-dasharray':angleStyle(angle).dash});segment.append(svgElement('title',{},title));svg.append(segment);}
+     if(!previous&&!byFrequency.has(allFreq[index+1])){const isolated=svgElement('circle',{class:'reference-point','data-incidence':angle,'data-boundary':boundary,'data-frequency':frequency,cx:xx,cy:yy,r:1.6,fill:referenceColor});isolated.append(svgElement('title',{},title));svg.append(isolated);}
+     previous={x:xx,y:yy,frequency};count++;
+    }
+   }
    for(const software of Object.keys(colors))for(const angle of selectedAngles){
     let path='';
     for(const frequency of allFreq){
@@ -283,6 +315,7 @@ if(repository){
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
  if(!platform.value)platform.value='ubuntu-latest';
  let newestRun=null,newestSetup=null,lastRunCheck=0,lastContentsCheck=0,busy=false,revision='',generation=0;
+ let lastReferenceCheck=0,referenceRun=null;
  let legacySizes=null,lastLegacyCheck=0;
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
@@ -308,6 +341,20 @@ if(repository){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
   try{const response=await fetch(url,{headers,cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,value:response.ok?await response.json():null};}
   finally{clearTimeout(timer);}
+ }
+ function clearReferenceOverlay(){externalReferenceCurves=[];lastReferenceCheck=0;referenceRun=null;}
+ async function pollReferences(requestGeneration){
+  const runId=data.run_id;if(!runId)return;
+  if(referenceRun!==String(runId)){clearReferenceOverlay();referenceRun=String(runId);}
+  if(Date.now()-lastReferenceCheck<120000)return;
+  lastReferenceCheck=Date.now();
+  try{
+   const response=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/reference-curves-${runId}.json?t=${Date.now()}`);
+   if(requestGeneration!==generation||String(data.run_id)!==String(runId))return;
+   const overlay=response.value;
+   if(!response.ok||overlay?.schema_version!==1||String(overlay.run_id)!==String(runId)||!Array.isArray(overlay.reference_curves))return;
+   externalReferenceCurves=overlay.reference_curves;updateSizes();updateAspects();updateIncidences();render();
+  }catch(e){}
  }
  async function poll(){
   if(busy)return;busy=true;const chosen=platform.value,requestGeneration=generation;
@@ -360,7 +407,9 @@ if(repository){
    const url=feed+filename;
    const nextRevision=`${incoming.run_id}:${incoming.run_attempt}:${incoming.published_at}`;
    const order=data.run_id?runOrder(incoming,data):1;
-   if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateSizes();updateAspects();updateIncidences();updateStatus();render();}
+   if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){if(String(incoming.run_id)!==String(data.run_id))clearReferenceOverlay();data=incoming;rows=data.rows;revision=nextRevision;updateSizes();updateAspects();updateIncidences();updateStatus();render();}
+   await pollReferences(requestGeneration);
+   if(requestGeneration!==generation)return;
    connection.textContent=rows.length?`Connected · ${chosen} · a = ${semimajor.value} m · Published ${data.published_at}`:`Connected · ${chosen} · a = ${semimajor.value} m · ${data.state==='completed'?'The displayed data run finished without a benchmark checkpoint. Open its data run link for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
    if(publicFeed)connection.textContent+=' Using the public feed, which GitHub may cache for several minutes.';
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
@@ -369,7 +418,7 @@ if(repository){
   }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}}
   finally{busy=false;if(requestGeneration!==generation)poll();}
  }
- function changeSelection(){generation++;data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();}
+ function changeSelection(){generation++;clearReferenceOverlay();data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();}
  platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}changeSelection();});
  semimajor.addEventListener('change',changeSelection);
  connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);

@@ -175,6 +175,27 @@ def comparison_rows(directory, rows, references=None):
     return rows + retained_comparison_rows(read_json(path), rows, references)
 
 
+def curves_from_rows(rows):
+    """Keep one qualified reference per physical prediction, including pending cases."""
+    curves = {}
+    for row in rows:
+        ts = row.get("reference_ts_db")
+        if (not row.get("reference_id") or not row.get("physical_id") or
+                not isinstance(ts, (int, float)) or isinstance(ts, bool) or
+                not math.isfinite(ts) or not row.get("reference_qualification")):
+            continue
+        fields = ("physical_id", "reference_id", "boundary", "semimajor_m", "aspect_ratio",
+                  "incidence_deg", "frequency_hz", "k0a", "h0")
+        item = {key: row.get(key) for key in fields}
+        item.update(ts_db=ts, uncertainty_db=row.get("reference_uncertainty_db"),
+                    source_sha=row.get("reference_source_sha"),
+                    method="fem_bem" if row.get("boundary") in ("gas", "liquid") else "bem")
+        previous = curves.setdefault(item["physical_id"], item)
+        if previous != item:
+            raise ValueError("Conflicting TS references for one physical prediction")
+    return list(curves.values())
+
+
 def compact_payload(repository, platform, run_id, run_attempt, rows, status=None, state=None):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("results.json must contain a list of records")
@@ -268,7 +289,8 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
                   status=safe_status, status_counts=counts, axes=axes,
                   semimajor_m=semimajor,
                   aspect_ratios=aspects, incidences_deg=angles,
-                  coverage=list(coverage.values()), incidence_coverage=list(incidence_coverage.values()), rows=compact)
+                  coverage=list(coverage.values()), incidence_coverage=list(incidence_coverage.values()), rows=compact,
+                  reference_curves=curves_from_rows(rows))
     if retained_rows:
         retained_sources = sorted({(row["software"], row["source_sha"], row["retained_from_run_id"])
                                    for row in retained_rows})

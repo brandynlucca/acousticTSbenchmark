@@ -249,6 +249,15 @@ def main():
     if args.action == "publish":
         print(f"Persisted {publish_cache(api, jobs, args.cache_dir)} new references", flush=True)
     export_references(jobs, args.cache_dir, args.output)
+    curve_run = args.run_id if args.action == "attach" else os.getenv("GITHUB_RUN_ID")
+    if api is not None and curve_run:
+        from reference_curves import curves_from_cache, publish_curves
+        try:
+            published = publish_curves(api, int(curve_run), curves_from_cache(jobs, args.cache_dir))
+            print(f"Published {published} additional TS reference points", flush=True)
+        except (OSError, RuntimeError, ValueError) as error:
+            # Reference publication must not prevent cached values from being used.
+            print(f"TS reference curve publication deferred ({type(error).__name__})", file=sys.stderr)
     if args.action in ("join", "attach"):
         if not args.directory:
             parser.error("join requires --directory")

@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import benchmark as b
 import reference_store as store
 import references as refs
+import reference_curves as curves
 from publish_progress import APIError
 
 
@@ -255,8 +256,10 @@ class StoreTests(unittest.TestCase):
                      "--cache-dir", str(self.work / "cache"), "--output", str(self.work / "references.json")]
         with patch.object(sys, "argv", arguments), patch.object(store, "GitHub", return_value=api), \
              patch.object(store, "restore_cache", return_value=dict(planned=2, cached=1, missing=1)), \
-             patch("publish_progress.publish") as publish:
+             patch("publish_progress.publish") as publish, patch.object(curves, "publish_curves") as overlay:
             store.main()
+        self.assertEqual(overlay.call_args.args[1], 123)
+        self.assertEqual(len(overlay.call_args.args[2]), 1)
         self.assertEqual(b.read_json(directory / "retained-results.json"), sidecar)
         payload = publish.call_args.args[1]
         self.assertEqual(payload["retained_count"], 1)
@@ -264,6 +267,57 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(payload["status"]["outcomes"], dict(pending=2))
         self.assertEqual(payload["rows"][0]["delta_ts_db"], 2)
         self.assertEqual(payload["rows"][0]["source_sha"], "b" * 40)
+
+    def test_reference_curves_exist_before_any_software_measurement(self):
+        from publish_progress import compact_payload
+        cases = b.build_cases(self.config, software=["acousticts", "echosms"], repetitions=3)
+        reference_map = b.references_from_value(dict(references=self.records))
+        rows = b.summarize(cases, {}, reference_map)
+        payload = compact_payload("owner/repo", "ubuntu-latest", 123, 1, rows)
+        self.assertEqual(payload["rows"], [])
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["status"]["outcomes"], dict(pending=len(cases)))
+        self.assertEqual(len(payload["reference_curves"]), 2)
+        self.assertEqual({r["ts_db"] for r in payload["reference_curves"]}, {-40})
+        self.assertEqual({r["method"] for r in payload["reference_curves"]}, {"fem_bem"})
+        self.assertEqual(curves.curves_from_rows(b.summarize(cases, {}, {})), [])
+
+    def test_reference_curve_cache_rechecks_convergence_and_exact_inputs(self):
+        records = {r["reference_id"]: copy.deepcopy(r) for r in self.records}
+        records[self.jobs[0]["reference_id"]]["evidence"]["baseline"]["diagnostics"]["spatial_converged"] = False
+        points = curves.curves_from_records(self.jobs, records)
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["reference_id"], self.jobs[1]["reference_id"])
+        expected = b.build_cases(self.config, software=["echosms"])[1]
+        for field in ("semimajor_m", "aspect_ratio", "frequency_hz", "k0a", "h0"):
+            self.assertEqual(points[0][field], expected[field])
+
+    def test_reference_curve_publication_merges_shards_without_touching_timings(self):
+        points = curves.curves_from_records(self.jobs, {r["reference_id"]: r for r in self.records})
+        saved = {}
+        calls = []
+        def request(method, path, body=None):
+            calls.append((method, path))
+            self.assertTrue(path.startswith("/contents/reference-curves-123.json"))
+            if method == "GET":
+                if not saved:
+                    raise APIError(404, "missing")
+                return dict(sha="existing", encoding="base64", content=saved["content"])
+            self.assertEqual(method, "PUT")
+            saved.update(body)
+            return {}
+        api = Mock()
+        api.request.side_effect = request
+        self.assertEqual(curves.publish_curves(api, 123, points[:1]), 1)
+        self.assertEqual(curves.publish_curves(api, 123, points[1:]), 1)
+        count = len(calls)
+        self.assertEqual(curves.publish_curves(api, 123, points), 0)
+        self.assertEqual(len(calls), count + 1)
+        payload = json.loads(base64.b64decode(saved["content"]))
+        self.assertEqual(payload["run_id"], 123)
+        self.assertEqual(len(payload["reference_curves"]), 2)
+        with self.assertRaisesRegex(ValueError, "Conflicting"):
+            curves.publish_curves(api, 123, [dict(points[0], ts_db=-30)])
 
     def test_live_controller_attaches_new_references_without_remeasuring(self):
         self.save(0)
