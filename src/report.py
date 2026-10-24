@@ -35,6 +35,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p id="data-run-warning" role="status" hidden></p>
 <p id="data-run" hidden>Displayed data: <a id="data-run-link" target="_blank" rel="noopener"></a><span id="data-run-detail"></span></p>
 <p id="status"></p>
+<p id="latest-prediction" class="note" hidden></p>
 <p id="retained-status" class="note" hidden></p>
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
@@ -110,6 +111,9 @@ function updateStatus(){
  const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
  const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
  document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
+ const latest=rows.filter(r=>r.measurement_role!=='retained'&&r.status!=='pending').at(-1),latestNote=document.getElementById('latest-prediction');
+ latestNote.hidden=!latest;
+ if(latest)latestNote.textContent=`Latest recorded prediction: ${labels[latest.software]||latest.software}, ${boundaryLabels[latest.boundary]||latest.boundary}, a = ${latest.semimajor_m??snapshotSize(data)} m, aspect ratio ${latest.aspect_ratio}, ${latest.incidence_deg}°, ${latest.frequency_hz/1000} kHz. Other selections update when their predictions run.`;
  const retained=rows.filter(r=>r.measurement_role==='retained'),note=document.getElementById('retained-status');
  note.hidden=!retained.length;
  if(retained.length){
@@ -232,6 +236,12 @@ function render(){
  const visibleBoundaries=new Set([...selected.map(r=>r.boundary),...plannedGroups.map(r=>r.boundary),...(showReferences?selectedReferences.map(r=>r.boundary):[])]);
  for(const boundary of Object.keys(boundaryLabels).filter(b=>visibleBoundaries.has(b))){
   const section=document.createElement('section'),title=document.createElement('h2');title.textContent=boundaryLabels[boundary];section.append(title);
+  if(showReferences){
+   const available=selectedReferences.filter(r=>r.boundary===boundary),qualified=new Set(available.map(r=>`${r.incidence_deg}:${r.frequency_hz}`)).size,planned=allFreq.length*selectedAngles.length;
+   const note=document.createElement('p');note.className='note reference-coverage';note.dataset.boundary=boundary;
+   note.textContent=`Qualified references: ${qualified} / ${planned} predictions · ${available.length?'highest available frequency '+formatted(Math.max(...available.map(r=>r.frequency_hz))/1000)+' kHz':'no qualified frequencies yet'} · ${Math.max(0,planned-qualified)} pending or unavailable. Missing frequencies remain gaps.`;
+   section.append(note);
+  }
   const charts=document.createElement('div');charts.className='charts';section.append(charts);panels.append(section);
   if(layout.value==='tradeoff'){
    const matched=measured.filter(r=>validValue(r,field)&&validValue(r,'delta_ts_db'));
@@ -256,6 +266,7 @@ function render(){
    const {svg,x,y}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
    if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
    let count=0;
+   const referenceLayer=svgElement('g',{class:'reference-layer'});
    if(curveRows.length)for(const angle of selectedAngles){
     const byFrequency=new Map(curveRows.filter(r=>r.boundary===boundary&&r.incidence_deg===angle).map(r=>[r.frequency_hz,r]));
     let previous=null;
@@ -263,8 +274,8 @@ function render(){
      const frequency=allFreq[index],row=byFrequency.get(frequency),coordinate=axisValues.get(frequency);
      if(!row||!Number.isFinite(coordinate)){previous=null;continue;}
      const xx=x(coordinate),yy=y(row.ts_db),title=`${row.method==='bem'?'BEM':'FEM-BEM'} reference, ${angle}°, ${frequency/1000} kHz: ${formatted(row.ts_db)} dB`;
-     if(previous){const segment=svgElement('path',{class:'reference-segment','data-incidence':angle,'data-boundary':boundary,'data-start-frequency':previous.frequency,'data-end-frequency':frequency,d:`M ${previous.x} ${previous.y} L ${xx} ${yy}`,fill:'none',stroke:referenceColor,'stroke-width':1,'stroke-dasharray':angleStyle(angle).dash});segment.append(svgElement('title',{},title));svg.append(segment);}
-     if(!previous&&!byFrequency.has(allFreq[index+1])){const isolated=svgElement('circle',{class:'reference-point','data-incidence':angle,'data-boundary':boundary,'data-frequency':frequency,cx:xx,cy:yy,r:1.6,fill:referenceColor});isolated.append(svgElement('title',{},title));svg.append(isolated);}
+     if(previous){const segment=svgElement('path',{class:'reference-segment','data-incidence':angle,'data-boundary':boundary,'data-start-frequency':previous.frequency,'data-end-frequency':frequency,d:`M ${previous.x} ${previous.y} L ${xx} ${yy}`,fill:'none',stroke:referenceColor,'stroke-width':1,'stroke-dasharray':angleStyle(angle).dash});segment.append(svgElement('title',{},title));referenceLayer.append(segment);}
+     if(!previous&&!byFrequency.has(allFreq[index+1])){const isolated=svgElement('circle',{class:'reference-point','data-incidence':angle,'data-boundary':boundary,'data-frequency':frequency,cx:xx,cy:yy,r:1.6,fill:referenceColor});isolated.append(svgElement('title',{},title));referenceLayer.append(isolated);}
      previous={x:xx,y:yy,frequency};count++;
     }
    }
@@ -281,6 +292,7 @@ function render(){
    for(const row of timedFailures.filter(r=>r.boundary===boundary)){
     failurePoint(svg,x(axisValues.get(row.frequency_hz)),y(transform(row.elapsed_seconds)),row);count++;
    }
+   if(referenceLayer.childElementCount)svg.append(referenceLayer);
    const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
    if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for qualified reference comparisons'):'Waiting for measurements'));
   }

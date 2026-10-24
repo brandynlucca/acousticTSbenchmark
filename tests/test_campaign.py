@@ -189,6 +189,19 @@ class CampaignTests(unittest.TestCase):
                 self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
                 self.assertEqual(result["resume_case_order"], "")
 
+    def test_reference_campaign_reads_active_checkpoint_without_resuming(self):
+        content, original = checkpoint(case_order="boundary_major", source_ref="a" * 40)
+        api, run = self.api([dict(id=1, name="checkpoint-ubuntu-latest-1-1")], {1: content})
+        run["status"] = "in_progress"
+        result = campaign.reference_campaign(123, "owner/repo", api)
+        self.assertEqual(result, dict(configuration=original, profile="pilot", source_ref="a" * 40))
+        self.assertTrue(all(call.args[0] == "GET" for call in api.request.call_args_list))
+        with self.assertRaisesRegex(ValueError, "completed"):
+            self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        run["repository"]["full_name"] = "different/repo"
+        with self.assertRaisesRegex(ValueError, "this repository"):
+            campaign.reference_campaign(123, "owner/repo", api)
+
     def test_explicit_resume_order_preserves_original_settings_for_validated_migration(self):
         content, original = checkpoint(case_order="frequency_round_robin", source_ref="a" * 40)
         api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})

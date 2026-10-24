@@ -247,7 +247,7 @@ class StoreTests(unittest.TestCase):
                 archive.writestr(name, json.dumps(value))
         api = Mock(repository="owner/repo")
         api.request.side_effect = [dict(artifacts=[dict(id=1, name="results-ubuntu-latest")]),
-                                   dict(run_attempt=1)]
+                                   dict(run_attempt=1, status="in_progress")]
         api.archive.return_value = output.getvalue()
         self.save(0)
         directory = self.work / "attached"
@@ -262,6 +262,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(overlay.call_args.args[2]), 1)
         self.assertEqual(b.read_json(directory / "retained-results.json"), sidecar)
         payload = publish.call_args.args[1]
+        self.assertEqual(payload["state"], "running")
         self.assertEqual(payload["retained_count"], 1)
         self.assertEqual(payload["status"]["recorded"], 0)
         self.assertEqual(payload["status"]["outcomes"], dict(pending=2))

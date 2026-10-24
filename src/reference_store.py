@@ -249,7 +249,7 @@ def main():
     if args.action == "publish":
         print(f"Persisted {publish_cache(api, jobs, args.cache_dir)} new references", flush=True)
     export_references(jobs, args.cache_dir, args.output)
-    curve_run = args.run_id if args.action == "attach" else os.getenv("GITHUB_RUN_ID")
+    curve_run = args.run_id if args.action == "attach" else os.getenv("REFERENCE_TIMING_RUN_ID", os.getenv("GITHUB_RUN_ID"))
     if api is not None and curve_run:
         from reference_curves import curves_from_cache, publish_curves
         try:
@@ -268,7 +268,7 @@ def main():
         run = api.request("GET", f"/actions/runs/{args.run_id}")
         payload = compact_payload(args.repository, args.platform, args.run_id, run["run_attempt"],
             comparison_rows(args.directory, read_json(args.directory / "results.json")),
-            read_json(args.directory / "status.json"), "completed")
+            read_json(args.directory / "status.json"), "completed" if run.get("status") == "completed" else "running")
         comparison_run = os.getenv("GITHUB_RUN_ID")
         if comparison_run:
             payload["artifacts_url"] = f"https://github.com/{args.repository}/actions/runs/{comparison_run}#artifacts"

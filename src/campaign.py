@@ -449,6 +449,38 @@ def resume_campaign(inputs, repository, api):
                 resume_artifact_run_ids={platform: int(run_id) for platform in selected})
 
 
+def reference_campaign(run_id, repository, api=None):
+    """Read a timing configuration for independent references without resuming it."""
+    run_id = str(run_id).strip()
+    if not run_id.isdecimal() or int(run_id) <= 0:
+        raise ValueError("References require a positive timing run ID")
+    api = api or GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=300)
+    run = api.request("GET", f"/actions/runs/{run_id}")
+    if (run.get("repository", {}).get("full_name") != repository or
+            (run.get("head_repository") or {}).get("full_name") != repository or
+            run.get("event") != "workflow_dispatch" or run.get("path") != ".github/workflows/benchmark.yml"):
+        raise ValueError("References require this repository's timing workflow run")
+    artifacts = []
+    for page in range(1, 101):
+        part = api.request("GET", f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}")["artifacts"]
+        artifacts.extend(part)
+        if len(part) < 100:
+            break
+    else:
+        raise ValueError("Too many timing artifacts to identify reference inputs")
+    from refresh import baseline_settings
+    for platform, artifact in select_resume_artifacts(artifacts).items():
+        content = api.archive(artifact["id"])
+        settings = baseline_settings(content, repository, run_id, platform)
+        if settings is None:
+            if setup_only_checkpoint(content, repository, run_id) is not None:
+                continue
+            settings = checkpoint_settings(content, repository, run.get("head_sha", ""), platform,
+                                           allow_unexported=run.get("conclusion") == "cancelled")
+        return {key: settings[key] for key in ("configuration", "profile", "source_ref")}
+    raise ValueError("The timing run has not saved its reference configuration yet")
+
+
 def resolve(inputs, configuration, repository, revision, api=None):
     """Return validated settings without preparing software or running a worker."""
     if not isinstance(inputs, dict):
