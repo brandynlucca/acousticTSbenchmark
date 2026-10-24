@@ -63,7 +63,8 @@ class CampaignTests(unittest.TestCase):
         run = dict(repository=dict(full_name="owner/repo"), head_repository=dict(full_name="owner/repo"),
                    event="workflow_dispatch", status="completed", path=".github/workflows/benchmark.yml",
                    head_sha="d" * 40)
-        api.request.side_effect = lambda method, path: ({"artifacts": entries} if "/artifacts?" in path else run)
+        api.request.side_effect = lambda method, path: ({"artifacts": entries} if "/artifacts?" in path else
+            {"jobs": []} if "/jobs?" in path else run)
         api.archive.side_effect = lambda identity: payloads[identity]
         return api, run
 
@@ -163,6 +164,67 @@ class CampaignTests(unittest.TestCase):
         for name in ("compared-results-ubuntu-latest", "../results-ubuntu-latest", "missing"):
             with self.assertRaises(ValueError):
                 campaign.select_resume_artifacts(entries, name)
+
+    def test_resume_keeps_queued_platforms_without_repeating_saved_cases(self):
+        content, original = checkpoint(source_ref="a" * 40)
+        api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        original_request = api.request.side_effect
+        jobs = [dict(name="benchmark (ubuntu-latest)", steps=[dict(name="Benchmark chunk 1", status="completed", conclusion="success")]),
+                dict(name="benchmark (windows-latest)", steps=None),
+                dict(name="benchmark (macos-latest)", steps=[dict(name="Benchmark chunk 1", status="completed", conclusion="skipped")]),
+                dict(name="references / references (0)", steps=[])]
+        api.request.side_effect = lambda method, path: {"jobs": jobs} if "/jobs?" in path else original_request(method, path)
+        result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        self.assertEqual(result["platforms"], list(campaign.PLATFORMS))
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2, "windows-latest": 0, "macos-latest": 0})
+        self.assertEqual(result["resume_artifacts"], {"ubuntu-latest": "results-ubuntu-latest"})
+        self.assertEqual(result["source_ref"], "a" * 40)
+        self.assertEqual(result["configuration"], original)
+        result = self.resolve(dict(mode="resume", resume_run_id="123", resume_artifact="results-ubuntu-latest"), api)
+        self.assertEqual(result["platforms"], ["ubuntu-latest"])
+
+    def test_resume_does_not_restart_platforms_with_missing_measurements(self):
+        content, _ = checkpoint()
+        for name in ("Benchmark chunk 1", "Benchmark remaining campaign budget", "Restore previous checkpoints"):
+            api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+            original_request = api.request.side_effect
+            jobs = [dict(name="benchmark (windows-latest)", steps=[dict(name=name, status="completed", conclusion="cancelled")])]
+            api.request.side_effect = lambda method, path: {"jobs": jobs} if "/jobs?" in path else original_request(method, path)
+            with self.subTest(step=name), self.assertRaisesRegex(ValueError, "no usable checkpoint"):
+                self.resolve(dict(mode="resume", resume_run_id="123"), api)
+
+    def test_cancelled_resume_recovers_atomic_records_saved_since_last_table_export(self):
+        def ahead(files):
+            row = files["results.json"][2]
+            files["records/" + row["case_id"] + ".json"] = dict(case_id=row["case_id"],
+                source_sha="a" * 40, status="ok", elapsed_seconds=.3, ts_db=-42)
+        content, _ = checkpoint(alter=ahead)
+        api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        with self.assertRaisesRegex(ValueError, "every recorded case"):
+            self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        run["conclusion"] = "cancelled"
+        result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 3})
+        def wrong_source(files):
+            ahead(files)
+            row = files["results.json"][2]
+            files["records/" + row["case_id"] + ".json"]["source_sha"] = "f" * 40
+        content, _ = checkpoint(alter=wrong_source)
+        api.archive.return_value = content
+        api.archive.side_effect = None
+        with self.assertRaisesRegex(ValueError, "pinned source"):
+            self.resolve(dict(mode="resume", resume_run_id="123"), api)
+
+    def test_cancelled_resume_recovers_table_export_ahead_of_summary(self):
+        def stale_summary(files):
+            files["status.json"]["recorded"] = 1
+        content, _ = checkpoint(alter=stale_summary)
+        api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        with self.assertRaisesRegex(ValueError, "every recorded case"):
+            self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        run["conclusion"] = "cancelled"
+        result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
 
     def test_changed_order_missing_records_and_tampered_metadata_are_rejected(self):
         def missing(files):

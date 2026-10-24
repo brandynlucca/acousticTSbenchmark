@@ -196,7 +196,7 @@ def read_checkpoint(content):
     return values, records
 
 
-def checkpoint_settings(content, repository, head_sha, platform):
+def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexported=False):
     values, records = read_checkpoint(content)
     manifest, status, rows = (values[name] for name in ("manifest.json", "status.json", "results.json"))
     if not isinstance(manifest, dict) or not isinstance(status, dict) or not isinstance(rows, list) or not rows:
@@ -229,14 +229,22 @@ def checkpoint_settings(content, repository, head_sha, platform):
         if row.get("status") not in STATUSES | {"pending"}:
             raise ValueError("Continuation contains an unknown case status")
     recorded = {row["case_id"]: row for row in rows if row["status"] != "pending"}
-    if (type(status.get("recorded")) is not int or status["recorded"] != len(recorded) or
-            status.get("planned") != len(cases) or records.keys() != recorded.keys()):
+    count = status.get("recorded")
+    if (type(count) is not int or count < 0 or count > len(recorded) or
+            (not allow_unexported and count != len(recorded)) or
+            status.get("planned") != len(cases) or recorded.keys() - records.keys() or
+            records.keys() - set(identities) or
+            (not allow_unexported and records.keys() != recorded.keys())):
         raise ValueError("Continuation artifact must contain every recorded case")
+    by_id = {case["case_id"]: case for case in cases}
     for identity, record in records.items():
-        row = recorded[identity]
+        row = recorded.get(identity)
+        case = by_id[identity]
         if (not isinstance(record, dict) or record.get("case_id") != identity or
-                record.get("source_sha") != manifest["sources"]["sources"][row["software"]]["sha"] or
-                any(row.get(key) != value for key, value in record.items())):
+                record.get("source_sha") != manifest["sources"]["sources"][case["software"]]["sha"] or
+                record.get("status") not in STATUSES or
+                any(record[key] != case[key] for key in record.keys() & case.keys()) or
+                (row is not None and any(row.get(key) != value for key, value in record.items()))):
             raise ValueError("Continuation records do not match the case table and pinned source")
     source = values.get("benchmark-source.json")
     if source is not None:
@@ -270,16 +278,44 @@ def resume_campaign(inputs, repository, api):
             break
     else:
         raise ValueError("Too many artifacts to resolve this continuation")
-    selected = select_resume_artifacts(artifacts, str(inputs.get("resume_artifact", "")).strip())
+    explicit = str(inputs.get("resume_artifact", "")).strip()
+    selected = select_resume_artifacts(artifacts, explicit)
     shared, recorded = None, {}
     for platform, artifact in selected.items():
-        settings = checkpoint_settings(api.archive(artifact["id"]), repository, run.get("head_sha", ""), platform)
+        # Cancellation may interrupt the next table export after atomic case
+        # records were saved. The runner rebuilds derived tables on resume.
+        settings = checkpoint_settings(api.archive(artifact["id"]), repository, run.get("head_sha", ""), platform,
+                                       allow_unexported=run.get("conclusion") == "cancelled")
         recorded[platform] = settings.pop("recorded_cases")
         if shared is not None and fingerprint(settings) != fingerprint(shared):
             raise ValueError("Selected platforms have different configurations, software selections, or source revisions")
         shared = settings
     shared.pop("sources_fingerprint")
-    return dict(shared, mode="resume", platforms=list(selected), resume_run_id=run_id,
+    platforms = set(selected)
+    if not explicit:
+        # A cancelled matrix can leave later platforms queued with no artifact.
+        # Recover those jobs with the same resolved inputs and original source.
+        for page in range(1, 101):
+            jobs = api.request("GET", f"/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}")["jobs"]
+            for job in jobs:
+                match = re.fullmatch(r"benchmark \((ubuntu-latest|windows-latest|macos-latest)\)", job["name"])
+                if not match or match[1] in platforms:
+                    continue
+                platform = match[1]
+                started = any(step.get("status") != "pending" and step.get("conclusion") != "skipped"
+                    for step in (job.get("steps") or [])
+                    if step.get("name", "").startswith("Benchmark ")
+                    or step.get("name") == "Restore previous checkpoints")
+                existing = any(artifact_platform(item.get("name", "")) == platform for item in artifacts)
+                if started or existing:
+                    raise ValueError(f"Cannot resume {platform}: work may exist but no usable checkpoint is available")
+                platforms.add(platform)
+                recorded[platform] = 0
+            if len(jobs) < 100:
+                break
+        else:
+            raise ValueError("Too many jobs to recover the original platform selection")
+    return dict(shared, mode="resume", platforms=[p for p in PLATFORMS if p in platforms], resume_run_id=run_id,
                 resume_artifacts={platform: artifact["name"] for platform, artifact in selected.items()},
                 recorded_by_platform=recorded)
 

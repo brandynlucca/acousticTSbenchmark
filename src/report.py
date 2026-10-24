@@ -22,12 +22,16 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 .coverage{overflow-x:auto}label{display:inline-block;margin-bottom:10px}select{max-width:100%}
 .note{color:#505962;font-size:14px;line-height:1.5}
 #connection{padding:12px 16px;background:#eaf1f4;border-left:3px solid #0072b2;line-height:1.5}
+#data-run-warning{padding:12px 16px;background:#fff2d7;border-left:4px solid #946000;line-height:1.5}
 [hidden]{display:none!important}#livebar{display:flex;align-items:baseline;gap:20px;flex-wrap:wrap}
 </style>
 <h1>Spheroid timing progress</h1>
-<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Open benchmark run</a><span id="run-state"></span></div>
+<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><span id="run-state"></span></div>
 <p id="setup-status" class="note" hidden></p>
-<p id="connection" role="status" hidden></p><p id="status"></p>
+<p id="connection" role="status" hidden></p>
+<p id="data-run-warning" role="status" hidden></p>
+<p id="data-run" hidden>Displayed data: <a id="data-run-link" target="_blank" rel="noopener"></a><span id="data-run-detail"></span></p>
+<p id="status"></p>
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Aspect ratio <select id="aspect"></select></label>
@@ -221,10 +225,20 @@ if(repository){
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
   const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
-  runLink.href=current?.html_url||data.run_url||workflowURL;
-  runLink.textContent=current?`Benchmark run #${current.run_number}`:data.run_id?`Benchmark run ${data.run_id}`:'Open benchmark runs';
-  const awaiting=current?.status==='completed'&&data.run_id===current.id&&data.state!=='completed';
-  runState.textContent=awaiting?'Workflow finished · waiting for final data':current?`Workflow ${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:`${data.run_state||data.state||''}${data.run_conclusion?' · '+data.run_conclusion:''}`;
+  runLink.href=current?.html_url||workflowURL;
+  runLink.textContent=current?`Newest benchmark run #${current.run_number}`:'Browse benchmark runs';
+  const awaiting=current?.status==='completed'&&data.run_id&&runOrder(current,data)===0&&data.state!=='completed';
+  runState.textContent=awaiting?'Newest workflow finished · waiting for final data':current?`Newest workflow ${current.status.replaceAll('_',' ')}${current.conclusion?' · '+current.conclusion:''}`:'Newest run status unavailable';
+  const dataRun=document.getElementById('data-run'),dataLink=document.getElementById('data-run-link');
+  dataRun.hidden=!data.run_id;
+  if(data.run_id){
+   dataLink.href=data.run_url||`https://github.com/${repository}/actions/runs/${data.run_id}`;
+   dataLink.textContent=`Run ${data.run_id}`;
+   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value}. Counts, failures and plots below belong to this run.`;
+  }
+  const warning=document.getElementById('data-run-warning'),old=data.run_id&&current&&runOrder(current,data)>0;
+  warning.hidden=!old;
+  warning.textContent=old?`${current.id===data.run_id?'Previous-attempt':'Previous-run'} results for ${platform.value}. These counts, failures and plots belong to run ${data.run_id}, attempt ${data.run_attempt||1}. ${current.status==='completed'?'No newer checkpoint for this platform has been published here. Check the newest run to see whether it selected this platform.':'If this platform was selected for the newest run, it may still be queued or awaiting its first published checkpoint.'}`:'';
   const setup=document.getElementById('setup-status');setup.hidden=!newestSetup;setup.replaceChildren();
   if(newestSetup){const link=document.createElement('a');link.href=newestSetup.html_url;link.target='_blank';link.rel='noopener';link.textContent=`Run #${newestSetup.run_number}`;setup.append('Latest setup check: ',link,` · ${newestSetup.status.replaceAll('_',' ')}${newestSetup.conclusion?' · '+newestSetup.conclusion:''}. Setup checks do not produce timing points.`);}
  }
@@ -259,8 +273,7 @@ if(repository){
    const nextRevision=`${incoming.run_id}:${incoming.run_attempt}:${incoming.published_at}`;
    const order=data.run_id?runOrder(incoming,data):1;
    if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateIncidences();updateStatus();render();}
-   const old=newestRun&&runOrder(newestRun,data)>0;
-   connection.textContent=old?`Showing the last checkpoint from run ${data.run_id}, attempt ${data.run_attempt}. A newer run or attempt is ${newestRun.status.replaceAll('_',' ')}. Open the run to check its selected platforms.`:rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The run finished without a benchmark checkpoint. Open the run for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
+   connection.textContent=rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The displayed data run finished without a benchmark checkpoint. Open its data run link for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
    if(publicFeed)connection.textContent+=' Using the public feed, which GitHub may cache for several minutes.';
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
