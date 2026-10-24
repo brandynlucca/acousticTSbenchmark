@@ -34,7 +34,8 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p id="status"></p>
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
-<p><label>Aspect ratio <select id="aspect"></select></label>
+<p><label>Semimajor axis a (m) <select id="semimajor" aria-describedby="coverage-note"></select></label>
+<label>Aspect ratio <select id="aspect"></select></label>
 <label>Incidence <select id="incidence" aria-describedby="coverage-note"><option value="all">All angles</option></select></label>
 <label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
@@ -51,24 +52,41 @@ const repository=data.repository;
 const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
 const boundaryLabels={rigid:'Fixed rigid',pressure_release:'Pressure release',liquid:'Liquid-filled',gas:'Gas-filled'};
-const aspect=document.getElementById('aspect'),incidence=document.getElementById('incidence'),metric=document.getElementById('metric'),axis=document.getElementById('axis'),layout=document.getElementById('layout');
-let availableIncidences=[],preferredIncidence='all';
-try{preferredIncidence=localStorage.getItem('benchmark-incidence')||'all';}catch(e){}
+const semimajor=document.getElementById('semimajor'),aspect=document.getElementById('aspect'),incidence=document.getElementById('incidence'),metric=document.getElementById('metric'),axis=document.getElementById('axis'),layout=document.getElementById('layout');
+const sizeOptions=[.001,.01,.07,.1,.5];
+let preferredSize='';
+try{const saved=Number(localStorage.getItem('benchmark-semimajor'));if(Number.isFinite(saved)&&saved>0)preferredSize=String(saved);}catch(e){}
+function snapshotSize(snapshot){
+ if(Number.isFinite(snapshot.semimajor_m)&&snapshot.semimajor_m>0)return snapshot.semimajor_m;
+ const values=[...new Set((snapshot.rows||[]).map(r=>r.semimajor_m).filter(a=>Number.isFinite(a)&&a>0))];
+ return values.length===1?values[0]:null;
+}
+function updateSizes(){
+ const known=[snapshotSize(data),...rows.map(r=>r.semimajor_m)].filter(a=>Number.isFinite(a)&&a>0);
+ const values=[...new Set([...sizeOptions,...known,...(preferredSize?[Number(preferredSize)]:[])])].sort((a,b)=>a-b);
+ semimajor.replaceChildren(...values.map(a=>new Option(String(a),String(a))));
+ if(!preferredSize&&known.length)preferredSize=String(known[0]);
+ semimajor.value=preferredSize||'0.07';
+}
+function matchesSize(row){return (Number.isFinite(row.semimajor_m)?row.semimajor_m:snapshotSize(data))===Number(semimajor.value);}
+let availableIncidences=[],preferredIncidence='all',preferredAspect='';
+try{preferredIncidence=localStorage.getItem('benchmark-incidence')||'all';preferredAspect=localStorage.getItem('benchmark-aspect')||'';}catch(e){}
 function updateIncidences(){
- availableIncidences=[...new Set(data.incidences_deg||rows.map(r=>r.incidence_deg))].filter(Number.isFinite).sort((a,b)=>a-b);
+ availableIncidences=[...new Set(data.incidences_deg||rows.filter(matchesSize).map(r=>r.incidence_deg))].filter(Number.isFinite).sort((a,b)=>a-b);
  incidence.replaceChildren(new Option('All angles','all'));
  for(const angle of availableIncidences)incidence.add(new Option(`${angle}°`,String(angle)));
  incidence.disabled=!availableIncidences.length;
  incidence.value=[...incidence.options].some(o=>o.value===preferredIncidence)?preferredIncidence:'all';
 }
 function updateAspects(){
- const previous=aspect.value;aspect.replaceChildren();
- const ratios=data.aspect_ratios||[...new Set(rows.map(r=>r.aspect_ratio))];
+ const previous=preferredAspect||aspect.value;aspect.replaceChildren();
+ const ratios=data.aspect_ratios||[...new Set(rows.filter(matchesSize).map(r=>r.aspect_ratio))];
  aspect.disabled=!ratios.length;
  if(!ratios.length){aspect.add(new Option('Waiting for run configuration',''));return;}
  for(const ratio of ratios)aspect.add(new Option(ratio,ratio));
  if([...aspect.options].some(o=>o.value===previous))aspect.value=previous;
 }
+updateSizes();
 updateAspects();
 updateIncidences();
 try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;layout.value=localStorage.getItem('benchmark-layout')||'paired';}catch(e){}
@@ -147,9 +165,9 @@ function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=fals
 function render(){
  if(layout.value!=='single'&&!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))metric.value='elapsed_seconds';
  axis.disabled=layout.value==='tradeoff';
- try{localStorage.setItem('benchmark-aspect',aspect.value);localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
+ try{localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
- const selected=rows.filter(r=>r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
+ const selected=rows.filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
  const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>r.aspect_ratio===Number(aspect.value));
  const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db));
@@ -161,10 +179,10 @@ function render(){
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
  renderAngles(selectedAngles);
- document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Campaign progress above includes every planned case.`:'The incidence selector applies to every plot and coverage row once the run configuration is available.';
+ document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Campaign progress above includes every planned case in the displayed run.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?'No run configuration has been published for this platform yet.':!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
@@ -224,7 +242,8 @@ function render(){
   for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
-aspect.addEventListener('change',render);incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
+aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
+semimajor.addEventListener('change',()=>{preferredSize=semimajor.value;try{localStorage.setItem('benchmark-semimajor',preferredSize);}catch(e){}if(!repository){updateAspects();updateIncidences();render();}});
 if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
  document.getElementById('livebar').hidden=false;document.getElementById('connection').hidden=false;
@@ -237,7 +256,8 @@ if(repository){
  document.getElementById('csv-link').textContent='Full data and artifacts';document.getElementById('json-link').hidden=true;
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
  if(!platform.value)platform.value='ubuntu-latest';
- let newestRun=null,newestSetup=null,lastRunCheck=0,lastContentsCheck=0,busy=false,revision='';
+ let newestRun=null,newestSetup=null,lastRunCheck=0,lastContentsCheck=0,busy=false,revision='',generation=0;
+ let legacySizes=null,lastLegacyCheck=0;
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
   const current=newestRun&&(!data.run_id||runOrder(newestRun,data)>=0)?newestRun:null;
@@ -250,11 +270,11 @@ if(repository){
   if(data.run_id){
    dataLink.href=data.run_url||`https://github.com/${repository}/actions/runs/${data.run_id}`;
    dataLink.textContent=`Run ${data.run_id}`;
-   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value}. Counts, failures and plots below belong to this run.`;
+   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value} · a = ${semimajor.value} m. Counts, failures and plots below belong to this run.`;
   }
   const warning=document.getElementById('data-run-warning'),old=data.run_id&&current&&runOrder(current,data)>0;
   warning.hidden=!old;
-  warning.textContent=old?`${current.id===data.run_id?'Previous-attempt':'Previous-run'} results for ${platform.value}. These counts, failures and plots belong to run ${data.run_id}, attempt ${data.run_attempt||1}. ${current.status==='completed'?'No newer checkpoint for this platform has been published here. Check the newest run to see whether it selected this platform.':'If this platform was selected for the newest run, it may still be queued or awaiting its first published checkpoint.'}`:'';
+  warning.textContent=old?`${current.id===data.run_id?'Previous-attempt':'Previous-run'} results for ${platform.value} at a = ${semimajor.value} m. These counts, failures and plots belong to run ${data.run_id}, attempt ${data.run_attempt||1}. A newer run may use a different size or platform. Selected platforms may also be queued or awaiting their first checkpoint.`:'';
   const setup=document.getElementById('setup-status');setup.hidden=!newestSetup;setup.replaceChildren();
   if(newestSetup){const link=document.createElement('a');link.href=newestSetup.html_url;link.target='_blank';link.rel='noopener';link.textContent=`Run #${newestSetup.run_number}`;setup.append('Latest setup check: ',link,` · ${newestSetup.status.replaceAll('_',' ')}${newestSetup.conclusion?' · '+newestSetup.conclusion:''}. Setup checks do not produce timing points.`);}
  }
@@ -264,40 +284,68 @@ if(repository){
   finally{clearTimeout(timer);}
  }
  async function poll(){
-  if(busy)return;busy=true;const chosen=platform.value;
+  if(busy)return;busy=true;const chosen=platform.value,requestGeneration=generation;
   try{
    if(Date.now()-lastRunCheck>300000){
     lastRunCheck=Date.now();
     try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
    }
-   const url=`https://raw.githubusercontent.com/${repository}/benchmark-data/${chosen}.json`;
-   const contentsURL=`https://api.github.com/repos/${repository}/contents/${chosen}.json?ref=benchmark-data&t=${Date.now()}`;
-   let response,publicFeed=false;
-   // Keep REST requests below the anonymous hourly limit while polling the public feed more often.
-   if(Date.now()-lastContentsCheck>=120000){
-    lastContentsCheck=Date.now();
-    try{response=await fetchJSON(contentsURL,{Accept:'application/vnd.github.raw+json'});}catch(e){}
+   const feed=`https://raw.githubusercontent.com/${repository}/benchmark-data/`;
+   let publicFeed=false;
+   async function snapshot(filename,allowREST){
+    let response;
+    // At most one periodic REST request per poll cycle, below the anonymous hourly limit.
+    if(allowREST&&Date.now()-lastContentsCheck>=150000){
+     lastContentsCheck=Date.now();
+     try{response=await fetchJSON(`https://api.github.com/repos/${repository}/contents/${filename}?ref=benchmark-data&t=${Date.now()}`,{Accept:'application/vnd.github.raw+json'});}catch(e){}
+    }
+    if(!response||(!response.ok&&response.status!==404)){publicFeed=true;response=await fetchJSON(feed+filename+'?t='+Date.now());}
+    if(response.ok){
+     const value=response.value;
+     if(value.schema_version!==1||!Array.isArray(value.rows)||value.platform!==chosen)throw new Error('Unexpected progress data');
+     const sizes=[value.semimajor_m,...value.rows.map(r=>r.semimajor_m)].filter(a=>a!==undefined&&a!==null);
+     if(sizes.some(a=>!Number.isFinite(a)||a<=0)||new Set(sizes).size>1)throw new Error('Progress data contains inconsistent semimajor axes');
+    }
+    return response;
    }
-   if(!response||(!response.ok&&response.status!==404)){
-    publicFeed=true;response=await fetchJSON(url+'?t='+Date.now());
+   let filename=`${chosen}.json`,response=await snapshot(filename,!preferredSize||snapshotSize(data)===Number(preferredSize));
+   if(requestGeneration!==generation)return;
+   // Source-pinned older runs omit a. A one-time artifact import records their exact size.
+   if(response.ok&&snapshotSize(response.value)===null){
+    if(legacySizes===null||Date.now()-lastLegacyCheck>300000){
+     lastLegacyCheck=Date.now();
+     try{const legacy=await fetchJSON(feed+'legacy-run-sizes.json?t='+Date.now());if(legacy.ok&&legacy.value.schema_version===1)legacySizes=legacy.value.runs||{};}catch(e){}
+     legacySizes=legacySizes||{};
+    }
+    const size=legacySizes[String(response.value.run_id)];
+    if(Number.isFinite(size)&&size>0)response.value.semimajor_m=size;
    }
-   if(chosen!==platform.value)return;
-   if(response.status===404){connection.textContent=`No checkpoint has been published for ${chosen} yet. Setup must finish before measured points appear.`;showRun();return;}
+   if(requestGeneration!==generation)return;
+   const latestSize=response.ok?snapshotSize(response.value):null;
+   if(!preferredSize&&latestSize!==null){preferredSize=String(latestSize);updateSizes();semimajor.value=preferredSize;}
+   if(preferredSize&&latestSize!==Number(preferredSize)){
+    filename=`${chosen}-a-${Number(preferredSize)}.json`;response=await snapshot(filename,true);
+   }
+   if(requestGeneration!==generation)return;
+   if(response.status===404){connection.textContent=`No results have been published for ${chosen} at a = ${semimajor.value} m yet. Run a benchmark at this size to populate it.`;showRun();return;}
    if(!response.ok)throw new Error(`Progress request returned ${response.status}`);
    const incoming=response.value;
-   if(incoming.schema_version!==1||!Array.isArray(incoming.rows)||incoming.platform!==chosen)throw new Error('Unexpected progress data');
+   if(snapshotSize(incoming)!==Number(semimajor.value)){connection.textContent='The size of this older snapshot has not been recovered from its artifact yet.';showRun();return;}
+   const url=feed+filename;
    const nextRevision=`${incoming.run_id}:${incoming.run_attempt}:${incoming.published_at}`;
    const order=data.run_id?runOrder(incoming,data):1;
-   if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateAspects();updateIncidences();updateStatus();render();}
-   connection.textContent=rows.length?`Connected · ${chosen} · Published ${data.published_at}`:`Connected · ${chosen} · ${data.state==='completed'?'The displayed data run finished without a benchmark checkpoint. Open its data run link for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
+   if(nextRevision!==revision&&(order>0||(order===0&&incoming.published_at>=data.published_at))){data=incoming;rows=data.rows;revision=nextRevision;updateSizes();updateAspects();updateIncidences();updateStatus();render();}
+   connection.textContent=rows.length?`Connected · ${chosen} · a = ${semimajor.value} m · Published ${data.published_at}`:`Connected · ${chosen} · a = ${semimajor.value} m · ${data.state==='completed'?'The displayed data run finished without a benchmark checkpoint. Open its data run link for details.':'Setup or the first benchmark chunk is still running. Measured points will appear here automatically.'}`;
    if(publicFeed)connection.textContent+=' Using the public feed, which GitHub may cache for several minutes.';
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
-  }catch(error){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}
-  finally{busy=false;if(chosen!==platform.value)poll();}
+  }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}}
+  finally{busy=false;if(requestGeneration!==generation)poll();}
  }
- platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();});
+ function changeSelection(){generation++;data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();}
+ platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}changeSelection();});
+ semimajor.addEventListener('change',changeSelection);
  connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);
 }
 </script></html>'''.replace("PAYLOAD", payload)

@@ -21,7 +21,8 @@ from benchmark import ROOT, build_cases, read_json
 
 BRANCH = "benchmark-data"
 PLATFORMS = ("ubuntu-latest", "windows-latest", "macos-latest")
-ROW_FIELDS = ("software", "boundary", "aspect_ratio", "incidence_deg", "frequency_hz",
+SEMIMAJOR_OPTIONS = (.001, .01, .07, .1, .5)
+ROW_FIELDS = ("software", "boundary", "semimajor_m", "aspect_ratio", "incidence_deg", "frequency_hz",
               "k0a", "h0", "elapsed_seconds", "ts_db", "delta_ts_db", "status", "repetition",
               "physical_id", "reference_id", "reference_ts_db", "reference_uncertainty_db")
 ROW_FIELDS += ("memory_delta_peak_bytes", "memory_baseline_rss_bytes", "memory_peak_rss_bytes",
@@ -134,6 +135,17 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
     def finite_number(value):
         return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
+    sizes = set()
+    for row in rows:
+        size = row.get("semimajor_m")
+        if size is None:
+            continue
+        if not finite_number(size) or size <= 0:
+            raise ValueError("semimajor_m must be a finite positive number")
+        sizes.add(size)
+    if len(sizes) > 1:
+        raise ValueError("A progress snapshot must contain only one semimajor axis")
+    semimajor = next(iter(sizes), None)
     aspects = sorted({row["aspect_ratio"] for row in rows if finite_number(row.get("aspect_ratio"))})
     angles = sorted({row["incidence_deg"] for row in rows if finite_number(row.get("incidence_deg"))})
     axes = {}
@@ -201,6 +213,7 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
                   artifacts_url=run_url + "#artifacts", platform=platform,
                   published_at=datetime.now(timezone.utc).isoformat(), state=state,
                   status=safe_status, status_counts=counts, axes=axes,
+                  semimajor_m=semimajor,
                   aspect_ratios=aspects, incidences_deg=angles,
                   coverage=list(coverage.values()), incidence_coverage=list(incidence_coverage.values()), rows=compact)
     json.dumps(result, allow_nan=False)
@@ -292,8 +305,22 @@ def artifact_payload(api, platform, run_id, state=None):
     return payload
 
 
-def existing_snapshot(api, platform):
-    path = f"/contents/{platform}.json?" + urlencode({"ref": BRANCH})
+def snapshot_filename(platform, semimajor=None):
+    if platform not in PLATFORMS:
+        raise ValueError("Invalid progress snapshot platform")
+    if semimajor is None:
+        return f"{platform}.json"
+    if isinstance(semimajor, bool) or semimajor not in SEMIMAJOR_OPTIONS:
+        raise ValueError("Unsupported semimajor axis for a saved progress snapshot")
+    return f"{platform}-a-{format(semimajor, '.15g')}.json"
+
+
+def existing_snapshot(api, platform, filename=None):
+    allowed = {snapshot_filename(platform), *(snapshot_filename(platform, size) for size in SEMIMAJOR_OPTIONS)}
+    filename = snapshot_filename(platform) if filename is None else filename
+    if filename not in allowed:
+        raise ValueError("Invalid progress snapshot filename")
+    path = f"/contents/{filename}?" + urlencode({"ref": BRANCH})
     try:
         content = api.request("GET", path)
     except APIError as error:
@@ -318,12 +345,8 @@ def existing_snapshot(api, platform):
     return json.loads(decoded), content["sha"]
 
 
-def publish(api, payload):
+def _publish_snapshot(api, payload, filename, encoded):
     platform = payload["platform"]
-    serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
-    if len(serialized) > MAX_SNAPSHOT_BYTES:
-        raise ValueError("Progress snapshot exceeds the supported size")
-    encoded = base64.b64encode(serialized).decode()
     message = f"Update {platform} progress for run {payload['run_id']} attempt {payload['run_attempt']}"
     for _ in range(4):
         try:
@@ -332,7 +355,7 @@ def publish(api, payload):
             if error.status != 404:
                 raise
             blob = api.request("POST", "/git/blobs", dict(content=encoded, encoding="base64"))
-            tree = api.request("POST", "/git/trees", {"tree": [dict(path=f"{platform}.json",
+            tree = api.request("POST", "/git/trees", {"tree": [dict(path=filename,
                                mode="100644", type="blob", sha=blob["sha"])]})
             commit = api.request("POST", "/git/commits", dict(message=message, tree=tree["sha"], parents=[]))
             try:
@@ -342,19 +365,33 @@ def publish(api, payload):
                 if conflict.status not in (409, 422):
                     raise
                 continue
-        current, sha = existing_snapshot(api, platform)
+        current, sha = existing_snapshot(api, platform, filename)
         if not should_publish(current, payload):
             return False
         body = dict(message=message, content=encoded, branch=BRANCH)
         if sha is not None:
             body["sha"] = sha
         try:
-            api.request("PUT", f"/contents/{platform}.json", body)
+            api.request("PUT", f"/contents/{filename}", body)
             return True
         except APIError as error:
             if error.status not in (409, 422):
                 raise
     raise RuntimeError("Progress changed concurrently too often. Retry publication")
+
+
+def publish(api, payload):
+    platform = payload["platform"]
+    latest = snapshot_filename(platform)
+    serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    if len(serialized) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Progress snapshot exceeds the supported size")
+    encoded = base64.b64encode(serialized).decode()
+    semimajor = payload.get("semimajor_m")
+    changed = False
+    if not isinstance(semimajor, bool) and semimajor in SEMIMAJOR_OPTIONS:
+        changed = _publish_snapshot(api, payload, snapshot_filename(platform, semimajor), encoded)
+    return _publish_snapshot(api, payload, latest, encoded) or changed
 
 
 def main():

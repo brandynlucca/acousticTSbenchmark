@@ -8,4 +8,4 @@ In **Actions → Dense spheroid timings → Run workflow**, choose `new` and set
 
 Choose `resume` and enter the previous run ID to continue its saved cases with its original settings and ordering, including platforms that were queued when the run stopped. The default budget is 240 minutes per platform, including setup, with 45 and 120 minutes also available. Large grids require multiple sessions. References run separately and are cached. Results are downloadable artifacts.
 
-[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/) shows time and ΔTS together, a cost–error view, and sampled peak additional RAM per prediction in MiB. The incidence selector filters every plot and the coverage table.
+[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/) shows time and ΔTS together, a cost–error view, and sampled peak additional RAM per prediction in MiB. Select `a` (0.001, 0.01, 0.07, 0.1, or 0.5 m) to view its latest saved campaign on the chosen platform. Sizes without results stay empty. Size, aspect ratio, and incidence selections apply to every plot and the coverage table.

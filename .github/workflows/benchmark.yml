@@ -31,7 +31,8 @@ on:
         default: '2'
       semimajor_m:
         description: Fixed semimajor axis a in metres (total length is 2a)
-        type: string
+        type: choice
+        options: ['0.001', '0.01', '0.07', '0.1', '0.5']
         default: '0.07'
       aspect_ratios:
         description: Aspect ratios a/b, comma-separated, each greater than 1

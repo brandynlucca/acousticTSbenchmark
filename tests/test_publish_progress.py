@@ -72,6 +72,26 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(payload["incidences_deg"], [0, 37, 90])
         self.assertEqual(payload["status_counts"], {"ok": 1, "setup_timeout": 1})
 
+    def test_snapshot_preserves_one_size_including_pending_setup(self):
+        rows = [dict(semimajor_m=.01, status="ok"), dict(semimajor_m=.01, status="pending")]
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows)
+        self.assertEqual(payload["semimajor_m"], .01)
+        self.assertEqual(payload["rows"][0]["semimajor_m"], .01)
+        setup = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows[1:], state="setup")
+        self.assertEqual(setup["semimajor_m"], .01)
+        self.assertEqual(setup["rows"], [])
+        legacy = self.payload()
+        self.assertIsNone(legacy["semimajor_m"])
+        self.assertIsNone(legacy["rows"][0]["semimajor_m"])
+
+    def test_snapshot_rejects_mixed_and_invalid_sizes(self):
+        with self.assertRaisesRegex(ValueError, "only one semimajor"):
+            progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1,
+                                     [dict(semimajor_m=.01), dict(semimajor_m=.07)])
+        for size in (0, -1, True, "0.01", float("nan"), float("inf")):
+            with self.subTest(size=size), self.assertRaisesRegex(ValueError, "finite positive"):
+                progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, [dict(semimajor_m=size)])
+
     def test_prediction_memory_preserves_zero_and_missing_observations(self):
         payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, [
             dict(status="ok", memory_delta_peak_bytes=0, memory_baseline_rss_bytes=1048576,
@@ -250,6 +270,77 @@ class ProgressTests(unittest.TestCase):
         puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
         self.assertEqual(len(puts), 1)
         self.assertEqual(puts[0].args[2]["sha"], "old-sha")
+
+    def test_size_snapshot_updates_before_latest_with_separate_revision_guards(self):
+        proposed = dict(self.payload(12), semimajor_m=.01)
+        previous = dict(self.payload(11), semimajor_m=.07)
+        api = Mock()
+        api.request.side_effect = [{"ref": "exists"}, progress.APIError(404, "Missing"), {},
+            {"ref": "exists"}, dict(sha="latest-sha", encoding="base64",
+                content=base64.b64encode(json.dumps(previous).encode()).decode()), {}]
+        self.assertTrue(progress.publish(api, proposed))
+        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
+        self.assertEqual([call.args[1] for call in puts],
+                         ["/contents/ubuntu-latest-a-0.01.json", "/contents/ubuntu-latest.json"])
+        self.assertNotIn("sha", puts[0].args[2])
+        self.assertEqual(puts[1].args[2]["sha"], "latest-sha")
+        for call in puts:
+            self.assertEqual(json.loads(base64.b64decode(call.args[2]["content"])), proposed)
+
+    def test_older_size_can_update_without_overwriting_latest_other_size(self):
+        proposed = dict(self.payload(12), semimajor_m=.07)
+
+        def content(payload, sha):
+            return dict(sha=sha, encoding="base64",
+                        content=base64.b64encode(json.dumps(payload).encode()).decode())
+
+        api = Mock()
+        api.request.side_effect = [{"ref": "exists"}, content(dict(self.payload(11), semimajor_m=.07), "size-sha"), {},
+            {"ref": "exists"}, content(dict(self.payload(13), semimajor_m=.01), "latest-sha")]
+        self.assertTrue(progress.publish(api, proposed))
+        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0].args[1], "/contents/ubuntu-latest-a-0.07.json")
+        self.assertEqual(puts[0].args[2]["sha"], "size-sha")
+
+    def test_size_conflict_preserves_newer_size_and_latest_snapshots(self):
+        proposed = dict(self.payload(12), semimajor_m=.01)
+
+        def content(run, sha):
+            payload = dict(self.payload(run), semimajor_m=.01)
+            return dict(sha=sha, encoding="base64",
+                        content=base64.b64encode(json.dumps(payload).encode()).decode())
+
+        api = Mock()
+        api.request.side_effect = [{"ref": "exists"}, content(11, "old-size-sha"), progress.APIError(409, "Conflict"),
+            {"ref": "exists"}, content(13, "new-size-sha"), {"ref": "exists"}, content(13, "latest-sha")]
+        self.assertFalse(progress.publish(api, proposed))
+        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(puts[0].args[1], "/contents/ubuntu-latest-a-0.01.json")
+        self.assertEqual(puts[0].args[2]["sha"], "old-size-sha")
+
+    def test_failed_size_publication_does_not_advance_latest_snapshot(self):
+        api = Mock()
+        api.request.side_effect = [{"ref": "exists"}, progress.APIError(404, "Missing"),
+                                   progress.APIError(500, "Failed")]
+        with self.assertRaises(progress.APIError):
+            progress.publish(api, dict(self.payload(), semimajor_m=.1))
+        self.assertEqual(api.request.call_count, 3)
+        self.assertEqual(api.request.call_args.args[1], "/contents/ubuntu-latest-a-0.1.json")
+
+    def test_snapshot_filenames_are_limited_to_the_selected_platform_and_five_sizes(self):
+        api = Mock()
+        for filename in ("../ubuntu-latest.json", "windows-latest.json", "ubuntu-latest-a-0.02.json",
+                         "ubuntu-latest-a-0.01.json?ref=main"):
+            with self.subTest(filename=filename), self.assertRaisesRegex(ValueError, "filename"):
+                progress.existing_snapshot(api, "ubuntu-latest", filename)
+        api.request.assert_not_called()
+        self.assertEqual([progress.snapshot_filename("ubuntu-latest", size)
+                          for size in progress.SEMIMAJOR_OPTIONS],
+            [f"ubuntu-latest-a-{size}.json" for size in ("0.001", "0.01", "0.07", "0.1", "0.5")])
+        with self.assertRaisesRegex(ValueError, "platform"):
+            progress.snapshot_filename("../ubuntu-latest")
 
     def test_large_snapshot_uses_blob_when_contents_omits_inline_data(self):
         payload = dict(self.payload(), padding="x" * (1024 * 1024))
