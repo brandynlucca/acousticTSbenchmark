@@ -1,6 +1,7 @@
 """Editable campaign inputs and reconstruction of immutable timing artifacts."""
 
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 import benchmark
 import campaign
+import resume_order
 
 
 def configuration():
@@ -29,13 +31,16 @@ def configuration():
         profiles=dict(pilot=dict(aspect_ratios=[10], incidences_deg=[90], boundaries=["gas"]), full={}))
 
 
-def checkpoint(platform="ubuntu-latest", programs=None, repeats=3, count=2, source_ref=None, alter=None):
+def checkpoint(platform="ubuntu-latest", programs=None, repeats=3, count=2, source_ref=None, alter=None,
+               case_order=None, profile="pilot"):
     config = configuration()
+    if case_order is not None:
+        config["case_order"] = case_order
     config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=1000)
     programs = programs or ["echosms", "acousticts"]
-    cases = benchmark.build_cases(config, "pilot", programs, repeats)
+    cases = benchmark.build_cases(config, profile, programs, repeats)
     lock = {"sources": {name: {"sha": "a" * 40} for name in benchmark.CAPABILITIES}}
-    identity = dict(configuration=config, sources=lock, profile="pilot", cases=[case["case_id"] for case in cases],
+    identity = dict(configuration=config, sources=lock, profile=profile, cases=[case["case_id"] for case in cases],
         adapter_hashes={"worker.py": "b" * 64},
         platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform],
         architecture="x86_64", environment_fingerprint="c" * 64,
@@ -93,9 +98,37 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual({case["aspect_ratio"] for case in cases}, {10})
         self.assertEqual({case["incidence_deg"] for case in cases}, {0, 37, 90})
         self.assertEqual({case["boundary"] for case in cases}, set(benchmark.BOUNDARIES))
-        self.assertEqual(config["case_order"], "frequency_round_robin")
+        self.assertEqual(config["case_order"], "boundary_major")
         self.assertEqual(cases[-1]["frequency_hz"], 300000)
         self.assertEqual(result["platforms"], ["ubuntu-latest"])
+
+    def test_focused_sweeps_complete_each_combination_with_all_software_and_repetitions(self):
+        inputs = dict(semimajor_m="0.1", aspect_ratios="10,1.01", incidences_deg="90,37",
+                      boundaries="gas,rigid", software="acousticts,echosms", repetitions=3,
+                      frequency_start_khz="1", frequency_end_khz="4", frequency_interval_khz="2")
+        result = self.resolve(inputs)
+        cases = benchmark.build_cases(result["configuration"], result["profile"])
+        key = lambda case: (case["semimajor_m"], case["boundary"], case["aspect_ratio"], case["incidence_deg"])
+        groups = [(group, list(items)) for group, items in itertools.groupby(cases, key)]
+        self.assertEqual([group for group, _ in groups],
+                         list(itertools.product([.1], ["gas", "rigid"], [10, 1.01], [90, 37])))
+        for _, items in groups:
+            frequencies = [(frequency, list(batch)) for frequency, batch in
+                           itertools.groupby(items, lambda case: case["frequency_hz"])]
+            self.assertEqual([frequency for frequency, _ in frequencies], [1000, 3000, 4000])
+            for _, batch in frequencies:
+                self.assertCountEqual([(case["software"], case["repetition"]) for case in batch],
+                                      itertools.product(["acousticts", "echosms"], [1, 2, 3]))
+        for choice in ("Frequency by frequency", "frequency_round_robin"):
+            round_robin = self.resolve(dict(inputs, case_order=choice))
+            interleaved = benchmark.build_cases(round_robin["configuration"], round_robin["profile"])
+            self.assertEqual([case["frequency_hz"] for case in interleaved],
+                             sorted(case["frequency_hz"] for case in cases))
+            self.assertEqual({case["case_id"]: case for case in cases},
+                             {case["case_id"]: case for case in interleaved})
+        for choice in ("Complete each frequency sweep", "boundary_major"):
+            selected = self.resolve(dict(inputs, case_order=choice))
+            self.assertEqual(benchmark.build_cases(selected["configuration"], selected["profile"]), cases)
 
     def test_custom_dimensions_angles_materials_and_exact_decimal_hz(self):
         result = self.resolve(dict(mode="prepare", platform="all", software="Prol_Spheroid, acousticTS",
@@ -122,7 +155,8 @@ class CampaignTests(unittest.TestCase):
             {"incidences_deg": "91"}, {"incidences_deg": "37,37"}, {"boundaries": "gas,,liquid"},
             {"boundaries": "unknown"}, {"software": "acousticscattering"}, {"software": "acousticts,acousticts"},
             {"software": ""}, {"repetitions": 2}, {"repetitions": True}, {"platform": "unknown"},
-            {"mode": "restart"}, {"frequency_end_khz": "1000000000", "frequency_interval_khz": ".001"}):
+            {"mode": "restart"}, {"case_order": "unknown"}, {"case_order": []},
+            {"frequency_end_khz": "1000000000", "frequency_interval_khz": ".001"}):
             with self.subTest(inputs=inputs), self.assertRaises(ValueError):
                 self.resolve(inputs)
 
@@ -130,7 +164,7 @@ class CampaignTests(unittest.TestCase):
         content, original = checkpoint()
         api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
         result = self.resolve(dict(mode="resume", resume_run_id="123", platform="invalid", software="invalid",
-            repetitions=0, frequency_end_khz=-1, aspect_ratios="1", semimajor_m="NaN"), api)
+            repetitions=0, frequency_end_khz=-1, aspect_ratios="1", semimajor_m="NaN", case_order="invalid"), api)
         self.assertEqual(result["software"], "echosms,acousticts")
         self.assertEqual(result["repetitions"], 3)
         self.assertEqual(result["configuration"], original)
@@ -139,6 +173,32 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result["planned_cases"], 18)
         self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
         self.assertEqual(result["resume_artifacts"], {"ubuntu-latest": "results-ubuntu-latest"})
+
+    def test_resume_preserves_saved_order_even_when_new_order_is_selected(self):
+        for saved, requested in (("frequency_round_robin", "Complete each frequency sweep"),
+                                 ("boundary_major", "Frequency by frequency")):
+            with self.subTest(saved=saved):
+                content, original = checkpoint(case_order=saved, source_ref="a" * 40)
+                api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+                result = self.resolve(dict(mode="resume", resume_run_id="123", case_order=requested), api)
+                self.assertEqual(result["configuration"], original)
+                self.assertEqual(result["source_ref"], "a" * 40)
+                self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+                self.assertEqual(result["resume_case_order"], "")
+
+    def test_explicit_resume_order_preserves_original_settings_for_validated_migration(self):
+        content, original = checkpoint(case_order="frequency_round_robin", source_ref="a" * 40)
+        api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        for choice, expected in (("Complete each frequency sweep", "boundary_major"),
+                                 ("Frequency by frequency", "frequency_round_robin"), ("Keep saved order", "")):
+            result = self.resolve(dict(mode="resume", resume_run_id="123", resume_case_order=choice), api)
+            self.assertEqual(result["resume_case_order"], expected)
+            self.assertEqual(result["configuration"], original)
+            self.assertEqual(result["source_ref"], "a" * 40)
+            self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+        for choice in ("unknown", [], None):
+            with self.subTest(choice=choice), self.assertRaisesRegex(ValueError, "resume_case_order"):
+                self.resolve(dict(mode="resume", resume_run_id="123", resume_case_order=choice), api)
 
     def test_imported_resolver_can_authenticate_resume_from_workflow_environment(self):
         content, _ = checkpoint()
@@ -384,6 +444,102 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(json.loads(values["platforms"]), ["ubuntu-latest"])
             self.assertEqual(values["resume_run_id"], "")
             self.assertEqual(values["mode"], "prepare")
+
+
+class ResumeOrderTests(unittest.TestCase):
+    def setUp(self):
+        scratch = ROOT / ".scratch/codex/dense-benchmark/tests"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+
+    def saved(self, alter=None):
+        content, configuration = checkpoint(case_order="frequency_round_robin", profile="full", repeats=1,
+                                             count=20, source_ref="a" * 40, alter=alter)
+        values, records = campaign.read_checkpoint(content)
+        for name, value in values.items():
+            benchmark.atomic_json(self.directory / name, value)
+        for key, record in records.items():
+            benchmark.atomic_json(self.directory / "records" / f"{key}.json", record)
+        return configuration
+
+    def apply(self, config, order="boundary_major"):
+        return resume_order.change_order(self.directory, config, "full", ["echosms", "acousticts"], 1, order)
+
+    def test_order_change_preserves_records_references_and_source_identity(self):
+        def matched(files):
+            files["results.json"][0].update(reference_id="qualified-reference", delta_ts_db=1.25)
+        config = self.saved(matched)
+        before = benchmark.read_json(self.directory / "manifest.json")
+        rows = {row["case_id"]: row for row in benchmark.read_json(self.directory / "results.json")}
+        raw_records = {path: path.read_bytes() for path in (self.directory / "records").glob("*.json")}
+        revised, count = self.apply(config)
+        after = benchmark.read_json(self.directory / "manifest.json")
+        self.assertEqual(revised, dict(config, case_order="boundary_major"))
+        self.assertEqual(count, 20)
+        self.assertNotEqual(before["cases"], after["cases"])
+        self.assertEqual({row["case_id"]: row for row in benchmark.read_json(self.directory / "results.json")}, rows)
+        self.assertEqual({path: path.read_bytes() for path in raw_records}, raw_records)
+        for key in campaign.IDENTITY_FIELDS:
+            if key not in ("cases", "configuration"):
+                self.assertEqual(after[key], before[key])
+        self.assertEqual(after["fingerprint"], benchmark.fingerprint({key: after[key] for key in campaign.IDENTITY_FIELDS}))
+        self.assertEqual(after["order_changes"][0]["previous_fingerprint"], before["fingerprint"])
+        self.assertEqual(after["order_changes"][0]["preserved_records"], 20)
+        # The next continuation must accept the new ordering without allowing
+        # any changes to source, numerical controls, or completed measurements.
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for path in self.directory.rglob("*.json"):
+                archive.writestr(path.relative_to(self.directory).as_posix(), path.read_bytes())
+        settings = campaign.checkpoint_settings(stream.getvalue(), "owner/repo", "b" * 40, "ubuntu-latest")
+        self.assertEqual(settings["source_ref"], "a" * 40)
+        self.assertEqual(settings["configuration"], revised)
+        self.assertEqual(settings["recorded_cases"], 20)
+        self.apply(revised)
+        self.assertEqual(benchmark.read_json(self.directory / "manifest.json"), after)
+
+    def test_cancelled_record_newer_than_export_is_preserved(self):
+        def unexported(files):
+            row = files["results.json"][20]
+            files[f"records/{row['case_id']}.json"] = dict(case_id=row["case_id"], status="numerical_error",
+                                                          elapsed_seconds=2., ts_db=None, source_sha="a" * 40)
+        config = self.saved(unexported)
+        _, count = self.apply(config)
+        self.assertEqual(count, 21)
+        status = benchmark.read_json(self.directory / "status.json")
+        self.assertEqual(status["recorded"], 21)
+        failures = [row for row in benchmark.read_json(self.directory / "results.json") if row["status"] == "numerical_error"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["elapsed_seconds"], 2.)
+        self.assertIsNone(failures[0]["delta_ts_db"])
+
+    def test_invalid_records_or_settings_are_rejected_before_any_writes(self):
+        config = self.saved()
+        snapshot = lambda: {path: path.read_bytes() for path in self.directory.rglob("*") if path.is_file()}
+        before = snapshot()
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            self.apply(dict(config, warmup=False))
+        self.assertEqual(snapshot(), before)
+        record_path = next((self.directory / "records").glob("*.json"))
+        record = benchmark.read_json(record_path)
+        record["elapsed_seconds"] = 999
+        benchmark.atomic_json(record_path, record)
+        before = snapshot()
+        with self.assertRaisesRegex(ValueError, "measurement"):
+            self.apply(config)
+        self.assertEqual(snapshot(), before)
+        (self.directory / "running.lock").write_text("123")
+        with self.assertRaisesRegex(ValueError, "active"):
+            self.apply(config)
+
+    def test_queued_platform_uses_the_selected_order_without_fabricated_records(self):
+        config = dict(configuration(), case_order="frequency_round_robin")
+        revised, count = self.apply(config)
+        self.assertEqual(revised, dict(config, case_order="boundary_major"))
+        self.assertEqual(count, 0)
+        self.assertEqual(list(self.directory.iterdir()), [])
 
 
 if __name__ == "__main__":

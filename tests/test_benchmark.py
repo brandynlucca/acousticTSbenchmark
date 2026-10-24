@@ -154,6 +154,37 @@ class FileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Resume refused"):
                 b.run(args)
 
+    def test_changed_resume_order_runs_only_pending_cases_in_full_sweeps(self):
+        from resume_order import change_order
+
+        self.config.update(case_order="frequency_round_robin", case_timeout_seconds=.1)
+        self.config["frequency"] = dict(start_hz=1000, stop_hz=5000, step_hz=1000)
+        self.config["profiles"]["pilot"] = dict(aspect_ratios=[10], incidences_deg=[0, 90], boundaries=["gas", "rigid"])
+        config_path, runtime_path, output = self.path / "configuration.json", self.path / "runtime.json", self.path / "run"
+        b.atomic_json(config_path, self.config)
+        sha = b.read_json(ROOT / "sources.lock.json")["sources"]["echosms"]["sha"]
+        b.atomic_json(runtime_path, dict(source_shas={"echosms": sha}, environment_fingerprint="test"))
+        args = b.parser().parse_args(["--config", str(config_path), "--software", "echosms",
+            "--runtime", str(runtime_path), "--output", str(output), "--max-cases", "3"])
+        with patch.object(b, "measure", return_value=dict(status="ok", elapsed_seconds=.2, ts_db=-40)) as measure:
+            b.run(args)
+            saved = {path.stem: path.read_bytes() for path in (output / "records").glob("*.json")}
+            revised, count = change_order(output, self.config, "pilot", ["echosms"], 1, "boundary_major")
+            self.assertEqual(count, 3)
+            b.atomic_json(config_path, revised)
+            pending = [case for case in b.build_cases(revised, "pilot", ["echosms"], 1) if case["case_id"] not in saved]
+            measure.reset_mock()
+            args.max_cases = 5
+            b.run(args)
+            self.assertEqual([call.args[0] for call in measure.call_args_list], pending[:5])
+            for identity, content in saved.items():
+                self.assertEqual((output / "records" / f"{identity}.json").read_bytes(), content)
+            self.assertEqual(b.read_json(output / "status.json")["recorded"], 8)
+            # Source and environment checks still apply after changing order.
+            with patch.object(b, "memory_provenance", return_value={"different": True}):
+                with self.assertRaisesRegex(ValueError, "Resume refused"):
+                    b.run(args)
+
     def test_reference_matching_sign_and_self_comparison(self):
         reference = {key: self.case[key] for key in b.PHYSICAL_FIELDS}
         reference.update(qualified=True, reference_id="independent-ref", source_sha="a" * 40,
@@ -176,10 +207,19 @@ class FileTests(unittest.TestCase):
         self.assertEqual(b.load_references(path), {})
 
     def test_missing_references_and_failures_do_not_become_zero_error(self):
-        record = {self.case["case_id"]: dict(status="numerical_error", ts_db=None)}
-        row = b.summarize([self.case], record, {})[0]
-        self.assertIsNone(row["delta_ts_db"])
-        self.assertEqual(row["status"], "numerical_error")
+        reference = dict(reference_id="independent-ref", source_sha="a" * 40,
+                         qualification={"evidence": "independent convergence study"},
+                         uncertainty_db=.01, ts_db=-41, software="acousticscattering",
+                         controls={"boundary_order": 9})
+        for status, strength in (("numerical_error", None), ("nonconverged", -40)):
+            for references in ({}, {self.case["physical_id"]: reference}):
+                with self.subTest(status=status, reference=bool(references)):
+                    record = {self.case["case_id"]: dict(status=status, ts_db=strength,
+                                                       elapsed_seconds=2.0, source_sha="b" * 40)}
+                    row = b.summarize([self.case], record, references)[0]
+                    self.assertIsNone(row["delta_ts_db"])
+                    self.assertEqual(row["status"], status)
+                    self.assertEqual(row["elapsed_seconds"], 2.0)
 
     def test_checkpoint_survives_export_error(self):
         record = self.path / "case.json"

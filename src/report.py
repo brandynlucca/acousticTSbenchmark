@@ -41,6 +41,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
+<p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th><th>RMSE ΔTS (dB)</th><th>Matched predictions</th></tr></thead><tbody id="coverage"></tbody></table></div>
@@ -118,6 +119,7 @@ function comparisonSummary(observations){
 const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_bytes:'Additional RAM per prediction (MiB)',ts_db:'TS (dB)',delta_ts_db:'ΔTS (dB, software minus reference)'};
 function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
 function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
+function timedFailure(row){return ['numerical_error','nonconverged','worker_error'].includes(row.status)&&Number.isFinite(row.elapsed_seconds)&&row.elapsed_seconds>0;}
 function formatted(value){return Math.abs(value)>0&&Math.abs(value)<.01?value.toExponential(2):value.toFixed(2);}
 function extentFor(values,zero=false){let lo=values.length?values.reduce((a,b)=>Math.min(a,b)):0,hi=values.length?values.reduce((a,b)=>Math.max(a,b)):1;if(zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}if(lo===hi){lo-=.5;hi+=.5;}const padding=(hi-lo)*.08;return [lo-padding,hi+padding];}
 function angleStyle(angle){
@@ -125,14 +127,14 @@ function angleStyle(angle){
  if(angle===37)return {dash:'9 5',shape:'triangle'};
  if(angle===90)return {dash:'2 5',shape:'square'};
  const index=availableIncidences.filter(a=>![0,37,90].includes(a)).indexOf(angle);
- return [{dash:'9 4 2 4',shape:'diamond'},{dash:'12 4',shape:'cross'},{dash:'3 3',shape:'hexagon'}][Math.max(0,index)%3];
+ return [{dash:'9 4 2 4',shape:'diamond'},{dash:'12 4',shape:'plus'},{dash:'3 3',shape:'hexagon'}][Math.max(0,index)%3];
 }
 function marker(x,y,angle,color,size=3.5){
  const shape=angleStyle(angle).shape,attrs={fill:color,stroke:color,'stroke-width':1};
  if(shape==='triangle')return svgElement('path',{...attrs,d:`M ${x} ${y-size-1} L ${x-size-1} ${y+size} L ${x+size+1} ${y+size} Z`});
  if(shape==='square')return svgElement('rect',{...attrs,x:x-size,y:y-size,width:2*size,height:2*size});
  if(shape==='diamond')return svgElement('path',{...attrs,d:`M ${x} ${y-size-1} L ${x+size+1} ${y} L ${x} ${y+size+1} L ${x-size-1} ${y} Z`});
- if(shape==='cross')return svgElement('path',{...attrs,fill:'none','stroke-width':2,d:`M ${x-size} ${y-size} L ${x+size} ${y+size} M ${x-size} ${y+size} L ${x+size} ${y-size}`});
+ if(shape==='plus')return svgElement('path',{...attrs,fill:'none','stroke-width':2,d:`M ${x-size} ${y} L ${x+size} ${y} M ${x} ${y-size} L ${x} ${y+size}`});
  if(shape==='hexagon')return svgElement('path',{...attrs,d:`M ${x-size} ${y} L ${x-size/2} ${y-size} L ${x+size/2} ${y-size} L ${x+size} ${y} L ${x+size/2} ${y+size} L ${x-size/2} ${y+size} Z`});
  return svgElement('circle',{...attrs,cx:x,cy:y,r:size});
 }
@@ -148,6 +150,13 @@ function renderAngles(selectedAngles){
 function point(svg,x,y,angle,color,title,scatter=false){
  const node=marker(x,y,angle,color,scatter?3.7:3.1);node.dataset.incidence=angle;
  node.classList.add('observation');node.append(svgElement('title',{},title));svg.append(node);
+}
+function failurePoint(svg,x,y,row){
+ const size=5,title=`${labels[row.software]}, ${row.incidence_deg}°, ${row.frequency_hz/1000} kHz: ${row.status.replaceAll('_',' ')}, time to failure ${formatted(row.elapsed_seconds)} s${Number.isFinite(row.repetition)?`, repetition ${row.repetition}`:''}`;
+ const node=svgElement('path',{class:'failure-observation',fill:'none',stroke:colors[row.software],'stroke-width':2.3,'stroke-linecap':'round',role:'img','aria-label':title,d:`M ${x-size} ${y-size} L ${x+size} ${y+size} M ${x-size} ${y+size} L ${x+size} ${y-size}`});
+ for(const key of ['software','status','repetition'])if(row[key]!==undefined)node.dataset[key]=row[key];
+ node.dataset.incidence=row.incidence_deg;node.dataset.frequency=row.frequency_hz;node.dataset.elapsed=row.elapsed_seconds;
+ node.append(svgElement('title',{},title));svg.append(node);
 }
 function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=false){
  const chart=document.createElement('div'),heading=document.createElement('h3');heading.textContent=title;chart.append(heading);parent.append(chart);
@@ -170,10 +179,11 @@ function render(){
  const selected=rows.filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
  const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>r.aspect_ratio===Number(aspect.value));
- const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db));
+ const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db)),failures=selected.filter(timedFailure);
  const selectedSoftware=new Set([...selected.map(r=>r.software),...plannedGroups.map(r=>r.software)]);
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
+ document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
  document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${compared.length} of ${measured.length} successful measurements have a matched, convergence-checked reference. References run separately and are reused across platforms. Missing references leave gaps in ΔTS.`;
  const allFreq=data.axes?.[aspect.value]?.frequencies_hz||[...new Set(selected.map(r=>r.frequency_hz))].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
@@ -183,6 +193,7 @@ function render(){
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
  plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
  const axisValues=new Map(selected.map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
@@ -206,12 +217,14 @@ function render(){
     const row=pairs[0],cost=median(pairs.map(r=>valueFor(r,field))),error=median(pairs.map(r=>Math.abs(r.delta_ts_db)));
     point(svg,x(transform(cost)),y(error),row.incidence_deg,colors[row.software],`${labels[row.software]}, ${row.incidence_deg}°, ${row.frequency_hz/1000} kHz: ${formatted(cost)} ${field==='elapsed_seconds'?'s':'MiB'}, |ΔTS| ${formatted(error)} dB, n=${pairs.length}`,true);count++;
    }
-   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},'Waiting for matched cost and reference data'));
+   const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched cost and reference data'));
    continue;
   }
   for(const measure of layout.value==='paired'?[field,'delta_ts_db']:[field]){
    const transform=v=>measure==='elapsed_seconds'?Math.log10(v):v;
-   const valid=measured.filter(r=>validValue(r,measure)),yr=extentFor(valid.map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
+   const valid=measured.filter(r=>validValue(r,measure)),timedFailures=measure==='elapsed_seconds'?failures:[];
+   const yr=extentFor([...valid,...timedFailures].map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
    const {svg,x,y}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
    if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
    let count=0;
@@ -225,7 +238,11 @@ function render(){
      path=`${xx} ${yy}`;point(svg,xx,yy,angle,colors[software],`${labels[software]}, ${angle}°, ${frequency/1000} kHz: ${formatted(value)}, n=${observations.length}`);count++;
     }
    }
-   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?'Waiting for qualified reference comparisons':'Waiting for measurements'));
+   for(const row of timedFailures.filter(r=>r.boundary===boundary)){
+    failurePoint(svg,x(axisValues.get(row.frequency_hz)),y(transform(row.elapsed_seconds)),row);count++;
+   }
+   const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for qualified reference comparisons'):'Waiting for measurements'));
   }
  }
  const table=document.getElementById('coverage');table.replaceChildren();

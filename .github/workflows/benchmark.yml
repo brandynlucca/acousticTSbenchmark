@@ -46,6 +46,11 @@ on:
         description: Boundaries CSV (rigid, pressure_release, liquid, gas)
         type: string
         default: rigid,pressure_release,liquid,gas
+      case_order:
+        description: New-run order (a full sweep holds a, aspect ratio, incidence, and boundary fixed)
+        type: choice
+        options: ['Complete each frequency sweep', 'Frequency by frequency']
+        default: Complete each frequency sweep
       repetitions:
         description: Timed repetitions per physical case
         type: choice
@@ -59,6 +64,11 @@ on:
         description: Optional checkpoint artifact name instead of the final platform artifact
         type: string
         default: ''
+      resume_case_order:
+        description: Resume order (keeps every saved measurement and solver setting)
+        type: choice
+        options: ['Keep saved order', 'Complete each frequency sweep', 'Frequency by frequency']
+        default: Keep saved order
       reference_budget_minutes:
         description: Maximum calculation minutes per reference runner (two parallel runners)
         type: choice
@@ -109,6 +119,7 @@ jobs:
       source_ref: ${{ steps.choose.outputs.source_ref }}
       resume_artifacts: ${{ steps.choose.outputs.resume_artifacts }}
       resume_run_id: ${{ steps.choose.outputs.resume_run_id }}
+      resume_case_order: ${{ steps.choose.outputs.resume_case_order }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -138,6 +149,7 @@ jobs:
       SOFTWARE: ${{ needs.matrix.outputs.software }}
       REPETITIONS: ${{ needs.matrix.outputs.repetitions }}
       BENCHMARK_PLATFORM: ${{ matrix.os }}
+      BENCHMARK_PUBLISHER: src/publish_progress.py
       TIMING_BUDGET_MINUTES: ${{ inputs.timing_budget_minutes }}
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
@@ -171,20 +183,25 @@ jobs:
           run-id: ${{ needs.matrix.outputs.resume_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/benchmark-results
-      - name: Check out current macOS setup controller
-        if: runner.os == 'macOS'
+      - name: Check out current workflow controllers
+        if: runner.os == 'macOS' || inputs.mode == 'resume'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Preserve macOS setup controller for source-pinned resumes
-        if: runner.os == 'macOS'
+      - name: Preserve controllers for source-pinned resumes
+        if: runner.os == 'macOS' || inputs.mode == 'resume'
         shell: bash
         run: |
           python - <<'PY'
           import os, shutil
           from pathlib import Path
-          target = Path(os.environ['RUNNER_TEMP']) / 'setup_macos.py'
-          shutil.copyfile('src/setup_macos.py', target)
           with open(os.environ['GITHUB_ENV'], 'a') as output:
-              output.write(f'MACOS_SETUP_SCRIPT={target}\n')
+              for name, variable in [('setup_macos.py', 'MACOS_SETUP_SCRIPT'), ('resume_order.py', 'RESUME_ORDER_SCRIPT')]:
+                  target = Path(os.environ['RUNNER_TEMP']) / name
+                  shutil.copyfile(Path('src') / name, target)
+                  output.write(f'{variable}={target}\n')
+              publisher = Path(os.environ['RUNNER_TEMP']) / 'dashboard_publisher.py'
+              bootstrap = "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path.cwd() / 'src'))\n"
+              publisher.write_text(bootstrap + Path('src/publish_progress.py').read_text(encoding='utf-8'), encoding='utf-8')
+              output.write(f'BENCHMARK_PUBLISHER={publisher}\n')
           PY
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -202,6 +219,14 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"BENCHMARK_CONFIG={path}\n")
           PY
+      - name: Apply selected resume order
+        if: ${{ inputs.mode == 'resume' && needs.matrix.outputs.resume_case_order != '' }}
+        shell: bash
+        env:
+          RESUME_CASE_ORDER: ${{ needs.matrix.outputs.resume_case_order }}
+        run: |
+          python "$RESUME_ORDER_SCRIPT" --directory "$RUNNER_TEMP/benchmark-results" --config "$BENCHMARK_CONFIG" \
+            --profile "$PROFILE" --software "$SOFTWARE" --repetitions "$REPETITIONS" --order "$RESUME_CASE_ORDER"
       - name: Install memory observer
         shell: bash
         run: python -m pip install psutil==7.2.2
@@ -237,7 +262,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           echo '[Live progress](https://brandynlucca.github.io/acousticTSbenchmark/)' >> "$GITHUB_STEP_SUMMARY"
-          python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
+          python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state setup
       - name: Restore matching numerical references
         if: ${{ inputs.mode != 'prepare' }}
         shell: bash
@@ -507,6 +532,7 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/benchmark-controller.py" <<'PY'
           """Continue an immutable campaign and publish only between workers."""
+          import importlib.util
           import os
           from pathlib import Path
           import subprocess
@@ -515,9 +541,13 @@ jobs:
 
           sys.path.insert(0, str(Path.cwd() / "src"))
           from benchmark import atomic_json, build_cases, read_json
-          from publish_progress import GitHub, compact_payload, publish
           from reference_store import join_directory, restore_cache
           from references import export_references
+
+          publisher_spec = importlib.util.spec_from_file_location('dashboard_publisher', os.getenv('BENCHMARK_PUBLISHER', 'src/publish_progress.py'))
+          publisher = importlib.util.module_from_spec(publisher_spec)
+          publisher_spec.loader.exec_module(publisher)
+          GitHub, compact_payload, publish = publisher.GitHub, publisher.compact_payload, publisher.publish
 
           def main():
               duration = float(sys.argv[1])
@@ -649,7 +679,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 2
         if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -678,7 +708,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 3
         if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -707,7 +737,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark chunk 4
         if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -736,7 +766,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Benchmark remaining campaign budget
         if: ${{ success() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         shell: bash
@@ -765,7 +795,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state running
       - name: Final data and logs
         if: ${{ always() && inputs.mode != 'prepare' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -810,4 +840,4 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/publish_progress.py --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed
+        run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed

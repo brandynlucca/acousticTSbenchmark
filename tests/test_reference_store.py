@@ -211,6 +211,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["delta_ts_db"], 1.0)
         self.assertEqual(rows[1]["status"], "pending")
         self.assertEqual(published[0]["rows"][0]["delta_ts_db"], 1.0)
+        self.assertEqual(published[0]["semimajor_m"], self.config["geometry"]["semimajor_m"])
+        self.assertEqual(published[0]["rows"][0]["semimajor_m"], self.config["geometry"]["semimajor_m"])
         self.assertEqual(len(b.read_json(selected)["references"]), 1)
 
 

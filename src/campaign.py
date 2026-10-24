@@ -25,7 +25,11 @@ MAX_SELECTED_BYTES = 512 * 1024 * 1024
 IDENTITY_FIELDS = ("configuration", "sources", "profile", "cases", "adapter_hashes",
                    "platform", "architecture", "environment_fingerprint", "workload")
 OUTPUT_FIELDS = ("mode", "platforms", "configuration", "profile", "software", "repetitions",
-                 "source_ref", "resume_artifacts", "resume_run_id")
+                 "source_ref", "resume_artifacts", "resume_run_id", "resume_case_order")
+ORDER_CHOICES = {"Complete each frequency sweep": "boundary_major",
+                 "Frequency by frequency": "frequency_round_robin",
+                 "boundary_major": "boundary_major",
+                 "frequency_round_robin": "frequency_round_robin"}
 
 
 def decimal_number(value, name):
@@ -94,6 +98,9 @@ def validate_plan_size(configuration, profile, software, repetitions):
 
 def new_campaign(inputs, base):
     configuration = copy.deepcopy(base)
+    selected_order = inputs.get("case_order", "Complete each frequency sweep")
+    if not isinstance(selected_order, str) or selected_order not in ORDER_CHOICES:
+        raise ValueError("case_order must be Complete each frequency sweep or Frequency by frequency")
     programs = csv_values(inputs.get("software", "acousticts,prol_spheroid"), "software", str.lower)
     if set(programs) - (CAPABILITIES.keys() - {"acousticscattering"}):
         raise ValueError("Unknown timing software. AcousticScattering is reserved for numerical references")
@@ -112,7 +119,7 @@ def new_campaign(inputs, base):
     major = float(decimal_number(inputs.get("semimajor_m", .07), "semimajor_m"))
     if not math.isfinite(major) or major <= 0:
         raise ValueError("semimajor_m must be finite and positive")
-    configuration.update(case_order="frequency_round_robin", geometry=dict(semimajor_m=major, aspect_ratios=ratios),
+    configuration.update(case_order=ORDER_CHOICES[selected_order], geometry=dict(semimajor_m=major, aspect_ratios=ratios),
         incidences_deg=angles, boundaries=boundaries, software=programs, repetitions=int(repetitions),
         frequency=dict(start_hz=frequency_hz(inputs.get("frequency_start_khz", 1), "frequency_start_khz"),
                        stop_hz=frequency_hz(inputs.get("frequency_end_khz", 300), "frequency_end_khz"),
@@ -337,6 +344,9 @@ def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexpo
 
 
 def resume_campaign(inputs, repository, api):
+    requested_order = inputs.get("resume_case_order", "Keep saved order")
+    if not isinstance(requested_order, str) or requested_order not in ("Keep saved order", *ORDER_CHOICES):
+        raise ValueError("resume_case_order must be Keep saved order, Complete each frequency sweep, or Frequency by frequency")
     run_id = str(inputs.get("resume_run_id", "")).strip()
     if not run_id.isdecimal() or int(run_id) < 1:
         raise ValueError("Resume mode requires a positive resume_run_id")
@@ -417,7 +427,7 @@ def resume_campaign(inputs, repository, api):
             recorded[platform] = 0
     return dict(shared, mode="resume", platforms=[p for p in PLATFORMS if p in platforms], resume_run_id=run_id,
                 resume_artifacts={platform: artifact["name"] for platform, artifact in selected.items()},
-                recorded_by_platform=recorded)
+                recorded_by_platform=recorded, resume_case_order=ORDER_CHOICES.get(requested_order, ""))
 
 
 def resolve(inputs, configuration, repository, revision, api=None):
@@ -442,7 +452,7 @@ def resolve(inputs, configuration, repository, revision, api=None):
     return dict(mode=mode, platforms=list(PLATFORMS) if platform == "all" else [platform],
                 configuration=configuration, profile="custom", software=",".join(programs),
                 repetitions=repetitions, source_ref=revision, resume_artifacts={}, resume_run_id="",
-                planned_cases=planned, recorded_by_platform={})
+                planned_cases=planned, recorded_by_platform={}, resume_case_order="")
 
 
 def main():

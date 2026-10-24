@@ -120,6 +120,25 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(groups["echosms"]["recorded"], 0)
         self.assertEqual(len(payload["rows"]), 3)
 
+    def test_failed_prediction_duration_survives_without_inflating_success_totals(self):
+        for failure in ("numerical_error", "nonconverged"):
+            with self.subTest(status=failure):
+                rows = [dict(software="acousticts", boundary="gas", aspect_ratio=10,
+                             incidence_deg=37, frequency_hz=frequency, repetition=1,
+                             status=status, elapsed_seconds=elapsed)
+                        for frequency, status, elapsed in ((1000, "ok", .4), (3000, failure, 2.0))]
+                payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows)
+                failed = next(row for row in payload["rows"] if row["status"] == failure)
+                self.assertEqual(failed["elapsed_seconds"], 2.0)
+                self.assertEqual(failed["frequency_hz"], 3000)
+                self.assertEqual(failed["repetition"], 1)
+                for coverage in ("coverage", "incidence_coverage"):
+                    group = payload[coverage][0]
+                    self.assertEqual(group["recorded"], 2)
+                    self.assertEqual(group["success"], 1)
+                    self.assertEqual(group["other_recorded"], 1)
+                    self.assertEqual(group["elapsed_seconds_sum"], .4)
+
     def test_older_runs_attempts_and_regressive_snapshots_are_not_published(self):
         current = self.payload(12, 2)
         self.assertFalse(progress.should_publish(current, self.payload(11, 5)))
