@@ -36,6 +36,8 @@ def change_order(directory, configuration, profile, software, repetitions, order
         return revised, 0
     manifest = read_json(manifest_path)
     identity = {key: manifest[key] for key in IDENTITY_FIELDS}
+    if "retained_fingerprint" in manifest:
+        identity["retained_fingerprint"] = manifest["retained_fingerprint"]
     if (fingerprint(identity) != manifest.get("fingerprint") or
             manifest["configuration"] != configuration or manifest["profile"] != profile or
             manifest["cases"] != [case["case_id"] for case in original_cases]):
@@ -66,7 +68,10 @@ def change_order(directory, configuration, profile, software, repetitions, order
     if revised == configuration:
         return revised, len(records)
     updated = dict(manifest, configuration=revised, cases=[case["case_id"] for case in cases])
-    updated["fingerprint"] = fingerprint({key: updated[key] for key in IDENTITY_FIELDS})
+    updated_identity = {key: updated[key] for key in IDENTITY_FIELDS}
+    if "retained_fingerprint" in updated:
+        updated_identity["retained_fingerprint"] = updated["retained_fingerprint"]
+    updated["fingerprint"] = fingerprint(updated_identity)
     updated["order_changes"] = [*manifest.get("order_changes", []), dict(
         changed_at=utc_now(), from_order=configuration.get("case_order", "boundary_major"),
         to_order=order, previous_fingerprint=manifest["fingerprint"], preserved_records=len(records),

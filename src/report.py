@@ -32,6 +32,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p id="data-run-warning" role="status" hidden></p>
 <p id="data-run" hidden>Displayed data: <a id="data-run-link" target="_blank" rel="noopener"></a><span id="data-run-detail"></span></p>
 <p id="status"></p>
+<p id="retained-status" class="note" hidden></p>
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Semimajor axis a (m) <select id="semimajor" aria-describedby="coverage-note"></select></label>
@@ -96,6 +97,13 @@ function updateStatus(){
  const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
  const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
  document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
+ const retained=rows.filter(r=>r.measurement_role==='retained'),note=document.getElementById('retained-status');
+ note.hidden=!retained.length;
+ if(retained.length){
+  const active=data.active_software||[...new Set(rows.filter(r=>r.measurement_role!=='retained').map(r=>r.software))];
+  const origins=[...new Set(retained.map(r=>`${labels[r.software]||r.software} (${(r.source_sha||'').slice(0,7)}, run ${r.retained_from_run_id})`))];
+  note.textContent=`Active software: ${active.map(name=>labels[name]||name).join(', ')}. ${retained.length} saved measurements retained for comparison: ${origins.join(', ')}. Progress counts above apply only to the active software. Retained curves use their original versions. BEM / FEM-BEM remains the reference for ΔTS.`;
+ }
 }
 updateStatus();
 const legend=document.getElementById('legend');
@@ -256,7 +264,8 @@ function render(){
   const remaining=coverage?.pending??(repository?'Unknown':pending.length);
   const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
-  for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  const softwareLabel=labels[software]+(group.some(r=>r.measurement_role==='retained')?' (retained)':'');
+  for(const value of [softwareLabel,boundaryLabels[boundary],successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
@@ -287,7 +296,7 @@ if(repository){
   if(data.run_id){
    dataLink.href=data.run_url||`https://github.com/${repository}/actions/runs/${data.run_id}`;
    dataLink.textContent=`Run ${data.run_id}`;
-   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value} · a = ${semimajor.value} m. Counts, failures and plots below belong to this run.`;
+   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value} · a = ${semimajor.value} m. ${data.retained_count?'Progress counts cover this run. Retained comparison curves are identified below.':'Counts, failures and plots below belong to this run.'}`;
   }
   const warning=document.getElementById('data-run-warning'),old=data.run_id&&current&&runOrder(current,data)>0;
   warning.hidden=!old;

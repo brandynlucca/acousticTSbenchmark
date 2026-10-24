@@ -25,11 +25,18 @@ MAX_SELECTED_BYTES = 512 * 1024 * 1024
 IDENTITY_FIELDS = ("configuration", "sources", "profile", "cases", "adapter_hashes",
                    "platform", "architecture", "environment_fingerprint", "workload")
 OUTPUT_FIELDS = ("mode", "platforms", "configuration", "profile", "software", "repetitions",
-                 "source_ref", "resume_artifacts", "resume_run_id", "resume_case_order")
+                 "source_ref", "resume_artifacts", "resume_run_id", "resume_case_order", "resume_artifact_run_ids")
 ORDER_CHOICES = {"Complete each frequency sweep": "boundary_major",
                  "Frequency by frequency": "frequency_round_robin",
                  "boundary_major": "boundary_major",
                  "frequency_round_robin": "frequency_round_robin"}
+
+
+def manifest_identity(manifest):
+    identity = {key: manifest[key] for key in IDENTITY_FIELDS}
+    if "retained_fingerprint" in manifest:
+        identity["retained_fingerprint"] = manifest["retained_fingerprint"]
+    return identity
 
 
 def decimal_number(value, name):
@@ -133,7 +140,7 @@ def new_campaign(inputs, base):
 
 def artifact_platform(name):
     for platform in PLATFORMS:
-        if name == f"results-{platform}" or re.fullmatch(rf"checkpoint-{re.escape(platform)}-\d+-\d+", name):
+        if name in (f"results-{platform}", f"retained-{platform}") or re.fullmatch(rf"checkpoint-{re.escape(platform)}-\d+-\d+", name):
             return platform
     return None
 
@@ -187,7 +194,7 @@ def read_checkpoint(content):
             path = PurePosixPath(entry.filename)
             record = path.parent == prefix / "records" and path.suffix == ".json"
             metadata = path.parent == prefix and path.name in (
-                "manifest.json", "status.json", "results.json", "benchmark-source.json")
+                "manifest.json", "status.json", "results.json", "benchmark-source.json", "retained-results.json")
             if not metadata and not record:
                 continue
             maximum = MAX_RECORD_BYTES if record else MAX_JSON_BYTES
@@ -286,9 +293,12 @@ def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexpo
         raise ValueError("Invalid timing manifest, status, or case table")
     if any(not isinstance(row, dict) for row in rows) or len(rows) > MAX_CASES:
         raise ValueError("Invalid timing case table")
-    if set(IDENTITY_FIELDS) - manifest.keys() or fingerprint(
-            {key: manifest[key] for key in IDENTITY_FIELDS}) != manifest.get("fingerprint"):
+    if set(IDENTITY_FIELDS) - manifest.keys() or fingerprint(manifest_identity(manifest)) != manifest.get("fingerprint"):
         raise ValueError("Timing manifest fingerprint is invalid")
+    retained = values.get("retained-results.json")
+    if (retained is not None or "retained_fingerprint" in manifest):
+        if retained is None or fingerprint(retained) != manifest.get("retained_fingerprint"):
+            raise ValueError("Retained measurements do not match the timing manifest")
     if manifest["platform"] != {"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform]:
         raise ValueError("Timing artifact platform does not match its manifest")
     programs = list(dict.fromkeys(row.get("software") for row in rows))
@@ -384,6 +394,14 @@ def resume_campaign(inputs, repository, api):
     shared, recorded, setup_only = None, {}, {}
     for platform, artifact in list(selected.items()):
         content = api.archive(artifact["id"])
+        from refresh import baseline_settings
+        baseline = baseline_settings(content, repository, run_id, platform)
+        if baseline is not None:
+            recorded[platform] = baseline.pop("recorded_cases")
+            if shared is not None and fingerprint(baseline) != fingerprint(shared):
+                raise ValueError("Refresh baselines and timing checkpoints have different settings")
+            shared = baseline
+            continue
         source = setup_only_checkpoint(content, repository, run_id)
         if source is not None:
             if explicit:
@@ -427,7 +445,8 @@ def resume_campaign(inputs, repository, api):
             recorded[platform] = 0
     return dict(shared, mode="resume", platforms=[p for p in PLATFORMS if p in platforms], resume_run_id=run_id,
                 resume_artifacts={platform: artifact["name"] for platform, artifact in selected.items()},
-                recorded_by_platform=recorded, resume_case_order=ORDER_CHOICES.get(requested_order, ""))
+                recorded_by_platform=recorded, resume_case_order=ORDER_CHOICES.get(requested_order, ""),
+                resume_artifact_run_ids={platform: int(run_id) for platform in selected})
 
 
 def resolve(inputs, configuration, repository, revision, api=None):
@@ -435,8 +454,13 @@ def resolve(inputs, configuration, repository, revision, api=None):
     if not isinstance(inputs, dict):
         raise ValueError("CAMPAIGN_INPUTS must contain a JSON object")
     mode = inputs.get("mode", "new")
-    if mode not in ("new", "resume", "prepare"):
-        raise ValueError("mode must be new, resume, or prepare")
+    if mode not in ("new", "resume", "refresh", "prepare"):
+        raise ValueError("mode must be new, resume, refresh, or prepare")
+    if mode == "refresh":
+        from refresh import resolve_refresh
+        if api is None:
+            api = GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=240)
+        return resolve_refresh(inputs, repository, revision, api)
     if mode == "resume":
         if api is None:
             api = GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=180)
@@ -452,7 +476,7 @@ def resolve(inputs, configuration, repository, revision, api=None):
     return dict(mode=mode, platforms=list(PLATFORMS) if platform == "all" else [platform],
                 configuration=configuration, profile="custom", software=",".join(programs),
                 repetitions=repetitions, source_ref=revision, resume_artifacts={}, resume_run_id="",
-                planned_cases=planned, recorded_by_platform={}, resume_case_order="")
+                planned_cases=planned, recorded_by_platform={}, resume_case_order="", resume_artifact_run_ids={})
 
 
 def main():
@@ -462,9 +486,12 @@ def main():
     args = parser.parse_args()
     inputs = _json(os.environ.get("CAMPAIGN_INPUTS", "{}"))
     repository = os.environ["GITHUB_REPOSITORY"]
-    api = (GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=180)
-           if isinstance(inputs, dict) and inputs.get("mode") == "resume" else None)
+    api = (GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=600)
+           if isinstance(inputs, dict) and inputs.get("mode") in ("resume", "refresh") else None)
     result = resolve(inputs, read_json(args.config), repository, os.environ.get("GITHUB_SHA", ""), api)
+    if result["mode"] == "refresh":
+        from refresh import write_baselines
+        write_baselines(result, args.output.parent / "refresh-baselines", repository, os.environ["GITHUB_RUN_ID"])
     atomic_json(args.output, result)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -478,6 +505,8 @@ def main():
     print(f"{result['mode']}: {result['planned_cases']} cases per platform, "
           f"{result['software']}, platforms={','.join(result['platforms'])}, "
           f"{completed} preserved records. Resolved settings: {args.output}")
+    if result.get("retained_by_platform"):
+        print(f"Retained comparison measurements: {result['retained_by_platform']}")
 
 
 if __name__ == "__main__":

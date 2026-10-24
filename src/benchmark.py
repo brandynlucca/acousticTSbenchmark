@@ -300,8 +300,12 @@ def measure(case, runtime, directory, timeout_seconds):
 def load_references(path):
     if path is None:
         return {}
+    return references_from_value(read_json(path))
+
+
+def references_from_value(payload):
     result = {}
-    for record in read_json(path)["references"]:
+    for record in payload["references"]:
         physical = {key: record[key] for key in PHYSICAL_FIELDS}
         identity = physical_identity(physical)
         if identity in result:
@@ -345,15 +349,19 @@ def summarize(cases, records, references):
 
 def export(directory, cases, records, references, state):
     from report import render_report
+    from publish_progress import comparison_rows
 
     rows = summarize(cases, records, references)
     atomic_json(directory / "results.json", rows)
-    fields = list(dict.fromkeys(key for row in rows for key in row))
+    if (directory / "retained-results.json").is_file():
+        atomic_json(directory / "references.json", dict(references=list(references.values())))
+    display = comparison_rows(directory, rows, references=references)
+    fields = list(dict.fromkeys(key for row in display for key in row))
     temporary = directory / "results.csv.tmp"
     with temporary.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
-        for row in rows:
+        for row in display:
             writer.writerow({k: json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v
                              for k, v in row.items()})
     os.replace(temporary, directory / "results.csv")
@@ -362,7 +370,7 @@ def export(directory, cases, records, references, state):
     status = dict(state=state, updated_at=utc_now(), planned=len(cases),
                   recorded=len(records), outcomes=counts)
     atomic_json(directory / "status.json", status)
-    render_report(directory / "progress.html", rows, status)
+    render_report(directory / "progress.html", display, status)
     return status
 
 
@@ -387,14 +395,14 @@ class ProgressPublisher:
         if not self.due(first_result=first_result, force=force):
             return
         try:
-            from publish_progress import GitHub, compact_payload, publish
+            from publish_progress import GitHub, compact_payload, comparison_rows, publish
 
             # A new API instance gives each publication its own short deadline.
             repository = os.environ["GITHUB_REPOSITORY"]
             api = GitHub(repository, os.environ["GITHUB_TOKEN"], timeout_seconds=15)
             payload = compact_payload(repository, os.environ["BENCHMARK_PLATFORM"],
                 int(os.environ["GITHUB_RUN_ID"]), int(os.getenv("GITHUB_RUN_ATTEMPT", "1")),
-                read_json(directory / "results.json"), status, "running")
+                comparison_rows(directory, read_json(directory / "results.json")), status, "running")
             publish(api, payload)
             self.retry_after = float("-inf")
         except Exception as error:
@@ -437,6 +445,9 @@ def run(args):
                     environment_fingerprint=fingerprint(dict(
                         runtime=runtime["environment_fingerprint"], memory_observer=memory_provenance())),
                     workload="fresh_process_warmed_distinct_problem_single_prediction")
+    retained_path = directory / "retained-results.json"
+    if retained_path.exists():
+        identity["retained_fingerprint"] = fingerprint(read_json(retained_path))
     from references import build_requests
     manifest = dict(identity, fingerprint=fingerprint(identity),
                     reference_requests=build_requests(configuration, lock, args.profile))

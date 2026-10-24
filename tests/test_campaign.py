@@ -1,5 +1,6 @@
 """Editable campaign inputs and reconstruction of immutable timing artifacts."""
 
+import copy
 import io
 import itertools
 import json
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
@@ -16,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import benchmark
 import campaign
 import resume_order
+import refresh
 
 
 def configuration():
@@ -540,6 +543,198 @@ class ResumeOrderTests(unittest.TestCase):
         self.assertEqual(revised, dict(config, case_order="boundary_major"))
         self.assertEqual(count, 0)
         self.assertEqual(list(self.directory.iterdir()), [])
+
+
+class RefreshTests(unittest.TestCase):
+    api = CampaignTests.api
+    resolve = CampaignTests.resolve
+
+    def single_refresh(self):
+        content, original = checkpoint(programs=["echosms", "acousticts", "prol_spheroid"],
+                                       count=6, source_ref="a" * 40, case_order="frequency_round_robin")
+        api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        with patch.dict(os.environ, GITHUB_RUN_ID="124"):
+            result = self.resolve(dict(mode="refresh", resume_run_id="123", refresh_software="acousticts",
+                semimajor_m="invalid", boundaries="invalid", repetitions=0, software="invalid"), api)
+        return result, content, original
+
+    @staticmethod
+    def archive_files(files):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, value in files.items():
+                archive.writestr(name, json.dumps(value))
+        return output.getvalue()
+
+    def test_refresh_replaces_only_selected_software_and_preserves_prediction_inputs(self):
+        result, content, original = self.single_refresh()
+        self.assertEqual((result["mode"], result["software"], result["repetitions"], result["profile"]),
+                         ("refresh", "acousticts", 3, "pilot"))
+        self.assertEqual(result["source_ref"], "e" * 40)
+        self.assertEqual(result["planned_cases"], 9)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 0})
+        self.assertEqual(result["resume_artifact_run_ids"], {"ubuntu-latest": 124})
+        expected = dict(original, software=["acousticts"], repetitions=3, case_order="boundary_major")
+        self.assertEqual(result["configuration"], expected)
+        saved = result["_retained_payloads"]["ubuntu-latest"]
+        self.assertEqual(len(saved["rows"]), 4)
+        self.assertEqual({row["software"] for row in saved["rows"]}, {"echosms", "prol_spheroid"})
+        old_rows = {row["case_id"]: row for row in campaign.read_checkpoint(content)[0]["results.json"]}
+        for row in saved["rows"]:
+            self.assertEqual(row, dict(old_rows[row["case_id"]], measurement_role="retained", retained_from_run_id=123))
+        evidence = saved["provenance"][0]
+        self.assertEqual(evidence["manifest"], campaign.read_checkpoint(content)[0]["manifest.json"])
+        self.assertEqual(evidence["run_id"], 123)
+
+    def test_retained_environment_evidence_deduplicates_runtime_without_losing_invocations(self):
+        shared = dict(platform="Linux", runtime=dict(source_shas=dict(acousticts="a" * 40),
+                                                     versions=dict(R="4.5.2")))
+        files = {f"environments/invocation-{index}.json": dict(shared, started_at=f"2026-10-24T00:0{index}:00Z",
+                    references_fingerprint=str(index) * 64) for index in range(3)}
+        files["environments/different-build.json"] = dict(shared, runtime=dict(versions=dict(R="4.5.1")))
+        evidence = refresh._environments(self.archive_files(files))
+        self.assertEqual(set(evidence["invocations"]), {"invocation-0", "invocation-1", "invocation-2", "different-build"})
+        self.assertEqual(len(evidence["evidence"]), 2)
+        for index in range(3):
+            invocation = evidence["invocations"][f"invocation-{index}"]
+            self.assertEqual(invocation["started_at"], f"2026-10-24T00:0{index}:00Z")
+            self.assertEqual(invocation["references_fingerprint"], str(index) * 64)
+            self.assertEqual(evidence["evidence"][invocation["environment_fingerprint"]], shared)
+
+    def ancestry_api(self, mismatch=False):
+        def current_source(files):
+            files["benchmark-source.json"].update(run_id=123, resumed_from_run_id=122)
+        linux, _ = checkpoint(source_ref="a" * 40, count=4, alter=current_source,
+                              case_order="boundary_major")
+        windows, _ = checkpoint(platform="windows-latest", source_ref="a" * 40, count=6,
+                                case_order="frequency_round_robin", profile="full" if mismatch else "pilot")
+        api, run = self.api([], {1: linux, 2: windows})
+        jobs = {123: [dict(name="benchmark (ubuntu-latest)", steps=[]),
+                      dict(name="benchmark (windows-latest)", steps=None)],
+                122: [dict(name="benchmark (windows-latest)", steps=[])]}
+        artifacts = {123: [dict(id=1, name="results-ubuntu-latest")],
+                     122: [dict(id=2, name="results-windows-latest")]}
+        def request(method, path):
+            run_id = int(path.split("/")[3])
+            if "/jobs?" in path:
+                return dict(jobs=jobs[run_id])
+            if "/artifacts?" in path:
+                return dict(artifacts=artifacts[run_id])
+            return run
+        api.request.side_effect = request
+        return api
+
+    def test_refresh_recovers_queued_windows_comparisons_from_parent(self):
+        result = self.resolve(dict(mode="refresh", resume_run_id="123"), self.ancestry_api())
+        self.assertEqual(result["platforms"], ["ubuntu-latest", "windows-latest"])
+        self.assertEqual(result["retained_by_platform"], {"ubuntu-latest": 2, "windows-latest": 3})
+        self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["windows-latest"]["rows"]}, {122})
+        self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["ubuntu-latest"]["rows"]}, {123})
+
+    def test_refresh_refuses_ancestral_configuration_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "different physical campaign"):
+            self.resolve(dict(mode="refresh", resume_run_id="123"), self.ancestry_api(mismatch=True))
+
+    def test_refresh_traverses_intermediate_queued_runs_without_replacing_newer_rows(self):
+        api = self.ancestry_api()
+        original_request, original_archive = api.request.side_effect, api.archive.side_effect
+        def parent_link(files):
+            files["benchmark-source.json"].update(run_id=122, resumed_from_run_id=121)
+        intermediate, _ = checkpoint(source_ref="a" * 40, count=2, alter=parent_link)
+        def request(method, path):
+            if path.startswith("/actions/runs/122/"):
+                if "/artifacts?" in path:
+                    return dict(artifacts=[dict(id=3, name="results-ubuntu-latest")])
+                if "/jobs?" in path:
+                    return dict(jobs=[dict(name="benchmark (ubuntu-latest)", steps=[]),
+                                      dict(name="benchmark (windows-latest)", steps=None)])
+            if path.startswith("/actions/runs/121"):
+                return original_request(method, path.replace("/121", "/122", 1))
+            return original_request(method, path)
+        api.request.side_effect = request
+        api.archive.side_effect = lambda identity: intermediate if identity == 3 else original_archive(identity)
+        result = self.resolve(dict(mode="refresh", resume_run_id="123"), api)
+        self.assertEqual(result["retained_by_platform"], {"ubuntu-latest": 2, "windows-latest": 3})
+        self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["windows-latest"]["rows"]}, {121})
+        self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["ubuntu-latest"]["rows"]}, {123})
+
+    def test_baselines_round_trip_and_tampering_is_rejected(self):
+        result, _, _ = self.single_refresh()
+        lock = {"sources": {name: {"sha": "f" * 40} for name in benchmark.CAPABILITIES}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            refresh.write_baselines(result, root, "owner/repo", 124, sources=lock)
+            files = {name: benchmark.read_json(root / "ubuntu-latest" / name)
+                     for name in ("refresh-campaign.json", "retained-results.json")}
+        settings = refresh.baseline_settings(self.archive_files(files), "owner/repo", 124, "ubuntu-latest")
+        self.assertEqual(settings["software"], "acousticts")
+        self.assertEqual(settings["planned_cases"], 9)
+        self.assertEqual(settings["recorded_cases"], 0)
+        for altered in ("row", "origin", "source"):
+            changed = copy.deepcopy(files)
+            if altered == "row":
+                changed["retained-results.json"]["rows"][0]["elapsed_seconds"] = 999
+            elif altered == "origin":
+                changed["refresh-campaign.json"]["run_id"] = 123
+            else:
+                changed["refresh-campaign.json"]["sources"]["sources"]["acousticts"]["sha"] = "0" * 40
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                refresh.baseline_settings(self.archive_files(changed), "owner/repo", 124, "ubuntu-latest")
+
+    def test_resume_accepts_completed_timing_plus_queued_refresh_baseline(self):
+        result, content, _ = self.single_refresh()
+        result["platforms"].append("windows-latest")
+        result["_retained_payloads"]["windows-latest"] = copy.deepcopy(result["_retained_payloads"]["ubuntu-latest"])
+        lock = {"sources": {name: {"sha": "f" * 40} for name in benchmark.CAPABILITIES}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            refresh.write_baselines(result, root, "owner/repo", 124, sources=lock)
+            windows = {name: benchmark.read_json(root / "windows-latest" / name)
+                       for name in ("refresh-campaign.json", "retained-results.json")}
+            retained = benchmark.read_json(root / "ubuntu-latest/retained-results.json")
+        cases = benchmark.build_cases(result["configuration"], result["profile"], ["acousticts"], 3)
+        original_manifest = campaign.read_checkpoint(content)[0]["manifest.json"]
+        identity = dict(campaign.manifest_identity(original_manifest), configuration=result["configuration"],
+                        sources=lock, cases=[case["case_id"] for case in cases],
+                        retained_fingerprint=benchmark.fingerprint(retained))
+        record = dict(case_id=cases[0]["case_id"], status="ok", source_sha="f" * 40, elapsed_seconds=.05, ts_db=-40)
+        files = {"manifest.json": dict(identity, fingerprint=benchmark.fingerprint(identity)),
+                 "results.json": benchmark.summarize(cases, {record["case_id"]: record}, {}),
+                 "status.json": dict(state="budget_paused", planned=len(cases), recorded=1),
+                 "retained-results.json": retained, f"records/{record['case_id']}.json": record,
+                 "benchmark-source.json": dict(schema_version=1, repository="owner/repo", source_ref="e" * 40)}
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="retained-windows-latest")]
+        api, _ = self.api(entries, {1: self.archive_files(files), 2: self.archive_files(windows)})
+        resumed = self.resolve(dict(mode="resume", resume_run_id="124"), api)
+        self.assertEqual(resumed["software"], "acousticts")
+        self.assertEqual(resumed["configuration"], result["configuration"])
+        self.assertEqual(resumed["recorded_by_platform"], {"ubuntu-latest": 1, "windows-latest": 0})
+        self.assertEqual(resumed["resume_artifact_run_ids"], {"ubuntu-latest": 124, "windows-latest": 124})
+
+    def test_resumed_setup_baseline_tracks_current_run_without_changing_saved_measurements(self):
+        result, _, _ = self.single_refresh()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            refresh.write_baselines(result, root, "owner/repo", 124)
+            directory = root / "benchmark-results"
+            for name in ("refresh-campaign.json", "retained-results.json"):
+                benchmark.atomic_json(directory / name, benchmark.read_json(root / "ubuntu-latest" / name))
+            retained_before = (directory / "retained-results.json").read_bytes()
+            workflow = (ROOT / ".github/workflows/benchmark.yml").read_text(encoding="utf-8")
+            block = workflow.split("      - name: Record benchmark source provenance\n", 1)[1]
+            source = textwrap.dedent(block.split("<<'PY'\n", 1)[1].split("\n          PY", 1)[0])
+            environment = dict(RUNNER_TEMP=str(root), SOURCE_REF="e" * 40, GITHUB_REPOSITORY="owner/repo",
+                               GITHUB_WORKFLOW_REF="owner/repo/benchmark.yml@main", GITHUB_SHA="e" * 40,
+                               GITHUB_RUN_ID="125", RESUME_RUN_ID="124")
+            with patch.dict(os.environ, environment), patch("subprocess.check_output", return_value="e" * 40 + "\n"):
+                exec(compile(source, "record-source", "exec"), {})
+            files = {path.name: benchmark.read_json(path) for path in directory.glob("*.json")}
+            settings = refresh.baseline_settings(self.archive_files(files), "owner/repo", 125, "ubuntu-latest")
+            self.assertEqual(settings["software"], "acousticts")
+            self.assertEqual(settings["recorded_cases"], 0)
+            self.assertEqual(files["refresh-campaign.json"]["baseline_origin_run_id"], 124)
+            self.assertEqual(files["refresh-campaign.json"]["resumed_from_run_id"], 124)
+            self.assertEqual((directory / "retained-results.json").read_bytes(), retained_before)
 
 
 if __name__ == "__main__":

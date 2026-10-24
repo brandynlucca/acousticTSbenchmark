@@ -14,7 +14,7 @@ import sys
 import zipfile
 
 from benchmark import ROOT, atomic_json, export, load_references, read_json, utc_now
-from publish_progress import APIError, GitHub, PLATFORMS, select_artifact
+from publish_progress import APIError, GitHub, PLATFORMS, comparison_rows, select_artifact
 from references import build_requests, cached_reference, export_references, valid_cached
 
 BRANCH = "reference-data"
@@ -165,7 +165,8 @@ def join_directory(directory, references_path):
     records = {row["case_id"]: row for row in cases if row["status"] != "pending"}
     export(directory, cases, records, references, status["state"])
     atomic_json(directory / "references.json", read_json(references_path))
-    return sum(row["status"] == "ok" and row["physical_id"] in references for row in rows)
+    return sum(row["status"] == "ok" and row["physical_id"] in references
+               for row in comparison_rows(directory, rows, references=references))
 
 
 def download_timing(api, run_id, platform, directory):
@@ -183,20 +184,30 @@ def download_timing(api, run_id, platform, directory):
     if setup_only_checkpoint(content, api.repository, run_id) is not None:
         print(f"No timing measurements for {platform}: setup did not produce a checkpoint", flush=True)
         return False
+    from refresh import baseline_settings
+    if baseline_settings(content, api.repository, run_id, platform) is not None:
+        print(f"No new timing measurements for {platform}: refresh setup did not produce a checkpoint", flush=True)
+        return False
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    found = set()
+    values = {}
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         for entry in archive.infolist():
             name = PurePosixPath(entry.filename).name
-            if name not in ("manifest.json", "results.json", "status.json"):
+            if name not in ("manifest.json", "results.json", "status.json", "retained-results.json"):
                 continue
-            if name in found or entry.file_size > 128 * 1024 * 1024:
+            if name in values or entry.file_size > 128 * 1024 * 1024:
                 raise ValueError("Ambiguous or oversized timing artifact")
-            found.add(name)
-            atomic_json(directory / name, json.loads(archive.read(entry)))
-    if found != {"manifest.json", "results.json", "status.json"}:
+            values[name] = json.loads(archive.read(entry))
+    if not {"manifest.json", "results.json", "status.json"} <= values.keys():
         raise ValueError("Incomplete timing artifact")
+    if "retained-results.json" in values:
+        from publish_progress import retained_comparison_rows
+        retained_comparison_rows(values["retained-results.json"], values["results.json"])
+    for name, value in values.items():
+        atomic_json(directory / name, value)
+    if "retained-results.json" not in values:
+        (directory / "retained-results.json").unlink(missing_ok=True)
     return True
 
 
@@ -247,7 +258,8 @@ def main():
         from publish_progress import compact_payload, publish
         run = api.request("GET", f"/actions/runs/{args.run_id}")
         payload = compact_payload(args.repository, args.platform, args.run_id, run["run_attempt"],
-            read_json(args.directory / "results.json"), read_json(args.directory / "status.json"), "completed")
+            comparison_rows(args.directory, read_json(args.directory / "results.json")),
+            read_json(args.directory / "status.json"), "completed")
         comparison_run = os.getenv("GITHUB_RUN_ID")
         if comparison_run:
             payload["artifacts_url"] = f"https://github.com/{args.repository}/actions/runs/{comparison_run}#artifacts"

@@ -1,15 +1,15 @@
 name: Dense spheroid timings
-run-name: ${{ inputs.mode == 'prepare' && format('Prepare environments ({0})', inputs.platform) || inputs.mode == 'resume' && format('Resume benchmark {0}', inputs.resume_run_id) || format('New benchmark ({0})', inputs.platform) }}
+run-name: ${{ inputs.mode == 'prepare' && format('Prepare environments ({0})', inputs.platform) || inputs.mode == 'refresh' && format('Refresh {0} from benchmark {1}', inputs.refresh_software, inputs.resume_run_id) || inputs.mode == 'resume' && format('Resume benchmark {0}', inputs.resume_run_id) || format('New benchmark ({0})', inputs.platform) }}
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: New benchmark, resume saved cases, or prepare cached environments
+        description: New benchmark, resume, refresh selected software, or prepare environments
         type: choice
-        options: [new, resume, prepare]
+        options: [new, resume, refresh, prepare]
         default: new
       platform:
-        description: New-run platform (resume restores the original platforms and settings)
+        description: New-run platform (resume and refresh restore original platforms and settings)
         type: choice
         options: [ubuntu-latest, windows-latest, macos-latest, all]
         default: ubuntu-latest
@@ -57,9 +57,13 @@ on:
         options: ['1', '3', '5']
         default: '1'
       resume_run_id:
-        description: Required in resume mode (all new-run settings are ignored)
+        description: Required in resume or refresh mode (all new-run settings are ignored)
         type: string
         default: ''
+      refresh_software:
+        description: Refresh only these software CSV names, retaining other recorded comparisons
+        type: string
+        default: acousticts
       resume_artifact:
         description: Optional checkpoint artifact name instead of the final platform artifact
         type: string
@@ -70,9 +74,9 @@ on:
         options: ['Keep saved order', 'Complete each frequency sweep', 'Frequency by frequency']
         default: Keep saved order
       reference_budget_minutes:
-        description: Maximum calculation minutes per reference runner (two parallel runners)
+        description: Reference minutes per runner (0 reuses cached references only)
         type: choice
-        options: ['15', '30']
+        options: ['0', '15', '30']
         default: '15'
       timing_budget_minutes:
         description: Minutes per platform, including setup (saved cases can be resumed)
@@ -96,7 +100,7 @@ jobs:
     with:
       run_id: ${{ format('{0}', github.run_id) }}
   references:
-    if: ${{ inputs.mode != 'prepare' }}
+    if: ${{ inputs.mode != 'prepare' && inputs.reference_budget_minutes != '0' }}
     uses: ./.github/workflows/references.yml
     needs: matrix
     permissions:
@@ -109,7 +113,7 @@ jobs:
       budget_minutes: ${{ fromJSON(inputs.reference_budget_minutes) }}
   matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     outputs:
       platforms: ${{ steps.choose.outputs.platforms }}
       configuration: ${{ steps.choose.outputs.configuration }}
@@ -120,6 +124,7 @@ jobs:
       resume_artifacts: ${{ steps.choose.outputs.resume_artifacts }}
       resume_run_id: ${{ steps.choose.outputs.resume_run_id }}
       resume_case_order: ${{ steps.choose.outputs.resume_case_order }}
+      resume_artifact_run_ids: ${{ steps.choose.outputs.resume_artifact_run_ids }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -131,6 +136,30 @@ jobs:
           CAMPAIGN_INPUTS: ${{ toJSON(inputs) }}
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/campaign.py --output "$RUNNER_TEMP/campaign.json"
+      - name: Preserve Ubuntu comparison measurements
+        if: inputs.mode == 'refresh'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: retained-ubuntu-latest
+          path: ${{ runner.temp }}/refresh-baselines/ubuntu-latest/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Preserve Windows comparison measurements
+        if: inputs.mode == 'refresh'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: retained-windows-latest
+          path: ${{ runner.temp }}/refresh-baselines/windows-latest/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Preserve macOS comparison measurements
+        if: inputs.mode == 'refresh'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: retained-macos-latest
+          path: ${{ runner.temp }}/refresh-baselines/macos-latest/
+          if-no-files-found: warn
+          retention-days: 90
   benchmark:
     name: ${{ inputs.mode == 'prepare' && 'prepare' || 'benchmark' }} (${{ matrix.os }})
     needs: matrix
@@ -176,11 +205,11 @@ jobs:
               output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
           PY
       - name: Restore previous checkpoints
-        if: ${{ inputs.mode == 'resume' && fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] != '' }}
+        if: ${{ (inputs.mode == 'resume' || inputs.mode == 'refresh') && fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] != '' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] }}
-          run-id: ${{ needs.matrix.outputs.resume_run_id }}
+          run-id: ${{ fromJSON(needs.matrix.outputs.resume_artifact_run_ids)[matrix.os] }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/benchmark-results
       - name: Check out current workflow controllers
@@ -249,6 +278,17 @@ jobs:
                         workflow_ref=os.environ["GITHUB_WORKFLOW_REF"], workflow_sha=os.environ["GITHUB_SHA"],
                         run_id=int(os.environ["GITHUB_RUN_ID"]),
                         resumed_from_run_id=int(os.environ["RESUME_RUN_ID"]) if os.environ["RESUME_RUN_ID"] else None)
+          refresh_path = directory / "refresh-campaign.json"
+          if refresh_path.is_file() and not (directory / "manifest.json").is_file():
+              refresh = json.loads(refresh_path.read_text(encoding="utf-8"))
+              if refresh["settings"]["source_ref"] != revision:
+                  raise SystemExit("Refresh baseline source does not match the checked-out source")
+              refresh.setdefault("baseline_origin_run_id", refresh["run_id"])
+              refresh["previous_baseline_run_id"] = refresh["run_id"]
+              refresh.update(run_id=source["run_id"], resumed_from_run_id=source["resumed_from_run_id"])
+              temporary = refresh_path.with_suffix(".json.tmp")
+              temporary.write_text(json.dumps(refresh, indent=2) + "\n", encoding="utf-8")
+              temporary.replace(refresh_path)
           (directory / "benchmark-source.json").write_text(json.dumps(source, indent=2) + "\n")
           PY
       - name: Check timing selection
@@ -429,6 +469,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
           key: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-{3}', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY, hashFiles('src/setup_r.R', 'sources.lock.json')) || format('r-library-v1-{0}-{1}-4.5.2-{2}', steps.r-cache-platform.outputs.image, runner.arch, hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml')) }}
+          restore-keys: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY) || format('r-library-v1-{0}-{1}-4.5.2-', steps.r-cache-platform.outputs.image, runner.arch) }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(env.SOFTWARE, 'acousticscattering') || contains(env.SOFTWARE, 'liquid_spheroid')
         timeout-minutes: 5
@@ -540,7 +581,7 @@ jobs:
           import time
 
           sys.path.insert(0, str(Path.cwd() / "src"))
-          from benchmark import atomic_json, build_cases, read_json
+          from benchmark import atomic_json, build_cases, load_references, read_json
           from reference_store import join_directory, restore_cache
           from references import export_references
 
@@ -548,6 +589,7 @@ jobs:
           publisher = importlib.util.module_from_spec(publisher_spec)
           publisher_spec.loader.exec_module(publisher)
           GitHub, compact_payload, publish = publisher.GitHub, publisher.compact_payload, publisher.publish
+          comparison_rows = publisher.comparison_rows
 
           def main():
               duration = float(sys.argv[1])
@@ -609,6 +651,9 @@ jobs:
                           dict(case, status="pending") for case in build_cases(configuration,
                               os.environ["PROFILE"], os.environ["SOFTWARE"].split(","),
                               int(os.environ["REPETITIONS"]))]
+                      reference_path = os.environ.get("BENCHMARK_REFERENCES")
+                      references = load_references(reference_path) if reference_path and Path(reference_path).is_file() else None
+                      rows = comparison_rows(directory, rows, references=references)
                       api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
                                    timeout_seconds=15)
                       payload = compact_payload(os.environ["GITHUB_REPOSITORY"],
@@ -666,6 +711,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -695,6 +743,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -724,6 +775,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -753,6 +807,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -782,6 +839,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html
@@ -804,6 +864,9 @@ jobs:
           path: |
             ${{ runner.temp }}/benchmark-results/manifest.json
             ${{ runner.temp }}/benchmark-results/benchmark-source.json
+            ${{ runner.temp }}/benchmark-results/retained-results.json
+            ${{ runner.temp }}/benchmark-results/refresh-campaign.json
+            ${{ runner.temp }}/benchmark-results/references.json
             ${{ runner.temp }}/benchmark-results/results.*
             ${{ runner.temp }}/benchmark-results/status.json
             ${{ runner.temp }}/benchmark-results/progress.html

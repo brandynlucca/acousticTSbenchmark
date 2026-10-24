@@ -16,7 +16,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
-from benchmark import ROOT, build_cases, read_json
+from benchmark import CAPABILITIES, ROOT, STATUSES, build_cases, load_references, read_json, summarize
 
 
 BRANCH = "benchmark-data"
@@ -27,6 +27,7 @@ ROW_FIELDS = ("software", "boundary", "semimajor_m", "aspect_ratio", "incidence_
               "physical_id", "reference_id", "reference_ts_db", "reference_uncertainty_db")
 ROW_FIELDS += ("memory_delta_peak_bytes", "memory_baseline_rss_bytes", "memory_peak_rss_bytes",
                "memory_sample_interval_seconds", "memory_samples", "memory_status", "memory_method")
+ROW_FIELDS += ("source_sha", "measurement_role", "retained_from_run_id")
 MAX_JSON_BYTES = 128 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -127,11 +128,62 @@ class GitHub:
             return self.read(response, MAX_ARCHIVE_BYTES)
 
 
+def retained_comparison_rows(sidecar, active_rows, references=None):
+    """Validate saved measurements and derive comparisons without changing their provenance."""
+    if (not isinstance(sidecar, dict) or sidecar.get("schema_version") != 1 or
+            not isinstance(sidecar.get("rows"), list) or
+            not isinstance(sidecar.get("provenance"), list) or
+            any(not isinstance(item, dict) for item in sidecar["provenance"])):
+        raise ValueError("Invalid retained measurement metadata")
+    programs = {row.get("software") for row in active_rows}
+    identifiers = {row.get("case_id") for row in active_rows}
+    retained = []
+    for row in sidecar["rows"]:
+        if (not isinstance(row, dict) or row.get("measurement_role") != "retained" or
+                row.get("status") not in STATUSES or
+                row.get("software") not in CAPABILITIES or row["software"] == "acousticscattering" or
+                row["software"] in programs or
+                not isinstance(row.get("case_id"), str) or
+                not re.fullmatch(r"[a-f0-9]{64}", row["case_id"]) or row["case_id"] in identifiers or
+                not isinstance(row.get("source_sha"), str) or
+                not re.fullmatch(r"[a-f0-9]{40}", row["source_sha"]) or
+                type(row.get("retained_from_run_id")) is not int or row["retained_from_run_id"] < 1):
+            raise ValueError("Invalid, overlapping, or incomplete retained measurement")
+        identifiers.add(row["case_id"])
+        retained.append(dict(row))
+    json.dumps(retained, allow_nan=False)
+    if references is not None:
+        cases = [{key: value for key, value in row.items()
+                  if not key.startswith("reference_") and key != "delta_ts_db"} for row in retained]
+        retained = summarize(cases, {}, references)
+    return retained
+
+
+def comparison_rows(directory, rows, references=None):
+    """Append retained comparison measurements to an active-only case table."""
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) or
+            row.get("measurement_role") == "retained" for row in rows)):
+        raise ValueError("Comparison input must contain only active measurement rows")
+    directory = Path(directory)
+    path = directory / "retained-results.json"
+    if not path.is_file():
+        return rows
+    if path.stat().st_size > MAX_JSON_BYTES:
+        raise ValueError("Retained measurements exceed the supported size")
+    if references is None and (directory / "references.json").is_file():
+        references = load_references(directory / "references.json")
+    return rows + retained_comparison_rows(read_json(path), rows, references)
+
+
 def compact_payload(repository, platform, run_id, run_attempt, rows, status=None, state=None):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("results.json must contain a list of records")
     if platform not in PLATFORMS or run_id < 1 or run_attempt < 1:
         raise ValueError("Invalid platform or workflow run identity")
+    active_rows = [row for row in rows if row.get("measurement_role") != "retained"]
+    retained_rows = [row for row in rows if row.get("measurement_role") == "retained"]
+    if retained_rows:
+        retained_comparison_rows(dict(schema_version=1, rows=retained_rows, provenance=[]), active_rows)
     def finite_number(value):
         return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
@@ -197,13 +249,14 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
         raise ValueError("status.json must contain an object")
     safe_status = {key: original[key] for key in ("state", "updated_at", "planned", "recorded", "outcomes")
                    if key in original}
-    safe_status.setdefault("planned", len(rows))
-    safe_status["recorded"] = len(compact)
+    safe_status.setdefault("planned", len(active_rows))
+    active_compact = [row for row in compact if row.get("measurement_role") != "retained"]
+    safe_status["recorded"] = len(active_compact)
     counts = {}
-    for row in compact:
+    for row in active_compact:
         outcome = row["status"]
         counts[outcome] = counts.get(outcome, 0) + 1
-    safe_status["outcomes"] = dict(counts, pending=len(rows) - len(compact))
+    safe_status["outcomes"] = dict(counts, pending=len(active_rows) - len(active_compact))
     if state is None:
         state = "completed" if original.get("state") == "complete" else "running"
     if state not in ("setup", "running", "completed"):
@@ -216,6 +269,12 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
                   semimajor_m=semimajor,
                   aspect_ratios=aspects, incidences_deg=angles,
                   coverage=list(coverage.values()), incidence_coverage=list(incidence_coverage.values()), rows=compact)
+    if retained_rows:
+        retained_sources = sorted({(row["software"], row["source_sha"], row["retained_from_run_id"])
+                                   for row in retained_rows})
+        result.update(active_software=sorted({row["software"] for row in active_rows if row.get("software")}),
+                      retained_count=len(retained_rows), retained_sources=[
+                          dict(software=name, source_sha=sha, run_id=run) for name, sha, run in retained_sources])
     json.dumps(result, allow_nan=False)
     return result
 
@@ -288,7 +347,7 @@ def artifact_payload(api, platform, run_id, state=None):
     with zipfile.ZipFile(io.BytesIO(api.archive(selected["id"]))) as archive:
         for entry in archive.infolist():
             name = PurePosixPath(entry.filename).name
-            if name not in ("results.json", "status.json"):
+            if name not in ("results.json", "status.json", "retained-results.json", "references.json"):
                 continue
             if name in values or entry.file_size > MAX_JSON_BYTES:
                 raise ValueError("Ambiguous or oversized progress JSON in artifact")
@@ -296,7 +355,14 @@ def artifact_payload(api, platform, run_id, state=None):
     if "results.json" not in values:
         raise ValueError("Selected artifact contains no results.json")
     inferred = "completed" if run.get("status") == "completed" else None
-    payload = compact_payload(api.repository, platform, run_id, attempt, values["results.json"],
+    rows = values["results.json"]
+    if "retained-results.json" in values:
+        references = None
+        if "references.json" in values:
+            from benchmark import references_from_value
+            references = references_from_value(values["references.json"])
+        rows = rows + retained_comparison_rows(values["retained-results.json"], rows, references)
+    payload = compact_payload(api.repository, platform, run_id, attempt, rows,
                               values.get("status.json"), state or inferred)
     payload["artifact_id"] = selected["id"]
     payload["artifact_name"] = selected["name"]
@@ -432,7 +498,7 @@ def main():
             status = dict(state="setup", planned=len(rows), recorded=0,
                           updated_at=datetime.now(timezone.utc).isoformat())
         payload = compact_payload(args.repository, args.platform, args.run_id, args.run_attempt,
-                                  rows, status, args.state)
+                                  comparison_rows(args.directory, rows), status, args.state)
     changed = publish(api, payload)
     print(f"{'Published' if changed else 'Kept newer snapshot for'} {args.platform} progress")
 

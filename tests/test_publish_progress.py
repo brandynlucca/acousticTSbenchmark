@@ -48,6 +48,112 @@ class ProgressTests(unittest.TestCase):
              {"software": "acousticts", "status": "pending"}],
             {"planned": 2, "recorded": 1, "state": "budget_paused", "private_path": "/private"}, state)
 
+    def retained_fixture(self):
+        configuration = self.campaign()
+        configuration["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        active = [dict(case, status="pending") for case in progress.build_cases(
+            configuration, "pilot", ["acousticts"], 1)]
+        retained = [dict(case, status="ok", elapsed_seconds=.25, ts_db=-30,
+                         source_sha="a" * 40, measurement_role="retained", retained_from_run_id=11)
+                    for case in progress.build_cases(configuration, "pilot", ["echosms"], 1)]
+        sidecar = dict(schema_version=1, rows=retained,
+                       provenance=[dict(run_id=11, manifest_fingerprint="b" * 64)])
+        return active, sidecar
+
+    def test_retained_curves_do_not_advance_active_progress(self):
+        active, sidecar = self.retained_fixture()
+        path = self.directory / "retained-results.json"
+        path.write_text(json.dumps(sidecar), encoding="utf-8")
+        before = path.read_bytes()
+        combined = progress.comparison_rows(self.directory, active)
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, combined,
+                                           dict(planned=2, recorded=0), "setup")
+        self.assertEqual(payload["status"], dict(planned=2, recorded=0, outcomes=dict(pending=2)))
+        self.assertEqual(payload["status_counts"], {})
+        self.assertEqual(payload["active_software"], ["acousticts"])
+        self.assertEqual(payload["retained_count"], 2)
+        self.assertEqual(payload["retained_sources"], [dict(software="echosms", source_sha="a" * 40, run_id=11)])
+        self.assertEqual({row["software"] for row in payload["rows"]}, {"echosms"})
+        coverage = {row["software"]: row for row in payload["coverage"]}
+        self.assertEqual(coverage["acousticts"]["pending"], 2)
+        self.assertEqual(coverage["echosms"]["success"], 2)
+        self.assertEqual(coverage["echosms"]["elapsed_seconds_sum"], .5)
+        active[0].update(status="ok", elapsed_seconds=.1, ts_db=-29)
+        next_payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1,
+            progress.comparison_rows(self.directory, active), dict(planned=2), "running")
+        self.assertEqual(next_payload["status"]["recorded"], 1)
+        self.assertEqual(next_payload["status"]["outcomes"], dict(ok=1, pending=1))
+        self.assertEqual(len(next_payload["rows"]), 3)
+        self.assertTrue(progress.should_publish(payload, next_payload))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_retained_measurements_reject_pending_duplicates_and_active_software(self):
+        active, original = self.retained_fixture()
+        for patch in (dict(status="pending"), dict(measurement_role="active"),
+                      dict(software="acousticts"), dict(source_sha="unknown"),
+                      dict(retained_from_run_id=True), dict(retained_from_run_id=0),
+                      dict(case_id=active[0]["case_id"])):
+            with self.subTest(patch=patch):
+                sidecar = copy.deepcopy(original)
+                sidecar["rows"][0].update(patch)
+                with self.assertRaisesRegex(ValueError, "retained measurement"):
+                    progress.retained_comparison_rows(sidecar, active)
+        duplicate = copy.deepcopy(original)
+        duplicate["rows"].append(duplicate["rows"][0])
+        with self.assertRaisesRegex(ValueError, "retained measurement"):
+            progress.retained_comparison_rows(duplicate, active)
+        for sidecar in ({}, dict(schema_version=1, rows=[], provenance="invalid")):
+            with self.assertRaisesRegex(ValueError, "metadata"):
+                progress.retained_comparison_rows(sidecar, active)
+
+    def test_setup_publishes_retained_curves_before_active_results_exist(self):
+        _, sidecar = self.retained_fixture()
+        (self.directory / "retained-results.json").write_text(json.dumps(sidecar), encoding="utf-8")
+        configuration = self.campaign()
+        configuration["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        arguments = ["publish_progress.py", "--repository", "owner/repo", "--platform", "ubuntu-latest",
+                     "--directory", str(self.directory), "--run-id", "124", "--state", "setup",
+                     "--config", str(self.config_file(configuration)), "--profile", "pilot",
+                     "--software", "acousticts", "--repetitions", "1"]
+        with patch.object(sys, "argv", arguments), patch.object(progress, "GitHub"), \
+             patch.object(progress, "publish", return_value=True) as publish:
+            progress.main()
+        payload = publish.call_args.args[1]
+        self.assertEqual(payload["state"], "setup")
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["status"]["outcomes"], dict(pending=2))
+        self.assertEqual(payload["active_software"], ["acousticts"])
+        self.assertEqual(payload["retained_count"], 2)
+        self.assertEqual({row["software"] for row in payload["rows"]}, {"echosms"})
+        self.assertFalse((self.directory / "results.json").exists())
+
+    def test_artifact_republication_preserves_retained_curves_and_active_counts(self):
+        import benchmark
+        active, sidecar = self.retained_fixture()
+        sidecar["rows"][0].update(delta_ts_db=99, reference_id="stale")
+        reference = dict({key: sidecar["rows"][0][key] for key in benchmark.PHYSICAL_FIELDS},
+                         reference_id="d" * 64, source_sha="c" * 40, qualified=True,
+                         qualification="fixture", software="acousticscattering", controls={},
+                         ts_db=-32, uncertainty_db=.01)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("results.json", json.dumps(active))
+            output.writestr("status.json", json.dumps(dict(planned=2, recorded=0)))
+            output.writestr("retained-results.json", json.dumps(sidecar))
+            output.writestr("references.json", json.dumps(dict(references=[reference])))
+        api = Mock(repository="owner/repo")
+        api.request.side_effect = [dict(status="completed", run_attempt=1),
+            dict(artifacts=[dict(id=7, name="results-ubuntu-latest")])]
+        api.archive.return_value = archive.getvalue()
+        payload = progress.artifact_payload(api, "ubuntu-latest", 12)
+        self.assertEqual(payload["retained_count"], 2)
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["status"]["outcomes"], dict(pending=2))
+        self.assertEqual({row["source_sha"] for row in payload["rows"]}, {"a" * 40})
+        self.assertEqual(payload["rows"][0]["delta_ts_db"], 2)
+        self.assertEqual(payload["rows"][0]["reference_id"], reference["reference_id"])
+        self.assertIsNone(payload["rows"][1]["delta_ts_db"])
+
     def test_public_payload_omits_pending_and_private_diagnostics(self):
         payload = self.payload()
         self.assertEqual(payload["status"], {"planned": 2, "recorded": 1, "state": "budget_paused",

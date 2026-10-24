@@ -176,6 +176,95 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Incomplete timing artifact"):
             store.download_timing(api, 123, "macos-latest", self.work)
 
+    def test_reference_join_preserves_retained_measurements_and_active_counts(self):
+        cases = b.build_cases(self.config, software=["echosms"])
+        retained_case = b.build_cases(self.config, software=["prol_spheroid"])[0]
+        retained = dict(retained_case, status="ok", elapsed_seconds=.456, ts_db=-38,
+                        source_sha="b" * 40, measurement_role="retained", retained_from_run_id=100,
+                        delta_ts_db=99, reference_ts_db=-137, reference_id="stale")
+        sidecar = self.work / "retained-results.json"
+        b.atomic_json(sidecar, dict(schema_version=1, rows=[retained],
+                                   provenance=[dict(run_id=100, manifest_fingerprint="c" * 64)]))
+        original = sidecar.read_bytes()
+        measurements = {cases[0]["case_id"]: dict(status="ok", elapsed_seconds=.123, ts_db=-39)}
+        b.export(self.work, cases, measurements, {}, "budget_paused")
+        path = self.work / "selected.json"
+        b.atomic_json(path, dict(references=[self.records[0]]))
+        with patch.object(b, "measure", side_effect=AssertionError("retained comparisons cannot measure")):
+            self.assertEqual(store.join_directory(self.work, path), 2)
+        active = b.read_json(self.work / "results.json")
+        self.assertEqual({row["software"] for row in active}, {"echosms"})
+        self.assertEqual(b.read_json(self.work / "status.json")["recorded"], 1)
+        self.assertEqual(b.read_json(self.work / "status.json")["planned"], 2)
+        combined = store.comparison_rows(self.work, active)
+        saved = next(row for row in combined if row.get("measurement_role") == "retained")
+        self.assertEqual((saved["elapsed_seconds"], saved["delta_ts_db"]), (.456, 2))
+        self.assertEqual(saved["source_sha"], "b" * 40)
+        self.assertEqual(saved["retained_from_run_id"], 100)
+        self.assertEqual(saved["reference_id"], self.records[0]["reference_id"])
+        self.assertEqual(sidecar.read_bytes(), original)
+        self.assertIn('"measurement_role": "retained"', (self.work / "progress.html").read_text(encoding="utf-8"))
+        b.atomic_json(path, dict(references=[]))
+        store.join_directory(self.work, path)
+        saved = store.comparison_rows(self.work, b.read_json(self.work / "results.json"))[-1]
+        self.assertIsNone(saved["delta_ts_db"])
+        self.assertNotIn("reference_ts_db", saved)
+        self.assertEqual(sidecar.read_bytes(), original)
+
+    def test_refresh_baseline_without_timing_manifest_skips_reference_attachment(self):
+        import refresh
+        cases = b.build_cases(self.config, software=["echosms"])
+        retained = dict(schema_version=1, rows=[], provenance=[])
+        metadata = dict(schema_version=1, repository="owner/repo", run_id=123, platform="ubuntu-latest",
+                        retained_fingerprint=b.fingerprint(retained), sources=self.lock,
+                        settings=dict(configuration=self.config, profile="pilot", software="echosms",
+                                      repetitions=1, source_ref="a" * 40, planned_cases=len(cases),
+                                      sources_fingerprint=b.fingerprint(self.lock)))
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("refresh-campaign.json", json.dumps(metadata))
+            output.writestr("retained-results.json", json.dumps(retained))
+        self.assertEqual(refresh.baseline_settings(archive.getvalue(), "owner/repo", 123, "ubuntu-latest")["recorded_cases"], 0)
+        api = Mock(repository="owner/repo")
+        api.request.return_value = dict(artifacts=[dict(id=1, name="results-ubuntu-latest")])
+        api.archive.return_value = archive.getvalue()
+        self.assertFalse(store.download_timing(api, 123, "ubuntu-latest", self.work))
+        self.assertFalse((self.work / "manifest.json").exists())
+
+    def test_download_and_attach_retain_other_software_with_updated_references(self):
+        cases = b.build_cases(self.config, software=["echosms"])
+        rows = b.summarize(cases, {}, {})
+        retained_case = b.build_cases(self.config, software=["prol_spheroid"])[0]
+        retained = dict(retained_case, status="ok", elapsed_seconds=.456, ts_db=-38,
+                        source_sha="b" * 40, measurement_role="retained", retained_from_run_id=100)
+        sidecar = dict(schema_version=1, rows=[retained], provenance=[dict(run_id=100)])
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, value in {"results.json": rows, "status.json": dict(state="budget_paused", planned=2, recorded=0),
+                                "manifest.json": dict(reference_requests=self.jobs),
+                                "retained-results.json": sidecar}.items():
+                archive.writestr(name, json.dumps(value))
+        api = Mock(repository="owner/repo")
+        api.request.side_effect = [dict(artifacts=[dict(id=1, name="results-ubuntu-latest")]),
+                                   dict(run_attempt=1)]
+        api.archive.return_value = output.getvalue()
+        self.save(0)
+        directory = self.work / "attached"
+        arguments = ["reference_store.py", "attach", "--repository", "owner/repo", "--run-id", "123",
+                     "--platform", "ubuntu-latest", "--directory", str(directory),
+                     "--cache-dir", str(self.work / "cache"), "--output", str(self.work / "references.json")]
+        with patch.object(sys, "argv", arguments), patch.object(store, "GitHub", return_value=api), \
+             patch.object(store, "restore_cache", return_value=dict(planned=2, cached=1, missing=1)), \
+             patch("publish_progress.publish") as publish:
+            store.main()
+        self.assertEqual(b.read_json(directory / "retained-results.json"), sidecar)
+        payload = publish.call_args.args[1]
+        self.assertEqual(payload["retained_count"], 1)
+        self.assertEqual(payload["status"]["recorded"], 0)
+        self.assertEqual(payload["status"]["outcomes"], dict(pending=2))
+        self.assertEqual(payload["rows"][0]["delta_ts_db"], 2)
+        self.assertEqual(payload["rows"][0]["source_sha"], "b" * 40)
+
     def test_live_controller_attaches_new_references_without_remeasuring(self):
         self.save(0)
         store.publish_cache(self.api, self.jobs, self.work / "cache")
