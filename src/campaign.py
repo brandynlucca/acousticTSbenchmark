@@ -103,16 +103,16 @@ def new_campaign(inputs, base):
     ratios = numeric_list(inputs.get("aspect_ratios", "10"), "aspect_ratios")
     if any(value <= 1 for value in ratios):
         raise ValueError("Every prolate aspect ratio must exceed one")
-    angles = numeric_list(inputs.get("incidences_deg", "90"), "incidences_deg")
+    angles = numeric_list(inputs.get("incidences_deg", "0,37,90"), "incidences_deg")
     if any(not 0 <= value <= 90 for value in angles):
         raise ValueError("Incidences must be between 0 and 90 degrees from the major axis")
-    boundaries = csv_values(inputs.get("boundaries", "gas"), "boundaries")
+    boundaries = csv_values(inputs.get("boundaries", "rigid,pressure_release,liquid,gas"), "boundaries")
     if set(boundaries) - set(BOUNDARIES):
-        raise ValueError("Unknown boundary condition")
+        raise ValueError("Unknown boundary condition. Use rigid, pressure_release, liquid, gas")
     major = float(decimal_number(inputs.get("semimajor_m", .07), "semimajor_m"))
     if not math.isfinite(major) or major <= 0:
         raise ValueError("semimajor_m must be finite and positive")
-    configuration.update(geometry=dict(semimajor_m=major, aspect_ratios=ratios),
+    configuration.update(case_order="frequency_round_robin", geometry=dict(semimajor_m=major, aspect_ratios=ratios),
         incidences_deg=angles, boundaries=boundaries, software=programs, repetitions=int(repetitions),
         frequency=dict(start_hz=frequency_hz(inputs.get("frequency_start_khz", 1), "frequency_start_khz"),
                        stop_hz=frequency_hz(inputs.get("frequency_end_khz", 300), "frequency_end_khz"),

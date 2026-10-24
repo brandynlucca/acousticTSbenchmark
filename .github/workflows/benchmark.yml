@@ -40,11 +40,11 @@ on:
       incidences_deg:
         description: Incidences from the major axis in degrees, e.g. 0,37,90
         type: string
-        default: '90'
+        default: '0,37,90'
       boundaries:
         description: Boundaries CSV (rigid, pressure_release, liquid, gas)
         type: string
-        default: gas
+        default: rigid,pressure_release,liquid,gas
       repetitions:
         description: Timed repetitions per physical case
         type: choice
@@ -63,11 +63,16 @@ on:
         type: choice
         options: ['15', '30']
         default: '15'
+      timing_budget_minutes:
+        description: Minutes per platform, including setup (saved cases can be resumed)
+        type: choice
+        options: ['45', '120', '240']
+        default: '120'
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: spheroid-timing-campaign
+  group: ${{ inputs.mode == 'prepare' && format('spheroid-prepare-{0}', inputs.platform) || 'spheroid-timing-campaign' }}
   cancel-in-progress: false
 jobs:
   comparisons:
@@ -121,7 +126,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    timeout-minutes: ${{ inputs.mode == 'prepare' && 15 || 60 }}
+    timeout-minutes: ${{ inputs.mode == 'prepare' && 15 || 270 }}
     strategy:
       max-parallel: 1
       fail-fast: false
@@ -132,6 +137,7 @@ jobs:
       SOFTWARE: ${{ needs.matrix.outputs.software }}
       REPETITIONS: ${{ needs.matrix.outputs.repetitions }}
       BENCHMARK_PLATFORM: ${{ matrix.os }}
+      TIMING_BUDGET_MINUTES: ${{ inputs.timing_budget_minutes }}
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
@@ -148,8 +154,12 @@ jobs:
         run: |
           python - <<'PY'
           import os,time
+          budget = int(os.environ['TIMING_BUDGET_MINUTES'])
+          if budget not in (45, 120, 240):
+              raise SystemExit('Timing budget must be 45, 120, or 240 minutes per platform')
           with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write(f"BENCHMARK_DEADLINE={time.time()+2700}\n")
+              output.write(f"BENCHMARK_DEADLINE={time.time()+60*budget}\n")
+              output.write(f"BENCHMARK_BUDGET_SECONDS={60*budget}\n")
               output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
           PY
       - name: Restore previous checkpoints
@@ -431,9 +441,7 @@ jobs:
           SETUP_ONLY: ${{ inputs.mode == 'prepare' }}
         run: |
           arguments=(src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE")
-          if [[ "$SETUP_ONLY" == "true" ]]; then
-            arguments+=(--validate-workers --validation-timeout-seconds 120)
-          fi
+          arguments+=(--validate-workers --validation-timeout-seconds 120)
           python "${arguments[@]}"
       - name: Check prepared R package library
         if: contains(env.SOFTWARE, 'acousticts')
@@ -557,7 +565,7 @@ jobs:
               command = [sys.executable, "src/benchmark.py", "--config", os.environ["BENCHMARK_CONFIG"], "--profile", os.environ["PROFILE"],
                   "--software", os.environ["SOFTWARE"], "--repetitions", os.environ["REPETITIONS"],
                   "--runtime", str(Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/runtime.json"),
-                  "--output", str(directory), "--budget-seconds", "2700"]
+                  "--output", str(directory), "--budget-seconds", os.environ.get("BENCHMARK_BUDGET_SECONDS", "2700")]
               publish_snapshot(force=True)
               try:
                   while time.monotonic() < stop:
@@ -702,7 +710,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python "$RUNNER_TEMP/benchmark-controller.py" 2700
+          python "$RUNNER_TEMP/benchmark-controller.py" "$BENCHMARK_BUDGET_SECONDS"
       - name: Save checkpoint 5
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -750,6 +758,7 @@ jobs:
             ${{ runner.temp }}/benchmark-env/runtime.json
             ${{ runner.temp }}/benchmark-env/validation.json
             ${{ runner.temp }}/benchmark-env/validation/**/worker.log
+            ${{ runner.temp }}/benchmark-env/setup-*.log
             ${{ runner.temp }}/benchmark-env/python-freeze.txt
             ${{ runner.temp }}/benchmark-env/r-packages.json
             ${{ runner.temp }}/benchmark-env/julia/Project.toml

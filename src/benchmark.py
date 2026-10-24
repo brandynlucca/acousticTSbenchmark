@@ -140,6 +140,15 @@ def build_cases(configuration, profile="pilot", software=None, repetitions=None)
                             cases.append(case)
     if len({c["case_id"] for c in cases}) != len(cases):
         raise ValueError("Duplicate cases in configuration")
+    order = configuration.get("case_order", "boundary_major")
+    if order == "frequency_round_robin":
+        # Visit every boundary, angle and aspect ratio before advancing frequency.
+        # Stable sorting retains the rotated software order within each problem.
+        cases.sort(key=lambda c: (c["frequency_hz"], c["repetition"],
+            ratios.index(c["aspect_ratio"]), angles.index(c["incidence_deg"]),
+            boundaries.index(c["boundary"])))
+    elif order != "boundary_major":
+        raise ValueError(f"Unknown case_order: {order}")
     return cases
 
 

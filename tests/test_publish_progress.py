@@ -111,6 +111,23 @@ class ProgressTests(unittest.TestCase):
         finished = self.payload(12, 2, "completed")
         self.assertFalse(progress.should_publish(finished, current))
 
+    def test_angle_coverage_counts_pending_cases_without_mixing_incidences(self):
+        rows = [dict(software="acousticts", boundary="gas", aspect_ratio=10,
+                     incidence_deg=angle, frequency_hz=frequency, status=outcome,
+                     elapsed_seconds=elapsed)
+                for angle, frequency, outcome, elapsed in (
+                    (0, 1000, "ok", .2), (0, 3000, "pending", None),
+                    (37, 1000, "timeout", None), (90, 1000, "ok", .7))]
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows)
+        groups = {group["incidence_deg"]: group for group in payload["incidence_coverage"]}
+        self.assertEqual(groups[0]["planned"], 2)
+        self.assertEqual(groups[0]["pending"], 1)
+        self.assertEqual(groups[0]["elapsed_seconds_sum"], .2)
+        self.assertEqual(groups[37]["other_recorded"], 1)
+        self.assertEqual(groups[90]["success"], 1)
+        for field in ("planned", "recorded", "success", "other_recorded", "pending"):
+            self.assertEqual(sum(group[field] for group in groups.values()), payload["coverage"][0][field])
+
     def test_latest_artifact_filters_platform_expiration_and_names(self):
         artifacts = [{"id": 1, "name": "checkpoint-ubuntu-latest-1-1"},
                      {"id": 2, "name": "results-ubuntu-latest"},

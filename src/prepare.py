@@ -125,7 +125,7 @@ def validate_workers(names, runtime, workspace, timeout_seconds):
 
 
 def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
-            timeout_seconds=1500):
+            timeout_seconds=1500, log_path=None):
     """Run setup with the same process-tree ownership as timed workers."""
     timeout = min(timeout_seconds, remaining_budget())
     print("SETUP", " ".join(map(str, command)), flush=True)
@@ -138,6 +138,9 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
         job = WindowsJob()
         command = [sys.executable, str(ROOT / "src/process_gate.py"), str(gate), *command]
     process = None
+    if log_path is not None and capture_output:
+        raise ValueError("Use either a setup log or captured output")
+    log = open(log_path, "w", encoding="utf-8") if log_path is not None else None
     assigned = False
     group_terminated = False
 
@@ -155,7 +158,8 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
 
     try:
         process = subprocess.Popen(command, cwd=cwd, env=env, text=True,
-            stdout=subprocess.PIPE if capture_output else None,
+            stdout=log if log is not None else subprocess.PIPE if capture_output else None,
+            stderr=subprocess.STDOUT if log is not None else None,
             start_new_session=os.name != "nt",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         if job:
@@ -175,6 +179,8 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
             raise subprocess.CalledProcessError(process.returncode, command, output=output)
         return output
     finally:
+        if log is not None:
+            log.close()
         if process is not None and process.poll() is None:
             if job and assigned:
                 job.terminate()
@@ -190,6 +196,8 @@ def execute(command, *, workspace, cwd=None, env=None, capture_output=False,
             # the next package installation or timed prediction.
             terminate_posix_group()
         gate.unlink(missing_ok=True)
+        if log_path is not None:
+            print(Path(log_path).read_text(encoding="utf-8", errors="replace")[-12000:], flush=True)
 
 
 def obtain_source(name, source, directory):
@@ -334,7 +342,8 @@ def main():
             env = os.environ.copy()
             env["R_LIBS_USER"] = str(library)
             execute(["Rscript", "--vanilla", ROOT / "src/setup_r.R",
-                     library, runtime["source_paths"]["acousticts"], workspace / "r-packages.json"], env=env, workspace=workspace)
+                     library, runtime["source_paths"]["acousticts"], workspace / "r-packages.json"],
+                    env=env, workspace=workspace, log_path=workspace / "setup-acousticts.log")
             runtime["env"]["R_LIBS_USER"] = str(library)
             runtime["executables"]["acousticts"] = ["Rscript", "--vanilla"]
             lock_evidence["r_packages"] = read_json(workspace / "r-packages.json")

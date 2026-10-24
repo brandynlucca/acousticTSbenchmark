@@ -74,13 +74,14 @@ class CampaignTests(unittest.TestCase):
         result = self.resolve()
         self.assertEqual(result["mode"], "new")
         self.assertEqual(result["software"], "acousticts,prol_spheroid")
-        self.assertEqual(result["planned_cases"], 302)
+        self.assertEqual(result["planned_cases"], 3624)
         config = result["configuration"]
         self.assertEqual(config["frequency"], dict(start_hz=1000, stop_hz=300000, step_hz=2000, include_stop=True))
         cases = benchmark.build_cases(config, result["profile"])
         self.assertEqual({case["aspect_ratio"] for case in cases}, {10})
-        self.assertEqual({case["incidence_deg"] for case in cases}, {90})
-        self.assertEqual({case["boundary"] for case in cases}, {"gas"})
+        self.assertEqual({case["incidence_deg"] for case in cases}, {0, 37, 90})
+        self.assertEqual({case["boundary"] for case in cases}, set(benchmark.BOUNDARIES))
+        self.assertEqual(config["case_order"], "frequency_round_robin")
         self.assertEqual(cases[-1]["frequency_hz"], 300000)
         self.assertEqual(result["platforms"], ["ubuntu-latest"])
 

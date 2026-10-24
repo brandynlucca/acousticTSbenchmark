@@ -81,6 +81,16 @@ class PreparationTests(unittest.TestCase):
                                 workspace=self.path)
         self.assertFalse(output.exists())
 
+    def test_setup_log_preserves_stdout_and_stderr_when_installation_fails(self):
+        log = self.path / "setup-test.log"
+        command = [sys.executable, "-c",
+                   "import sys; print('installation output'); print('install failed', file=sys.stderr); sys.exit(1)"]
+        with self.assertRaises(subprocess.CalledProcessError):
+            prepare.execute(command, workspace=self.path, log_path=log, timeout_seconds=20)
+        text = log.read_text()
+        self.assertIn("installation output", text)
+        self.assertIn("install failed", text)
+
     def test_posix_timeout_does_not_signal_reaped_group_again(self):
         process = SimpleNamespace(
             pid=12345,

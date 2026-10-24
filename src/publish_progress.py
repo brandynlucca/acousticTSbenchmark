@@ -147,23 +147,28 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
         ranges["frequencies_hz"] = sorted({row["frequency_hz"] for row in selected
                                             if finite_number(row.get("frequency_hz"))})
         axes[format(aspect, ".15g")] = ranges
-    coverage = {}
+    coverage, incidence_coverage = {}, {}
     for row in rows:
         if not finite_number(row.get("aspect_ratio")) or not row.get("software") or not row.get("boundary"):
             continue
         key = (row["aspect_ratio"], row["software"], row["boundary"])
-        group = coverage.setdefault(key, dict(aspect_ratio=key[0], software=key[1], boundary=key[2],
-            planned=0, recorded=0, success=0, other_recorded=0, pending=0, elapsed_seconds_sum=0))
-        group["planned"] += 1
-        outcome = row.get("status", "pending")
-        if outcome == "pending":
-            group["pending"] += 1
-        else:
-            group["recorded"] += 1
-            group["success" if outcome == "ok" else "other_recorded"] += 1
-            elapsed = row.get("elapsed_seconds")
-            if outcome == "ok" and finite_number(elapsed) and elapsed >= 0:
-                group["elapsed_seconds_sum"] += elapsed
+        empty = dict(aspect_ratio=key[0], software=key[1], boundary=key[2],
+                     planned=0, recorded=0, success=0, other_recorded=0, pending=0, elapsed_seconds_sum=0)
+        groups = [coverage.setdefault(key, dict(empty))]
+        if finite_number(row.get("incidence_deg")):
+            angle_key = (*key, row["incidence_deg"])
+            groups.append(incidence_coverage.setdefault(angle_key, dict(empty, incidence_deg=angle_key[-1])))
+        for group in groups:
+            group["planned"] += 1
+            outcome = row.get("status", "pending")
+            if outcome == "pending":
+                group["pending"] += 1
+            else:
+                group["recorded"] += 1
+                group["success" if outcome == "ok" else "other_recorded"] += 1
+                elapsed = row.get("elapsed_seconds")
+                if outcome == "ok" and finite_number(elapsed) and elapsed >= 0:
+                    group["elapsed_seconds_sum"] += elapsed
     compact = []
     for row in rows:
         if row.get("status", "pending") == "pending":
@@ -197,7 +202,7 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
                   published_at=datetime.now(timezone.utc).isoformat(), state=state,
                   status=safe_status, status_counts=counts, axes=axes,
                   aspect_ratios=aspects, incidences_deg=angles,
-                  coverage=list(coverage.values()), rows=compact)
+                  coverage=list(coverage.values()), incidence_coverage=list(incidence_coverage.values()), rows=compact)
     json.dumps(result, allow_nan=False)
     return result
 

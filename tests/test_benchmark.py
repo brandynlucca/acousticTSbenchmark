@@ -71,6 +71,23 @@ class CaseTests(unittest.TestCase):
             self.assertEqual([c["frequency_hz"] for c in cases if c["software"] == software],
                              b.frequencies(self.config))
 
+    def test_round_robin_visits_all_boundaries_angles_and_ratios_before_next_frequency(self):
+        self.config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        legacy = b.build_cases(self.config, "full")
+        self.config["case_order"] = "frequency_round_robin"
+        cases = b.build_cases(self.config, "full")
+        self.assertEqual({c["case_id"] for c in cases}, {c["case_id"] for c in legacy})
+        first_wave = [c for c in cases if c["frequency_hz"] == 1000]
+        self.assertEqual(cases[:len(first_wave)], first_wave)
+        first_group = cases[:len(b.BOUNDARIES)*len(self.config["software"])]
+        self.assertEqual({c["boundary"] for c in first_group}, set(b.BOUNDARIES))
+        self.assertEqual({c["incidence_deg"] for c in first_wave}, {0, 37, 90})
+        self.assertEqual({c["aspect_ratio"] for c in first_wave}, set(self.config["geometry"]["aspect_ratios"]))
+        for case in first_wave:
+            series = [c["frequency_hz"] for c in cases if all(c[k] == case[k] for k in
+                ("software", "boundary", "aspect_ratio", "incidence_deg", "repetition"))]
+            self.assertEqual(series, [1000, 3000])
+
 
 class FileTests(unittest.TestCase):
     def setUp(self):
@@ -420,6 +437,13 @@ class CampaignWorkflowTests(unittest.TestCase):
         self.environment["BENCHMARK_DEADLINE"] = "1000"
         _, commands, _ = self.execute(1)
         self.assertEqual(commands, [])
+
+    def test_selected_budget_can_continue_beyond_the_original_45_minutes(self):
+        self.environment.update(BENCHMARK_BUDGET_SECONDS="7200", BENCHMARK_DEADLINE="8200")
+        elapsed, commands, _ = self.execute(1, duration=7200)
+        self.assertGreater(elapsed, 2700)
+        self.assertLess(elapsed, 7200)
+        self.assertTrue(all(command[command.index("--budget-seconds") + 1] == "7200" for command in commands))
 
     def test_worker_failure_propagates_after_final_publication(self):
         import subprocess
