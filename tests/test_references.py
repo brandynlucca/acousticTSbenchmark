@@ -1,6 +1,7 @@
 """Reference identity, independent qualification, and cache resume tests."""
 
 import copy
+import itertools
 import math
 from pathlib import Path
 import sys
@@ -63,23 +64,30 @@ class ReferenceTests(unittest.TestCase):
                            {record["physical_id"]: record})
         self.assertAlmostEqual(rows[0]["delta_ts_db"], 2)
 
-    def test_workflow_reference_queue_covers_boundaries_without_changing_cache_keys(self):
+    def test_workflow_reference_queue_completes_sweeps_without_changing_cache_keys(self):
         self.config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
         workflow = (ROOT / ".github/workflows/references.yml").read_text(encoding="utf-8")
         source = workflow.split("<<'REFERENCE_QUEUE'\n", 1)[1].split("          REFERENCE_QUEUE\n", 1)[0]
         namespace = {"__name__": "reference_queue_fixture"}
         exec(compile(textwrap.dedent(source), "reference-queue", "exec"), namespace)
         original = r.build_requests(self.config, self.lock, "full")
-        scheduled = namespace["balanced_reference_jobs"](self.config, "full", self.job["source_sha"])
+        scheduled = namespace["focused_reference_jobs"](self.config, "full", self.job["source_sha"])
         self.assertEqual({job["reference_id"]: job for job in scheduled},
                          {job["reference_id"]: job for job in original})
-        self.assertEqual({job["boundary"] for job in scheduled[:4]}, set(b.BOUNDARIES))
-        self.assertTrue(all(job["frequency_hz"] == 1000 for job in scheduled[:24]))
+        sweep = lambda job: (job["aspect_ratio"], job["boundary"], job["incidence_deg"])
+        groups = [(key, list(items)) for key, items in itertools.groupby(scheduled, sweep)]
+        self.assertEqual(len(groups), len({sweep(job) for job in scheduled}))
+        self.assertEqual({job["boundary"] for job in scheduled}, set(b.BOUNDARIES))
+        for _, jobs in groups:
+            self.assertEqual([job["frequency_hz"] for job in jobs], [1000, 3000])
         for shard in range(2):
             jobs = [job for job in scheduled if int(job["physical_id"], 16) % 2 == shard]
-            first_frequency = [job for job in jobs if job["frequency_hz"] == 1000]
-            self.assertEqual({job["boundary"] for job in first_frequency}, set(b.BOUNDARIES))
-            self.assertTrue(all(job["frequency_hz"] == 1000 for job in jobs[:len(first_frequency)]))
+            self.assertEqual({job["boundary"] for job in jobs}, set(b.BOUNDARIES))
+            groups = [(key, list(items)) for key, items in itertools.groupby(jobs, sweep)]
+            self.assertEqual(len(groups), len({sweep(job) for job in jobs}))
+            for _, items in groups:
+                frequencies = [job["frequency_hz"] for job in items]
+                self.assertEqual(frequencies, sorted(frequencies))
         original_job = next(job for job in original if job["incidence_deg"] == 37)
         cached = r.reference_record(original_job, evidence())
         same_job = next(job for job in scheduled if job["reference_id"] == original_job["reference_id"])

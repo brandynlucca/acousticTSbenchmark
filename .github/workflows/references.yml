@@ -1,5 +1,5 @@
 name: Cached numerical references
-run-name: Cached numerical references (${{ inputs.profile }})
+run-name: ${{ inputs.timing_run_id != '' && format('References for benchmark {0}', inputs.timing_run_id) || format('Cached numerical references ({0})', inputs.profile) }}
 on:
   workflow_call:
     inputs:
