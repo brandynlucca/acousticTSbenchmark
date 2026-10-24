@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,28 @@ class ReferenceTests(unittest.TestCase):
         rows = b.summarize([case], {case["case_id"]: dict(status="ok", ts_db=record["ts_db"] + 2)},
                            {record["physical_id"]: record})
         self.assertAlmostEqual(rows[0]["delta_ts_db"], 2)
+
+    def test_workflow_reference_queue_covers_boundaries_without_changing_cache_keys(self):
+        self.config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        workflow = (ROOT / ".github/workflows/references.yml").read_text(encoding="utf-8")
+        source = workflow.split("<<'REFERENCE_QUEUE'\n", 1)[1].split("          REFERENCE_QUEUE\n", 1)[0]
+        namespace = {"__name__": "reference_queue_fixture"}
+        exec(compile(textwrap.dedent(source), "reference-queue", "exec"), namespace)
+        original = r.build_requests(self.config, self.lock, "full")
+        scheduled = namespace["balanced_reference_jobs"](self.config, "full", self.job["source_sha"])
+        self.assertEqual({job["reference_id"]: job for job in scheduled},
+                         {job["reference_id"]: job for job in original})
+        self.assertEqual({job["boundary"] for job in scheduled[:4]}, set(b.BOUNDARIES))
+        self.assertTrue(all(job["frequency_hz"] == 1000 for job in scheduled[:24]))
+        for shard in range(2):
+            jobs = [job for job in scheduled if int(job["physical_id"], 16) % 2 == shard]
+            first_frequency = [job for job in jobs if job["frequency_hz"] == 1000]
+            self.assertEqual({job["boundary"] for job in first_frequency}, set(b.BOUNDARIES))
+            self.assertTrue(all(job["frequency_hz"] == 1000 for job in jobs[:len(first_frequency)]))
+        original_job = next(job for job in original if job["incidence_deg"] == 37)
+        cached = r.reference_record(original_job, evidence())
+        same_job = next(job for job in scheduled if job["reference_id"] == original_job["reference_id"])
+        self.assertTrue(r.valid_cached(cached, same_job))
 
     def test_spatial_or_fourier_failure_never_becomes_qualified(self):
         scenarios = []

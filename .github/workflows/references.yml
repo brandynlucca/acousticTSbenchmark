@@ -165,9 +165,26 @@ jobs:
           BUDGET_MINUTES: ${{ inputs.budget_minutes }}
           CASE_LIMIT: ${{ inputs.case_limit }}
         run: |
-          arguments=(src/references.py --config "$BENCHMARK_CONFIG" --profile "$PROFILE" --runtime "$RUNNER_TEMP/reference-env/runtime.json" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$RUNNER_TEMP/reference-results/references.json" --threads 4 --shard-index "$SHARD" --shard-count 2 --budget-seconds "$((BUDGET_MINUTES * 60))" --case-timeout-seconds 600)
+          arguments=(--config "$BENCHMARK_CONFIG" --profile "$PROFILE" --runtime "$RUNNER_TEMP/reference-env/runtime.json" --cache-dir "$RUNNER_TEMP/reference-cache" --output "$RUNNER_TEMP/reference-results/references.json" --threads 4 --shard-index "$SHARD" --shard-count 2 --budget-seconds "$((BUDGET_MINUTES * 60))" --case-timeout-seconds 600)
           if [[ "$CASE_LIMIT" != '0' ]]; then arguments+=(--case-limit "$CASE_LIMIT"); fi
-          python "${arguments[@]}"
+          python - "${arguments[@]}" <<'REFERENCE_QUEUE'
+          import sys
+          sys.path.insert(0, 'src')
+          import references
+
+          original_reference_jobs = references.reference_jobs
+
+          def balanced_reference_jobs(*args, **kwargs):
+              jobs = original_reference_jobs(*args, **kwargs)
+              return sorted(jobs, key=lambda job: (job['frequency_hz'], job['aspect_ratio'],
+                                                   job['incidence_deg'], job['boundary']))
+
+          if __name__ == '__main__':
+              # Scheduling stays outside the pinned numerical source so prior
+              # campaigns retain their reference identities and reusable cache.
+              references.reference_jobs = balanced_reference_jobs
+              raise SystemExit(references.run(references.parser().parse_args()))
+          REFERENCE_QUEUE
       - name: Persist successful references even after partial failure
         if: always() && steps.restore.outcome == 'success'
         run: python src/reference_store.py publish --config "$BENCHMARK_CONFIG" --profile "$PROFILE" --shard-index "$SHARD" --shard-count 2 --cache-dir "$RUNNER_TEMP/reference-cache" --output "$RUNNER_TEMP/reference-results/references.json"

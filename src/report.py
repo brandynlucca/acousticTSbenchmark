@@ -42,7 +42,8 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
-<h2>Coverage by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th><th>RMSE ΔTS (dB)</th><th>Matched predictions</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<p class="note" id="rmse-note">RMSE takes the median ΔTS across successful matched repetitions of each physical prediction, then √mean(ΔTS²) across those predictions, with equal weight per prediction. Only finite differences with a matched reference are included. Unavailable means no valid comparisons. The matched count includes each frequency and incidence combination once at the selected aspect ratio.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
@@ -83,6 +84,19 @@ for(const key of Object.keys(colors)){const s=document.createElement('span');s.d
 const angles=document.getElementById('angle-legend');
 function svgElement(name,attrs={},text){const e=document.createElementNS('http://www.w3.org/2000/svg',name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;}
 function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2?values[(n-1)/2]:(values[n/2-1]+values[n/2])/2;}
+function comparisonSummary(observations){
+ const predictions=new Map();
+ for(const row of observations){
+  if(!validValue(row,'delta_ts_db')||typeof row.reference_id!=='string'||!row.reference_id.length)continue;
+  const key=row.physical_id||JSON.stringify([row.incidence_deg,row.frequency_hz]);
+  if(!predictions.has(key))predictions.set(key,[]);predictions.get(key).push(row.delta_ts_db);
+ }
+ const differences=[...predictions.values()].map(median),count=differences.length;
+ if(!count)return {count,rmse:null};
+ const scale=differences.reduce((largest,value)=>Math.max(largest,Math.abs(value)),0);
+ const rmse=scale?scale*Math.sqrt(differences.reduce((sum,value)=>sum+(value/scale)**2,0)/count):0;
+ return {count,rmse};
+}
 const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_bytes:'Additional RAM per prediction (MiB)',ts_db:'TS (dB)',delta_ts_db:'ΔTS (dB, software minus reference)'};
 function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
 function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
@@ -205,7 +219,9 @@ function render(){
   const total=coverage?.elapsed_seconds_sum??good.reduce((sum,r)=>sum+r.elapsed_seconds,0),shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
   const remaining=coverage?.pending??(repository?'Unknown':pending.length);
-  const tr=document.createElement('tr');for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
+  const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
+  for(const value of [labels[software],boundaryLabels[boundary],successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',render);incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
