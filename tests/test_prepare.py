@@ -18,6 +18,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 import prepare
+import setup_macos
 
 
 class PreparationTests(unittest.TestCase):
@@ -80,6 +81,81 @@ class PreparationTests(unittest.TestCase):
                 prepare.execute([sys.executable, "-c", f"open({str(output)!r},'w').close()"],
                                 workspace=self.path)
         self.assertFalse(output.exists())
+
+    def test_macos_sdk_selection_ignores_newer_command_line_tools(self):
+        applications = self.path / "Applications"
+        developer = applications / "Xcode_26.0.1.app/Contents/Developer"
+        sdk = developer / "Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk"
+        sdk.mkdir(parents=True)
+        (applications / "Xcode_27.0.app/Contents/Developer").mkdir(parents=True)
+        (applications / "Xcode_26.6.app/Contents/Developer").mkdir(parents=True)
+        responses = [str(sdk), "26.0"]
+        with patch.dict(os.environ, {"SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX27.sdk"}), \
+                patch.object(setup_macos, "run", side_effect=responses) as run:
+            self.assertEqual(setup_macos.select_sdk(applications), (developer, sdk, "26.0"))
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"]["DEVELOPER_DIR"], str(developer))
+            self.assertNotIn("SDKROOT", call.kwargs["env"])
+        with patch.object(setup_macos, "run", side_effect=[str(sdk), "27.0"]):
+            with self.assertRaisesRegex(RuntimeError, "Unexpected Xcode SDK"):
+                setup_macos.select_sdk(applications)
+
+    def test_macos_absolute_compilers_and_makevars_share_cpp_and_fortran_runtimes(self):
+        prefix = self.path / "homebrew/gcc14"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "lib").mkdir()
+        for name in ("gfortran-14", "gcc-14", "g++-14"):
+            (prefix / "bin" / name).write_text("compiler fixture")
+        libraries = [prefix / "lib/libgfortran.dylib", prefix / "lib/libquadmath.dylib"]
+        for library in libraries:
+            library.write_bytes(b"runtime fixture")
+        with patch.object(setup_macos, "run", side_effect=[str(prefix), "14.4.0", "14.4.0", "14.4.0"]):
+            compilers, versions = setup_macos.gnu_compilers()
+        self.assertEqual(compilers["FC"], prefix / "bin/gfortran-14")
+        with patch.object(setup_macos, "run", side_effect=list(map(str, libraries))):
+            values = setup_macos.build_environment(self.path, compilers, self.path / "Developer", self.path / "SDK")
+        makevars = dict(line.split(" = ", 1) for line in
+                        Path(values["R_MAKEVARS_USER"]).read_text().splitlines())
+        self.assertEqual(makevars["FC"], values["FC"])
+        for standard in ("", "11", "14", "17", "20", "23"):
+            self.assertEqual(values["CXX" + standard], (prefix / "bin/g++-14").as_posix())
+            self.assertEqual(makevars["CXX" + standard], values["CXX" + standard])
+        self.assertIn((prefix / "lib").as_posix(), makevars["FLIBS"])
+        self.assertNotIn("/opt/gfortran", makevars["FLIBS"])
+        self.assertEqual(makevars["CXX17STD"], "-std=gnu++17")
+        self.assertIn("-isysroot", makevars["CXX17FLAGS"])
+
+    def test_macos_failed_quad_preflight_does_not_export_usable_toolchain(self):
+        environment_file = self.path / "github.env"
+        environment_file.write_text("EXISTING=value\n")
+        with patch.object(setup_macos.platform, "system", return_value="Darwin"), \
+                patch.object(setup_macos.platform, "machine", return_value="arm64"), \
+                patch.object(setup_macos, "select_sdk", return_value=(self.path, self.path, "26.0")), \
+                patch.object(setup_macos, "gnu_compilers", return_value=({}, {})), \
+                patch.object(setup_macos, "build_environment", return_value={}), \
+                patch.object(setup_macos, "quad_preflight", side_effect=RuntimeError("quad ABI mismatch")), \
+                patch.dict(os.environ, {"GITHUB_ENV": str(environment_file)}):
+            with self.assertRaisesRegex(RuntimeError, "quad ABI mismatch"):
+                setup_macos.configure(self.path, with_r=True)
+        self.assertEqual(environment_file.read_text(), "EXISTING=value\n")
+        self.assertFalse((self.path / "macos-toolchain.json").exists())
+
+    def test_macos_verification_rejects_successful_install_without_quad_prediction(self):
+        runtime = {"capabilities": {"acousticts": {"quad": {"available": False,
+            "message": "double backend only"}}}}
+        (self.path / "runtime.json").write_text(json.dumps(runtime))
+        with self.assertRaisesRegex(RuntimeError, "double backend only"):
+            setup_macos.verify_r(self.path)
+        runtime["capabilities"]["acousticts"]["quad"]["available"] = True
+        (self.path / "runtime.json").write_text(json.dumps(runtime))
+        validation = {"workers": [{"software": "acousticts", "passed": True,
+                                   "result": {"status": "unsupported"}}]}
+        (self.path / "validation.json").write_text(json.dumps(validation))
+        with self.assertRaisesRegex(RuntimeError, "worker validation"):
+            setup_macos.verify_r(self.path)
+        validation["workers"][0]["result"]["status"] = "ok"
+        (self.path / "validation.json").write_text(json.dumps(validation))
+        setup_macos.verify_r(self.path)
 
     def test_setup_log_preserves_stdout_and_stderr_when_installation_fails(self):
         log = self.path / "setup-test.log"

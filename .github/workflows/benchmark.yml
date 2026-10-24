@@ -170,6 +170,21 @@ jobs:
           run-id: ${{ needs.matrix.outputs.resume_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/benchmark-results
+      - name: Check out current macOS setup controller
+        if: runner.os == 'macOS'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Preserve macOS setup controller for source-pinned resumes
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          target = Path(os.environ['RUNNER_TEMP']) / 'setup_macos.py'
+          shutil.copyfile('src/setup_macos.py', target)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'MACOS_SETUP_SCRIPT={target}\n')
+          PY
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.matrix.outputs.source_ref }}
@@ -373,13 +388,21 @@ jobs:
             /opt/R/4.5.2
             ${{ runner.temp }}/r-runtime-deps/*.deb
           key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
+      - name: Configure native macOS GNU compilers and SDK
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          arguments=(configure --directory "$RUNNER_TEMP/benchmark-env")
+          if [[ "$SOFTWARE" == *acousticts* ]]; then arguments+=(--with-r); fi
+          python "$MACOS_SETUP_SCRIPT" "${arguments[@]}"
       - name: Restore R package library
         if: contains(env.SOFTWARE, 'acousticts')
         id: r-library-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
-          key: r-library-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml') }}
+          key: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-{3}', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY, hashFiles('src/setup_r.R', 'sources.lock.json')) || format('r-library-v1-{0}-{1}-4.5.2-{2}', steps.r-cache-platform.outputs.image, runner.arch, hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml')) }}
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(env.SOFTWARE, 'acousticscattering') || contains(env.SOFTWARE, 'liquid_spheroid')
         timeout-minutes: 5
@@ -417,7 +440,7 @@ jobs:
                       output.write(f"{variable}={compiler}\nFPM_{variable}={compiler}\n")
           PY
       - uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
-        if: runner.os != 'Linux' || steps.compiler-reuse.outputs.usable != 'true'
+        if: runner.os == 'Windows' || (runner.os == 'Linux' && steps.compiler-reuse.outputs.usable != 'true')
         timeout-minutes: 5
         with:
           compiler: gcc
@@ -433,6 +456,11 @@ jobs:
             ~/.julia/packages
             ~/.julia/registries
           key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
+      - name: Build compatible macOS Rcpp libraries
+        if: runner.os == 'macOS' && contains(env.SOFTWARE, 'acousticts') && steps.r-library-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 8
+        shell: bash
+        run: python "$MACOS_SETUP_SCRIPT" rebuild-r --directory "$RUNNER_TEMP/benchmark-env"
       - name: Prepare pinned software
         id: prepare
         shell: bash
@@ -443,6 +471,10 @@ jobs:
           arguments=(src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE")
           arguments+=(--validate-workers --validation-timeout-seconds 120)
           python "${arguments[@]}"
+      - name: Verify native macOS quad backend
+        if: runner.os == 'macOS' && contains(env.SOFTWARE, 'acousticts')
+        shell: bash
+        run: python "$MACOS_SETUP_SCRIPT" verify-r --directory "$RUNNER_TEMP/benchmark-env"
       - name: Check prepared R package library
         if: contains(env.SOFTWARE, 'acousticts')
         id: r-library-ready
@@ -759,6 +791,8 @@ jobs:
             ${{ runner.temp }}/benchmark-env/validation.json
             ${{ runner.temp }}/benchmark-env/validation/**/worker.log
             ${{ runner.temp }}/benchmark-env/setup-*.log
+            ${{ runner.temp }}/benchmark-env/macos-*.json
+            ${{ runner.temp }}/benchmark-env/macos-gnu.Makevars
             ${{ runner.temp }}/benchmark-env/python-freeze.txt
             ${{ runner.temp }}/benchmark-env/r-packages.json
             ${{ runner.temp }}/benchmark-env/julia/Project.toml
