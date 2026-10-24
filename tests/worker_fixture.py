@@ -17,6 +17,11 @@ def resident_buffer(size):
 
 
 if sys.argv[1] == "--memory-child":
+    import psutil
+
+    identities = [dict(pid=pid, created_at=psutil.Process(pid).create_time())
+                  for pid in (os.getppid(), os.getpid())]
+    (Path(sys.argv[2]).parent / "child-pids.json").write_text(json.dumps(identities))
     allocation = resident_buffer(48 * 1024 * 1024)
     Path(sys.argv[2]).touch()
     time.sleep(float(sys.argv[3]))
@@ -38,7 +43,6 @@ else:
         ready = Path(request["work_directory"]) / "child.ready"
         child = subprocess.Popen([sys.executable, __file__, "--memory-child", str(ready),
                                   "30" if behavior.endswith("timeout") else ".3"])
-        (ready.parent / "child-pids.json").write_text(json.dumps([os.getpid(), child.pid]))
         child.wait()
     elif behavior.startswith("memory"):
         allocation = resident_buffer(32 * 1024 * 1024)

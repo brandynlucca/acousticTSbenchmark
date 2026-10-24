@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
@@ -246,13 +247,25 @@ class FileTests(unittest.TestCase):
         self.assertEqual(result["memory_status"], "censored", result)
         self.assertIsNone(result["elapsed_seconds"])
         self.assertGreater(result["memory_delta_peak_bytes"], 40 * 1024 * 1024)
-        for pid in b.read_json(self.path / "worker/child-pids.json"):
-            try:
-                process = process_control.psutil.Process(pid)
-                status = process.status()
-            except process_control.psutil.NoSuchProcess:
-                continue
-            self.assertEqual(status, process_control.psutil.STATUS_ZOMBIE)
+        # Windows initiates descendant termination asynchronously. Wait for
+        # these exact processes, allowing PID reuse after they have exited.
+        pending = b.read_json(self.path / "worker/child-pids.json")
+        deadline = time.monotonic() + 5
+        while pending:
+            alive = []
+            for identity in pending:
+                try:
+                    process = process_control.psutil.Process(identity["pid"])
+                    if (process.create_time() == identity["created_at"] and
+                            process.status() != process_control.psutil.STATUS_ZOMBIE):
+                        alive.append(identity)
+                except process_control.psutil.NoSuchProcess:
+                    pass
+            pending = alive
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+        self.assertFalse(pending, f"Fixture processes survived termination: {pending}")
         self.assertFalse(any(t.name == "prediction-memory" for t in threading.enumerate()))
 
     def test_missing_or_failed_memory_sampler_never_fails_the_prediction(self):
