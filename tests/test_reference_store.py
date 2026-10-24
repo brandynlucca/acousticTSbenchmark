@@ -12,7 +12,7 @@ import tempfile
 import textwrap
 import unittest
 import zipfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import benchmark as b
@@ -157,6 +157,24 @@ class StoreTests(unittest.TestCase):
         row = b.read_json(self.work / "results.json")[0]
         self.assertIsNone(row["delta_ts_db"])
         self.assertNotIn("reference_ts_db", row)
+
+    def test_setup_only_artifact_has_no_comparisons_but_partial_data_still_errors(self):
+        def archive(extra=None):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as z:
+                z.writestr("benchmark-source.json", json.dumps(dict(schema_version=1,
+                    repository="owner/repo", source_ref="a" * 40, run_id=123)))
+                for name, value in (extra or {}).items():
+                    z.writestr(name, json.dumps(value))
+            return output.getvalue()
+        api = Mock(repository="owner/repo")
+        api.request.return_value = dict(artifacts=[dict(id=1, name="results-macos-latest")])
+        api.archive.return_value = archive()
+        self.assertFalse(store.download_timing(api, 123, "macos-latest", self.work))
+        self.assertFalse((self.work / "manifest.json").exists())
+        api.archive.return_value = archive({"results.json": []})
+        with self.assertRaisesRegex(ValueError, "Incomplete timing artifact"):
+            store.download_timing(api, 123, "macos-latest", self.work)
 
     def test_live_controller_attaches_new_references_without_remeasuring(self):
         self.save(0)

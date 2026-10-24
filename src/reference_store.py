@@ -178,10 +178,15 @@ def download_timing(api, run_id, platform, directory):
     artifact = select_artifact(artifacts, platform)
     if artifact is None:
         return False
+    from campaign import setup_only_checkpoint
+    content = api.archive(artifact["id"])
+    if setup_only_checkpoint(content, api.repository, run_id) is not None:
+        print(f"No timing measurements for {platform}: setup did not produce a checkpoint", flush=True)
+        return False
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     found = set()
-    with zipfile.ZipFile(io.BytesIO(api.archive(artifact["id"]))) as archive:
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
         for entry in archive.infolist():
             name = PurePosixPath(entry.filename).name
             if name not in ("manifest.json", "results.json", "status.json"):

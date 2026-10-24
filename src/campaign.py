@@ -196,6 +196,82 @@ def read_checkpoint(content):
     return values, records
 
 
+def setup_only_checkpoint(content, repository, run_id):
+    """Recognize an artifact saved before any timing files existed."""
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        files = [entry for entry in archive.infolist() if not entry.is_dir()]
+        if len(files) != 1 or files[0].filename != "benchmark-source.json":
+            return None
+        entry = files[0]
+        if entry.file_size > MAX_RECORD_BYTES or (entry.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ValueError("Invalid setup-only timing artifact")
+        source = _json(archive.read(entry))
+    if (not isinstance(source, dict) or source.get("schema_version") != 1 or
+            source.get("repository") != repository or source.get("run_id") != int(run_id) or
+            not isinstance(source.get("source_ref"), str) or
+            not re.fullmatch(r"[0-9a-f]{40}", source["source_ref"])):
+        raise ValueError("Invalid setup-only source provenance")
+    return source
+
+
+def timing_or_restore_started(job):
+    return any(step.get("status") != "pending" and step.get("conclusion") != "skipped"
+        for step in (job.get("steps") or [])
+        if step.get("name", "").startswith("Benchmark ")
+        or step.get("name") == "Restore previous checkpoints")
+
+
+def prove_unstarted_ancestry(source, platform, repository, api):
+    """Do not replace an earlier platform checkpoint after a resumed setup fails."""
+    visited = {source["run_id"]}
+    revision = source["source_ref"]
+    for _ in range(8):
+        parent = source.get("resumed_from_run_id")
+        if parent is None:
+            return
+        if type(parent) is not int or parent <= 0 or parent in visited:
+            raise ValueError("Cannot prove setup-only continuation ancestry")
+        visited.add(parent)
+        run = api.request("GET", f"/actions/runs/{parent}")
+        if (run.get("repository", {}).get("full_name") != repository or
+                (run.get("head_repository") or {}).get("full_name") != repository or
+                run.get("event") != "workflow_dispatch" or run.get("status") != "completed" or
+                run.get("path") != ".github/workflows/benchmark.yml"):
+            raise ValueError("Cannot prove setup-only continuation ancestry")
+        collections = {}
+        for collection, query in (("artifacts", ""), ("jobs", "filter=latest&")):
+            items = []
+            for page in range(1, 11):
+                part = api.request("GET", f"/actions/runs/{parent}/{collection}?{query}per_page=100&page={page}")[collection]
+                items.extend(part)
+                if len(part) < 100:
+                    break
+            else:
+                raise ValueError("Too many parent-run records to prove setup-only continuation ancestry")
+            collections[collection] = items
+        artifacts = collections["artifacts"]
+        job = next((item for item in collections["jobs"]
+                    if item.get("name") == f"benchmark ({platform})"), None)
+        # Expired artifacts also prove possible prior work. Never silently
+        # restart the platform when its parent checkpoint cannot be restored.
+        if (job is None or timing_or_restore_started(job) or
+                any(artifact_platform(item.get("name", "")) == platform for item in artifacts)):
+            raise ValueError(f"Cannot resume {platform}: parent run {parent} may contain saved measurements")
+        selected = select_resume_artifacts(artifacts)
+        artifact = next(iter(selected.values()))
+        content = api.archive(artifact["id"])
+        source = setup_only_checkpoint(content, repository, parent)
+        if source is None:
+            source = read_checkpoint(content)[0].get("benchmark-source.json")
+        if (not isinstance(source, dict) or source.get("schema_version") != 1 or
+                source.get("repository") != repository or source.get("run_id") != parent or
+                source.get("source_ref") != revision or "resumed_from_run_id" not in source):
+            raise ValueError("Cannot prove setup-only continuation ancestry from parent source metadata")
+        if source["resumed_from_run_id"] is None:
+            return
+    raise ValueError("Setup-only continuation ancestry exceeds eight parent runs")
+
+
 def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexported=False):
     values, records = read_checkpoint(content)
     manifest, status, rows = (values[name] for name in ("manifest.json", "status.json", "results.json"))
@@ -280,41 +356,65 @@ def resume_campaign(inputs, repository, api):
         raise ValueError("Too many artifacts to resolve this continuation")
     explicit = str(inputs.get("resume_artifact", "")).strip()
     selected = select_resume_artifacts(artifacts, explicit)
-    shared, recorded = None, {}
-    for platform, artifact in selected.items():
+    jobs = None
+
+    def original_jobs():
+        nonlocal jobs
+        if jobs is None:
+            jobs = []
+            for page in range(1, 101):
+                part = api.request("GET", f"/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}")["jobs"]
+                jobs.extend(part)
+                if len(part) < 100:
+                    break
+            else:
+                raise ValueError("Too many jobs to recover the original platform selection")
+        return jobs
+
+    shared, recorded, setup_only = None, {}, {}
+    for platform, artifact in list(selected.items()):
+        content = api.archive(artifact["id"])
+        source = setup_only_checkpoint(content, repository, run_id)
+        if source is not None:
+            if explicit:
+                raise ValueError("The selected artifact contains setup metadata only, with no timing checkpoint")
+            job = next((job for job in original_jobs() if job["name"] == f"benchmark ({platform})"), None)
+            earlier = any(item["id"] != artifact["id"] and artifact_platform(item.get("name", "")) == platform
+                          for item in artifacts)
+            if job is None or timing_or_restore_started(job) or earlier:
+                raise ValueError(f"Cannot resume {platform}: work may exist but no usable checkpoint is available")
+            prove_unstarted_ancestry(source, platform, repository, api)
+            setup_only[platform] = source["source_ref"]
+            recorded[platform] = 0
+            del selected[platform]
+            continue
         # Cancellation may interrupt the next table export after atomic case
         # records were saved. The runner rebuilds derived tables on resume.
-        settings = checkpoint_settings(api.archive(artifact["id"]), repository, run.get("head_sha", ""), platform,
+        settings = checkpoint_settings(content, repository, run.get("head_sha", ""), platform,
                                        allow_unexported=run.get("conclusion") == "cancelled")
         recorded[platform] = settings.pop("recorded_cases")
         if shared is not None and fingerprint(settings) != fingerprint(shared):
             raise ValueError("Selected platforms have different configurations, software selections, or source revisions")
         shared = settings
+    if shared is None:
+        raise ValueError("The selected run contains setup metadata only, with no timing configuration to resume")
+    if any(revision != shared["source_ref"] for revision in setup_only.values()):
+        raise ValueError("Setup-only platform source does not match the saved timing campaign")
     shared.pop("sources_fingerprint")
-    platforms = set(selected)
+    platforms = set(selected) | setup_only.keys()
     if not explicit:
         # A cancelled matrix can leave later platforms queued with no artifact.
         # Recover those jobs with the same resolved inputs and original source.
-        for page in range(1, 101):
-            jobs = api.request("GET", f"/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}")["jobs"]
-            for job in jobs:
-                match = re.fullmatch(r"benchmark \((ubuntu-latest|windows-latest|macos-latest)\)", job["name"])
-                if not match or match[1] in platforms:
-                    continue
-                platform = match[1]
-                started = any(step.get("status") != "pending" and step.get("conclusion") != "skipped"
-                    for step in (job.get("steps") or [])
-                    if step.get("name", "").startswith("Benchmark ")
-                    or step.get("name") == "Restore previous checkpoints")
-                existing = any(artifact_platform(item.get("name", "")) == platform for item in artifacts)
-                if started or existing:
-                    raise ValueError(f"Cannot resume {platform}: work may exist but no usable checkpoint is available")
-                platforms.add(platform)
-                recorded[platform] = 0
-            if len(jobs) < 100:
-                break
-        else:
-            raise ValueError("Too many jobs to recover the original platform selection")
+        for job in original_jobs():
+            match = re.fullmatch(r"benchmark \((ubuntu-latest|windows-latest|macos-latest)\)", job["name"])
+            if not match or match[1] in platforms:
+                continue
+            platform = match[1]
+            existing = any(artifact_platform(item.get("name", "")) == platform for item in artifacts)
+            if timing_or_restore_started(job) or existing:
+                raise ValueError(f"Cannot resume {platform}: work may exist but no usable checkpoint is available")
+            platforms.add(platform)
+            recorded[platform] = 0
     return dict(shared, mode="resume", platforms=[p for p in PLATFORMS if p in platforms], resume_run_id=run_id,
                 resume_artifacts={platform: artifact["name"] for platform, artifact in selected.items()},
                 recorded_by_platform=recorded)

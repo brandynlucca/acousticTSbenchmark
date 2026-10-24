@@ -57,6 +57,17 @@ def checkpoint(platform="ubuntu-latest", programs=None, repeats=3, count=2, sour
     return stream.getvalue(), config
 
 
+def setup_checkpoint(source_ref="a" * 40, extra=None, parent=None):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("benchmark-source.json", json.dumps(dict(schema_version=1,
+            repository="owner/repo", source_ref=source_ref, run_id=123,
+            resumed_from_run_id=parent)))
+        for name, value in (extra or {}).items():
+            archive.writestr(name, json.dumps(value))
+    return stream.getvalue()
+
+
 class CampaignTests(unittest.TestCase):
     def api(self, entries, payloads):
         api = Mock()
@@ -192,6 +203,95 @@ class CampaignTests(unittest.TestCase):
             api.request.side_effect = lambda method, path: {"jobs": jobs} if "/jobs?" in path else original_request(method, path)
             with self.subTest(step=name), self.assertRaisesRegex(ValueError, "no usable checkpoint"):
                 self.resolve(dict(mode="resume", resume_run_id="123"), api)
+
+    def test_resume_preserves_finished_platforms_and_retries_setup_only_platform(self):
+        ubuntu, original = checkpoint(source_ref="a" * 40)
+        windows, _ = checkpoint(platform="windows-latest", source_ref="a" * 40, count=4)
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-windows-latest"),
+                   dict(id=3, name="results-macos-latest")]
+        api, _ = self.api(entries, {1: ubuntu, 2: windows, 3: setup_checkpoint()})
+        original_request = api.request.side_effect
+        mac_job = dict(name="benchmark (macos-latest)", steps=[
+            dict(name="Prepare pinned software", status="completed", conclusion="failure"),
+            dict(name="Restore previous checkpoints", status="completed", conclusion="skipped"),
+            dict(name="Benchmark chunk 1", status="completed", conclusion="skipped")])
+        api.request.side_effect = lambda method, path: {"jobs": [mac_job]} if "/jobs?" in path else original_request(method, path)
+        result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        self.assertEqual(result["platforms"], list(campaign.PLATFORMS))
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2, "windows-latest": 4, "macos-latest": 0})
+        self.assertEqual(set(result["resume_artifacts"]), {"ubuntu-latest", "windows-latest"})
+        self.assertEqual(result["configuration"], original)
+        self.assertEqual(result["source_ref"], "a" * 40)
+        for name in ("Restore previous checkpoints", "Benchmark chunk 1"):
+            mac_job["steps"] = [dict(name=name, status="completed", conclusion="failure")]
+            with self.subTest(step=name), self.assertRaisesRegex(ValueError, "no usable checkpoint"):
+                self.resolve(dict(mode="resume", resume_run_id="123"), api)
+
+    def test_setup_only_artifact_cannot_hide_partial_records_or_replace_configuration(self):
+        content, _ = checkpoint(source_ref="a" * 40)
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-macos-latest")]
+        for bad in (setup_checkpoint(extra={"records/" + "b" * 64 + ".json": dict(status="ok")}),
+                    setup_checkpoint(source_ref="f" * 40)):
+            api, _ = self.api(entries, {1: content, 2: bad})
+            original_request = api.request.side_effect
+            api.request.side_effect = lambda method, path: {"jobs": [dict(name="benchmark (macos-latest)", steps=[])]} if "/jobs?" in path else original_request(method, path)
+            with self.assertRaises(ValueError):
+                self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        api, _ = self.api(entries, {1: content, 2: setup_checkpoint()})
+        with self.assertRaisesRegex(ValueError, "setup metadata only"):
+            self.resolve(dict(mode="resume", resume_run_id="123", resume_artifact="results-macos-latest"), api)
+
+    def test_setup_only_resume_proves_parent_platform_was_queued_without_measurements(self):
+        content, _ = checkpoint(source_ref="a" * 40)
+
+        def parent_provenance(files):
+            files["benchmark-source.json"].update(run_id=122, resumed_from_run_id=None)
+
+        parent_content, _ = checkpoint(source_ref="a" * 40, alter=parent_provenance)
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-macos-latest")]
+        api, run = self.api(entries, {1: content, 2: setup_checkpoint(parent=122), 3: parent_content})
+        current_job = dict(name="benchmark (macos-latest)", steps=[
+            dict(name="Prepare pinned software", status="completed", conclusion="failure"),
+            dict(name="Restore previous checkpoints", status="completed", conclusion="skipped")])
+        parent_job = dict(name="benchmark (macos-latest)", status="completed", conclusion="cancelled", steps=[])
+        parent_artifacts = [dict(id=3, name="checkpoint-ubuntu-latest-1-5")]
+
+        def request(method, path):
+            if path.startswith("/actions/runs/122/"):
+                return {"jobs": [parent_job]} if "/jobs?" in path else {"artifacts": parent_artifacts}
+            if "/jobs?" in path:
+                return {"jobs": [current_job]}
+            if "/artifacts?" in path:
+                return {"artifacts": entries}
+            return run
+
+        api.request.side_effect = request
+        result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2, "macos-latest": 0})
+        self.assertEqual(result["resume_artifacts"], {"ubuntu-latest": "results-ubuntu-latest"})
+        # A previous platform artifact must prevent a reset even if that
+        # artifact has expired and restoration never began in the latest run.
+        for expired in (False, True):
+            parent_artifacts.append(dict(id=4, name="results-macos-latest", expired=expired))
+            with self.subTest(expired=expired), self.assertRaisesRegex(ValueError, "parent run 122 may contain saved measurements"):
+                self.resolve(dict(mode="resume", resume_run_id="123"), api)
+            parent_artifacts.pop()
+        parent_job["steps"] = [dict(name="Benchmark chunk 1", status="completed", conclusion="cancelled")]
+        with self.assertRaisesRegex(ValueError, "parent run 122 may contain saved measurements"):
+            self.resolve(dict(mode="resume", resume_run_id="123"), api)
+
+    def test_setup_only_parent_proof_rejects_ambiguous_or_cyclic_lineage(self):
+        source = dict(schema_version=1, repository="owner/repo", source_ref="a" * 40,
+                      run_id=123, resumed_from_run_id=122)
+        content, _ = checkpoint(source_ref="a" * 40)
+        api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        original_request = api.request.side_effect
+        api.request.side_effect = lambda method, path: {"jobs": [dict(name="benchmark (macos-latest)", steps=[])]} if "/jobs?" in path else original_request(method, path)
+        with self.assertRaisesRegex(ValueError, "parent source metadata"):
+            campaign.prove_unstarted_ancestry(source, "macos-latest", "owner/repo", api)
+        source["resumed_from_run_id"] = 123
+        with self.assertRaisesRegex(ValueError, "continuation ancestry"):
+            campaign.prove_unstarted_ancestry(source, "macos-latest", "owner/repo", api)
 
     def test_cancelled_resume_recovers_atomic_records_saved_since_last_table_export(self):
         def ahead(files):
