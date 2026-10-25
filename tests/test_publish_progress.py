@@ -381,6 +381,14 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(requests[1].get_header("Authorization"))
         self.assertEqual(requests[1].full_url, signed)
 
+    def test_actions_requests_accept_empty_success_responses_and_dispatch_receipts(self):
+        api = progress.GitHub("owner/repo", "test-token")
+        api.opener = Mock()
+        api.opener.open.side_effect = [io.BytesIO(b""), io.BytesIO(b'{"workflow_run_id":123}')]
+        self.assertIsNone(api.request("PUT", "/actions/workflows/queue.yml/disable"))
+        self.assertEqual(api.request("POST", "/actions/workflows/benchmark.yml/dispatches",
+            dict(ref="main", return_run_details=True)), {"workflow_run_id": 123})
+
     def test_conflicting_update_rereads_and_preserves_newer_run(self):
         proposed, newer = self.payload(12), self.payload(13)
 

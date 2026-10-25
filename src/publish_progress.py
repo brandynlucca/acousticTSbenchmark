@@ -86,7 +86,8 @@ class GitHub:
                           "Content-Type": "application/json"})
         try:
             with self.opener.open(request, timeout=self.timeout()) as response:
-                return json.loads(self.read(response, MAX_JSON_BYTES * 2))
+                content = self.read(response, MAX_JSON_BYTES * 2)
+                return json.loads(content) if content else None
         except HTTPError as error:
             # Do not include headers, tokens, signed URLs, or request bodies in errors.
             raise APIError(error.code, error.reason) from None
