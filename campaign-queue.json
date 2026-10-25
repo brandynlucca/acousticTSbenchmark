@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "status": "active",
+  "repository": "brandynlucca/acousticTSbenchmark",
+  "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
+  "dispatch_ref": "benchmark-series-20261025",
+  "initial_run_id": 40170086146,
+  "requests": [
+    {
+      "key": "prol_spheroid:0.01",
+      "semimajor_m": "0.01",
+      "software": "prol_spheroid",
+      "parent": "acousticts:0.01",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid"
+      }
+    },
+    {
+      "key": "echosms:0.01",
+      "semimajor_m": "0.01",
+      "software": "echosms",
+      "parent": "prol_spheroid:0.01",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.01",
+      "semimajor_m": "0.01",
+      "software": "liquid_spheroid",
+      "parent": "echosms:0.01",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid"
+      }
+    },
+    {
+      "key": "acousticts:0.001",
+      "semimajor_m": "0.001",
+      "software": "acousticts",
+      "parent": null,
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "new",
+        "software": "acousticts",
+        "platform": "all",
+        "semimajor_m": "0.001",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "gas,pressure_release,liquid,rigid",
+        "repetitions": "1"
+      }
+    },
+    {
+      "key": "acousticts:0.07",
+      "semimajor_m": "0.07",
+      "software": "acousticts",
+      "parent": null,
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "new",
+        "software": "acousticts",
+        "platform": "all",
+        "semimajor_m": "0.07",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "gas,pressure_release,liquid,rigid",
+        "repetitions": "1"
+      }
+    },
+    {
+      "key": "acousticts:0.1",
+      "semimajor_m": "0.1",
+      "software": "acousticts",
+      "parent": null,
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "new",
+        "software": "acousticts",
+        "platform": "all",
+        "semimajor_m": "0.1",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "gas,pressure_release,liquid,rigid",
+        "repetitions": "1"
+      }
+    },
+    {
+      "key": "acousticts:0.5",
+      "semimajor_m": "0.5",
+      "software": "acousticts",
+      "parent": null,
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "new",
+        "software": "acousticts",
+        "platform": "all",
+        "semimajor_m": "0.5",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "gas,pressure_release,liquid,rigid",
+        "repetitions": "1"
+      }
+    },
+    {
+      "key": "prol_spheroid:0.001",
+      "semimajor_m": "0.001",
+      "software": "prol_spheroid",
+      "parent": "acousticts:0.001",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid"
+      }
+    },
+    {
+      "key": "prol_spheroid:0.07",
+      "semimajor_m": "0.07",
+      "software": "prol_spheroid",
+      "parent": "acousticts:0.07",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid"
+      }
+    },
+    {
+      "key": "prol_spheroid:0.1",
+      "semimajor_m": "0.1",
+      "software": "prol_spheroid",
+      "parent": "acousticts:0.1",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid"
+      }
+    },
+    {
+      "key": "prol_spheroid:0.5",
+      "semimajor_m": "0.5",
+      "software": "prol_spheroid",
+      "parent": "acousticts:0.5",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid"
+      }
+    },
+    {
+      "key": "echosms:0.001",
+      "semimajor_m": "0.001",
+      "software": "echosms",
+      "parent": "prol_spheroid:0.001",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms"
+      }
+    },
+    {
+      "key": "echosms:0.07",
+      "semimajor_m": "0.07",
+      "software": "echosms",
+      "parent": "prol_spheroid:0.07",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms"
+      }
+    },
+    {
+      "key": "echosms:0.1",
+      "semimajor_m": "0.1",
+      "software": "echosms",
+      "parent": "prol_spheroid:0.1",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms"
+      }
+    },
+    {
+      "key": "echosms:0.5",
+      "semimajor_m": "0.5",
+      "software": "echosms",
+      "parent": "prol_spheroid:0.5",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.001",
+      "semimajor_m": "0.001",
+      "software": "liquid_spheroid",
+      "parent": "echosms:0.001",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.07",
+      "semimajor_m": "0.07",
+      "software": "liquid_spheroid",
+      "parent": "echosms:0.07",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.1",
+      "semimajor_m": "0.1",
+      "software": "liquid_spheroid",
+      "parent": "echosms:0.1",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.5",
+      "semimajor_m": "0.5",
+      "software": "liquid_spheroid",
+      "parent": "echosms:0.5",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid"
+      }
+    }
+  ],
+  "dispatched": {
+    "prol_spheroid:0.01": {
+      "run_id": 40209471033,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40209471033",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "prol_spheroid",
+        "resume_run_id": "40170086146"
+      }
+    }
+  },
+  "cancelled_runs": {
+    "prol_spheroid:0.01": 40171426279,
+    "echosms:0.01": 40171456913,
+    "liquid_spheroid:0.01": 40171459215,
+    "acousticts:0.001": 40171461093,
+    "acousticts:0.07": 40171463325,
+    "acousticts:0.1": 40171468314,
+    "acousticts:0.5": 40171476594,
+    "prol_spheroid:0.001": 40171479914,
+    "prol_spheroid:0.07": 40171482135,
+    "prol_spheroid:0.1": 40171484911,
+    "prol_spheroid:0.5": 40171486866,
+    "echosms:0.001": 40171488406,
+    "echosms:0.07": 40171491225,
+    "echosms:0.1": 40171492577,
+    "echosms:0.5": 40171493948,
+    "liquid_spheroid:0.001": 40171495468,
+    "liquid_spheroid:0.07": 40171497105,
+    "liquid_spheroid:0.1": 40171498995,
+    "liquid_spheroid:0.5": 40171501026
+  }
+}
