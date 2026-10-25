@@ -10,8 +10,122 @@ from pathlib import PurePosixPath
 import re
 import zipfile
 
-from benchmark import atomic_json, build_cases, fingerprint, read_json, ROOT, summarize
+from benchmark import atomic_json, build_cases, fingerprint, read_json, ROOT, STATUSES, summarize
 from publish_progress import PLATFORMS, retained_comparison_rows
+
+
+def _measurement_adapters(program):
+    worker = ("worker_acousticts.R" if program == "acousticts" else
+              "worker_julia.jl" if program == "liquid_spheroid" else "worker_python.py")
+    names = (worker, "process_control.py", "process_gate.py")
+    if worker == "worker_python.py":
+        names += ("python-constraints.txt",)
+    result = {}
+    for name in names:
+        raw = (ROOT / "src" / name).read_bytes()
+        normalized = raw.replace(b"\r\n", b"\n")
+        result[name] = {hashlib.sha256(value).hexdigest() for value in
+                        (raw, normalized, normalized.replace(b"\n", b"\r\n"))}
+    return result
+
+
+def _runtime_selection(runtime, program):
+    """Compare relevant build inputs without unrelated installed software."""
+    evidence = runtime.get("environment_compatibility", {})
+    result = dict(source_sha=runtime.get("source_shas", {}).get(program))
+    if program in ("prol_spheroid", "echosms"):
+        packages = {}
+        for line in evidence.get("python_packages", "").splitlines():
+            name, delimiter, version = line.partition("==")
+            if delimiter and name.lower() in ("numpy", "scipy", "pandas", "matplotlib"):
+                packages[name.lower()] = version
+        if len(packages) != 4:
+            raise ValueError("Reused Python measurements lack dependency version evidence")
+        result["python_packages"] = packages
+        if program == "prol_spheroid":
+            for key in ("prol_compiler", "prol_flags"):
+                if not evidence.get(key):
+                    raise ValueError("Reused Prol_Spheroid measurements lack compiler evidence")
+                result[key] = evidence[key]
+    elif program == "acousticts":
+        if not evidence.get("r_packages"):
+            raise ValueError("Reused acousticTS measurements lack R dependency evidence")
+        result["r_packages"] = evidence["r_packages"]
+    else:
+        julia = evidence.get("julia_environments", {}).get(program)
+        if not julia:
+            raise ValueError("Reused measurements lack Julia dependency evidence")
+        result["julia_environment"] = julia
+        result.update({key: value for key, value in evidence.items() if key.startswith("liquid_")})
+    return result
+
+
+def validate_reused_records(sidecar, cases, sources, platform=None, runtime=None):
+    """Validate promoted observations against their original measurement evidence."""
+    from campaign import manifest_identity
+    records = sidecar.get("reused_records", {})
+    if not isinstance(records, dict):
+        raise ValueError("Invalid reused measurement metadata")
+    by_id = {case["case_id"]: case for case in cases}
+    proofs = sidecar.get("provenance", [])
+    if not isinstance(proofs, list):
+        raise ValueError("Reused measurements require provenance")
+    verified, checked_manifests, checked_environments, adapters = {}, set(), set(), {}
+    proof_cases = [(proof, set(proof.get("manifest", {}).get("cases", [])))
+                   for proof in proofs if isinstance(proof, dict)]
+    for identity, record in records.items():
+        case = by_id.get(identity)
+        if (case is None or not isinstance(record, dict) or record.get("case_id") != identity or
+                any(record.get(key) != value for key, value in case.items()) or
+                record.get("status") not in STATUSES or record.get("measurement_role") == "retained" or
+                type(record.get("measurement_origin_run_id")) is not int or
+                record["measurement_origin_run_id"] < 1):
+            raise ValueError("Reused measurements do not match the selected prediction cases")
+        program = case["software"]
+        expected_source = sources.get("sources", {}).get(program, {}).get("sha")
+        if (not isinstance(expected_source, str) or not re.fullmatch(r"[a-f0-9]{40}", expected_source) or
+                record.get("source_sha") != expected_source):
+            raise ValueError("Reused measurement source differs from the selected software revision")
+        candidates = [proof for proof, identities in proof_cases if
+                      proof.get("run_id") == record["measurement_origin_run_id"] and
+                      identity in identities]
+        if len(candidates) != 1:
+            raise ValueError("Reused measurement requires exactly one original manifest")
+        proof = candidates[0]
+        manifest = proof["manifest"]
+        proof_key = (id(proof), program)
+        if proof_key not in checked_manifests:
+            if program not in adapters:
+                adapters[program] = _measurement_adapters(program)
+            if (fingerprint(manifest_identity(manifest)) != manifest.get("fingerprint") or
+                    manifest.get("sources", {}).get("sources", {}).get(program, {}).get("sha") != expected_source or
+                    manifest.get("workload") != "fresh_process_warmed_distinct_problem_single_prediction" or
+                    any(manifest.get("adapter_hashes", {}).get(name) not in values
+                        for name, values in adapters[program].items()) or
+                    (platform is not None and manifest.get("platform") != platform)):
+                raise ValueError("Reused measurement adapters, workload, platform, or source are incompatible")
+            checked_manifests.add(proof_key)
+        environments = proof.get("environments", {})
+        invocation = environments.get("invocations", {}).get(record.get("invocation_id"), {})
+        environment = environments.get("evidence", {}).get(invocation.get("environment_fingerprint"))
+        attempted = record["status"] not in {"setup_error", "setup_timeout", "setup_unavailable", "unsupported"}
+        environment_key = (*proof_key, invocation.get("environment_fingerprint"), attempted)
+        if environment_key not in checked_environments:
+            if (not isinstance(environment, dict) or fingerprint(environment) != invocation.get("environment_fingerprint") or
+                    environment.get("platform") != manifest.get("platform") or
+                    environment.get("architecture") != manifest.get("architecture") or
+                    environment.get("threads") != 1):
+                raise ValueError("Reused measurement lacks matching original environment evidence")
+            original_runtime = environment.get("runtime", {})
+            if original_runtime.get("source_shas", {}).get(program) != expected_source:
+                raise ValueError("Reused environment has a different software revision")
+            if attempted:
+                original = _runtime_selection(original_runtime, program)
+                if runtime is not None and original != _runtime_selection(runtime, program):
+                    raise ValueError("Reused measurement compiler or dependencies differ from the current runtime")
+            checked_environments.add(environment_key)
+        verified[identity] = record
+    return verified
 
 
 def baseline_settings(content, repository, run_id, platform):
@@ -21,12 +135,14 @@ def baseline_settings(content, repository, run_id, platform):
         names = archive.namelist()
         if "manifest.json" in names or "refresh-campaign.json" not in names:
             return None
-        if set(names) - {"refresh-campaign.json", "retained-results.json", "benchmark-source.json"}:
+        allowed = {"refresh-campaign.json", "retained-results.json", "benchmark-source.json"}
+        seed_paths = {name for name in names if re.fullmatch(r"records/[a-f0-9]{64}\.json", name)}
+        if set(names) - allowed - seed_paths:
             raise ValueError("Unexpected files in a refresh baseline")
         if len(names) != len(set(names)) or "retained-results.json" not in names:
             raise ValueError("Incomplete or duplicate refresh baseline metadata")
         values = {}
-        for name in ("refresh-campaign.json", "retained-results.json"):
+        for name in ("refresh-campaign.json", "retained-results.json", *sorted(seed_paths)):
             entry = archive.getinfo(name)
             if entry.file_size > MAX_JSON_BYTES or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("Invalid refresh baseline file")
@@ -49,7 +165,13 @@ def baseline_settings(content, repository, run_id, platform):
     if settings["planned_cases"] != len(cases):
         raise ValueError("Refresh baseline case count does not match its settings")
     retained_comparison_rows(retained, cases)
-    return dict(settings, recorded_cases=0)
+    seeds = validate_reused_records(retained, cases, meta["sources"],
+        platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
+    expected_seeds = {f"records/{identity}.json": record for identity, record in seeds.items()}
+    if ({name: values[name] for name in seed_paths} != expected_seeds or
+            meta.get("reused_count", 0) != len(seeds)):
+        raise ValueError("Reused baseline measurements do not match their preserved records")
+    return dict(settings, recorded_cases=len(seeds))
 
 
 def _collection(api, run_id, name):
@@ -99,11 +221,15 @@ def _environments(content):
     return dict(invocations=result, evidence=shared)
 
 
-def resolve_refresh(inputs, repository, revision, api):
+def resolve_refresh(inputs, repository, revision, api, sources=None):
     from campaign import (CAPABILITIES, ORDER_CHOICES, artifact_platform, checkpoint_settings,
                           csv_values, read_checkpoint, select_resume_artifacts,
                           setup_only_checkpoint, timing_or_restore_started)
     requested = str(inputs.get("resume_run_id", "")).strip()
+    mode = inputs.get("mode", "refresh")
+    extend = mode == "extend"
+    if mode not in ("refresh", "extend"):
+        raise ValueError("Selected software continuation must use refresh or extend mode")
     if not requested.isdecimal() or int(requested) < 1:
         raise ValueError("Refresh mode requires a positive resume_run_id")
     if not re.fullmatch(r"[a-f0-9]{40}", revision):
@@ -134,7 +260,8 @@ def resolve_refresh(inputs, repository, revision, api):
                 meta, retained = _read_baseline(content)
                 settings = baseline
                 source = dict(resumed_from_run_id=meta.get("resumed_from_run_id"))
-                rows, provenance = retained["rows"], retained["provenance"]
+                rows = retained["rows"] + list(retained.get("reused_records", {}).values())
+                provenance = retained["provenance"]
             else:
                 source = setup_only_checkpoint(content, repository, current)
                 if source is not None:
@@ -180,6 +307,19 @@ def resolve_refresh(inputs, repository, revision, api):
                                  retained_from_run_id=row.get("retained_from_run_id", current))
                              for row in rows if row["software"] not in programs]
             found[platform] = dict(schema_version=1, rows=retained_rows, provenance=provenance)
+            if extend:
+                seeds = {}
+                for row in rows:
+                    if row["software"] not in programs:
+                        continue
+                    record = {key: value for key, value in row.items() if not key.startswith("reference_")
+                              and key not in ("delta_ts_db", "measurement_role", "retained_from_run_id")}
+                    record["measurement_origin_run_id"] = row.get("measurement_origin_run_id",
+                        row.get("retained_from_run_id", current))
+                    if record["case_id"] in seeds:
+                        raise ValueError("Duplicate selected measurements cannot be extended")
+                    seeds[record["case_id"]] = record
+                found[platform]["reused_records"] = seeds
         missing = platforms - found.keys()
         if not missing:
             break
@@ -205,11 +345,16 @@ def resolve_refresh(inputs, repository, revision, api):
     for platform in platforms:
         found.setdefault(platform, dict(schema_version=1, rows=[], provenance=[]))
         retained_comparison_rows(found[platform], cases)
+        if extend:
+            validate_reused_records(found[platform], cases,
+                read_json(ROOT / "sources.lock.json") if sources is None else sources,
+                platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
     current_run = int(os.environ.get("GITHUB_RUN_ID", "0"))
-    return dict(mode="refresh", platforms=[p for p in PLATFORMS if p in platforms],
+    return dict(mode=mode, platforms=[p for p in PLATFORMS if p in platforms],
         configuration=configuration, profile=anchor["profile"], software=",".join(programs),
         repetitions=anchor["repetitions"], source_ref=revision, planned_cases=len(cases),
-        resume_run_id=requested, resume_case_order="", recorded_by_platform={p: 0 for p in platforms},
+        resume_run_id=requested, resume_case_order="",
+        recorded_by_platform={p: len(found[p].get("reused_records", {})) for p in platforms},
         resume_artifacts={p: f"retained-{p}" for p in platforms},
         resume_artifact_run_ids={p: current_run for p in platforms},
         retained_by_platform={p: len(found[p]["rows"]) for p in platforms}, _retained_payloads=found)
@@ -224,7 +369,14 @@ def write_baselines(result, directory, repository, run_id, sources=None):
     settings["sources_fingerprint"] = fingerprint(sources)
     for platform, retained in payloads.items():
         target = directory / platform
+        cases = build_cases(settings["configuration"], settings["profile"],
+                            settings["software"].split(","), settings["repetitions"])
+        seeds = validate_reused_records(retained, cases, sources,
+            platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
         atomic_json(target / "retained-results.json", retained)
+        for identity, record in seeds.items():
+            atomic_json(target / "records" / f"{identity}.json", record)
         atomic_json(target / "refresh-campaign.json", dict(schema_version=1, repository=repository,
             run_id=int(run_id), platform=platform, resumed_from_run_id=int(result["resume_run_id"]),
-            settings=settings, sources=sources, retained_fingerprint=fingerprint(retained)))
+            settings=settings, sources=sources, retained_fingerprint=fingerprint(retained),
+            reused_count=len(seeds)))

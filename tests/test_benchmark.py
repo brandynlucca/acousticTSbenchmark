@@ -185,6 +185,41 @@ class FileTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Resume refused"):
                     b.run(args)
 
+    def test_continued_software_skips_and_preserves_original_measurements(self):
+        self.config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=1000)
+        self.config["case_timeout_seconds"] = .1
+        config_path, runtime_path, output = self.path / "config.json", self.path / "runtime.json", self.path / "run"
+        b.atomic_json(config_path, self.config)
+        sources = b.read_json(ROOT / "sources.lock.json")
+        sha = sources["sources"]["echosms"]["sha"]
+        b.atomic_json(runtime_path, dict(source_shas={"echosms": sha}, environment_fingerprint="test"))
+        cases = b.build_cases(self.config, "pilot", ["echosms"])
+        original = dict(case_id=cases[0]["case_id"], status="ok", elapsed_seconds=.2, ts_db=-40,
+                        source_sha=sha, invocation_id="original", measurement_origin_run_id=123,
+                        memory_delta_peak_bytes=2048)
+        sidecar = dict(schema_version=1, rows=[], provenance=[], reused_records={original["case_id"]: original})
+        b.atomic_json(output / "retained-results.json", sidecar)
+        record_path = output / "records" / f"{original['case_id']}.json"
+        b.atomic_json(record_path, original)
+        before = record_path.read_bytes()
+        args = b.parser().parse_args(["--config", str(config_path), "--software", "echosms",
+            "--runtime", str(runtime_path), "--output", str(output), "--max-cases", "1"])
+        with patch("refresh.validate_reused_records", return_value=sidecar["reused_records"]) as validate:
+            with patch.object(b, "measure", return_value=dict(status="ok", elapsed_seconds=.3, ts_db=-41)) as measure:
+                b.run(args)
+                b.run(args)
+                self.assertEqual([call.args[0] for call in measure.call_args_list], cases[1:])
+                self.assertEqual(record_path.read_bytes(), before)
+                self.assertEqual(b.read_json(output / "status.json")["recorded"], 3)
+                rows = b.read_json(output / "results.json")
+                self.assertEqual((rows[0]["measurement_origin_run_id"], rows[0]["elapsed_seconds"]), (123, .2))
+                validate.assert_called_with(sidecar, cases, sources, platform=b.platform.system(),
+                                            runtime=b.read_json(runtime_path))
+                b.atomic_json(record_path, dict(original, elapsed_seconds=999))
+                with self.assertRaisesRegex(ValueError, "differ from their saved originals"):
+                    b.run(args)
+                self.assertEqual(measure.call_count, 2)
+
     def test_reference_matching_sign_and_self_comparison(self):
         reference = {key: self.case[key] for key in b.PHYSICAL_FIELDS}
         reference.update(qualified=True, reference_id="independent-ref", source_sha="a" * 40,

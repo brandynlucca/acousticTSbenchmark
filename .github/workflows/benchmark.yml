@@ -1,15 +1,15 @@
 name: Dense spheroid timings
-run-name: ${{ inputs.mode == 'prepare' && format('Prepare environments ({0})', inputs.platform) || inputs.mode == 'refresh' && format('Refresh {0} from benchmark {1}', inputs.refresh_software, inputs.resume_run_id) || inputs.mode == 'resume' && format('Resume benchmark {0}', inputs.resume_run_id) || format('New benchmark ({0})', inputs.platform) }}
+run-name: ${{ inputs.mode == 'prepare' && format('Prepare environments ({0})', inputs.platform) || inputs.mode == 'extend' && format('Continue {0} after benchmark {1}', inputs.refresh_software, inputs.resume_run_id) || inputs.mode == 'refresh' && format('Refresh {0} from benchmark {1}', inputs.refresh_software, inputs.resume_run_id) || inputs.mode == 'resume' && format('Resume benchmark {0}', inputs.resume_run_id) || format('New {0} benchmark (a={1} m, {2})', inputs.software, inputs.semimajor_m, inputs.platform) }}
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: New benchmark, resume, refresh selected software, or prepare environments
+        description: New, resume, extend selected software, refresh selected software, or prepare
         type: choice
-        options: [new, resume, refresh, prepare]
+        options: [new, resume, extend, refresh, prepare]
         default: new
       platform:
-        description: New-run platform (resume and refresh restore original platforms and settings)
+        description: New-run platform (continuations restore original platforms and settings)
         type: choice
         options: [ubuntu-latest, windows-latest, macos-latest, all]
         default: ubuntu-latest
@@ -57,11 +57,11 @@ on:
         options: ['1', '3', '5']
         default: '1'
       resume_run_id:
-        description: Required in resume or refresh mode (all new-run settings are ignored)
+        description: Previous run ID for resume, extend, or refresh (restores the saved grid)
         type: string
         default: ''
       refresh_software:
-        description: Refresh only these software CSV names, retaining other recorded comparisons
+        description: Selected software CSV for extend or refresh (other results are retained)
         type: string
         default: acousticts
       resume_artifact:
@@ -89,6 +89,7 @@ permissions:
 concurrency:
   group: ${{ inputs.mode == 'prepare' && format('spheroid-prepare-{0}', inputs.platform) || 'spheroid-timing-campaign' }}
   cancel-in-progress: false
+  queue: max
 jobs:
   comparisons:
     if: ${{ always() && inputs.mode != 'prepare' }}
@@ -137,7 +138,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/campaign.py --output "$RUNNER_TEMP/campaign.json"
       - name: Preserve Ubuntu comparison measurements
-        if: inputs.mode == 'refresh'
+        if: inputs.mode == 'refresh' || inputs.mode == 'extend'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: retained-ubuntu-latest
@@ -145,7 +146,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Preserve Windows comparison measurements
-        if: inputs.mode == 'refresh'
+        if: inputs.mode == 'refresh' || inputs.mode == 'extend'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: retained-windows-latest
@@ -153,7 +154,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Preserve macOS comparison measurements
-        if: inputs.mode == 'refresh'
+        if: inputs.mode == 'refresh' || inputs.mode == 'extend'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: retained-macos-latest
@@ -205,7 +206,7 @@ jobs:
               output.write("BENCHMARK_REFERENCES=" + os.path.join(os.environ["RUNNER_TEMP"], "matched-references.json") + "\n")
           PY
       - name: Restore previous checkpoints
-        if: ${{ (inputs.mode == 'resume' || inputs.mode == 'refresh') && fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] != '' }}
+        if: ${{ (inputs.mode == 'resume' || inputs.mode == 'refresh' || inputs.mode == 'extend') && fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] != '' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ fromJSON(needs.matrix.outputs.resume_artifacts)[matrix.os] }}

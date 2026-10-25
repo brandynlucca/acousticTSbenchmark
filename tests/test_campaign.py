@@ -750,5 +750,154 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual((directory / "retained-results.json").read_bytes(), retained_before)
 
 
+class ExtendTests(unittest.TestCase):
+    api = CampaignTests.api
+    archive_files = staticmethod(RefreshTests.archive_files)
+
+    def setUp(self):
+        self.lock = {"sources": {name: {"sha": "a" * 40} for name in benchmark.CAPABILITIES}}
+        self.runtime = dict(source_shas={name: "a" * 40 for name in benchmark.CAPABILITIES},
+            environment_compatibility=dict(python_packages="numpy==2.2.6\nscipy==1.15.3\npandas==2.3.0\nmatplotlib==3.10.3\n",
+                prol_compiler="GNU Fortran 14.2.0", prol_flags=["-O2"], r_packages={"R": "4.5.2"},
+                julia_environments={"liquid_spheroid": {"Manifest.toml": "locked Julia dependencies"}}))
+
+    def source(self, alter=None, platform="ubuntu-latest"):
+        def evidence(files):
+            manifest = files["manifest.json"]
+            manifest["adapter_hashes"] = benchmark.adapter_hashes()
+            manifest["fingerprint"] = benchmark.fingerprint(campaign.manifest_identity(manifest))
+            files["environments/preserved.json"] = dict(platform=manifest["platform"], architecture="x86_64",
+                threads=1, runtime=self.runtime, started_at="2026-10-25T00:00:00Z")
+            if alter:
+                alter(files)
+        return checkpoint(platform=platform, programs=["acousticts", "prol_spheroid", "echosms"],
+                          count=6, source_ref="a" * 40, alter=evidence)[0]
+
+    def extend(self, content=None, selected="prol_spheroid", run=123, platform="ubuntu-latest"):
+        content = content or self.source(platform=platform)
+        api, _ = self.api([dict(id=1, name=f"results-{platform}")], {1: content})
+        with patch.dict(os.environ, GITHUB_RUN_ID=str(run + 1)):
+            return refresh.resolve_refresh(dict(mode="extend", resume_run_id=str(run), refresh_software=selected),
+                                           "owner/repo", "e" * 40, api, sources=self.lock)
+
+    def baseline(self, result, run=124):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            refresh.write_baselines(result, root, "owner/repo", run, sources=self.lock)
+            directory = root / result["platforms"][0]
+            return {path.relative_to(directory).as_posix(): benchmark.read_json(path)
+                    for path in directory.rglob("*.json")}
+
+    def test_extend_promotes_only_selected_measurements_and_keeps_other_software(self):
+        content = self.source()
+        result = self.extend(content)
+        self.assertEqual((result["mode"], result["software"], result["source_ref"]),
+                         ("extend", "prol_spheroid", "e" * 40))
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        self.assertEqual({row["software"] for row in sidecar["rows"]}, {"acousticts", "echosms"})
+        old = {row["case_id"]: row for row in campaign.read_checkpoint(content)[0]["results.json"]}
+        self.assertEqual(len(sidecar["reused_records"]), 2)
+        for identity, record in sidecar["reused_records"].items():
+            expected = {key: value for key, value in old[identity].items()
+                        if not key.startswith("reference_") and key != "delta_ts_db"}
+            self.assertEqual(record, dict(expected, measurement_origin_run_id=123))
+            self.assertEqual(record["software"], "prol_spheroid")
+        cases = benchmark.build_cases(result["configuration"], result["profile"], ["prol_spheroid"], 3)
+        self.assertEqual(refresh.validate_reused_records(sidecar, cases, self.lock, "Linux", self.runtime),
+                         sidecar["reused_records"])
+
+    def test_baseline_binds_seed_records_and_rejects_missing_or_changed_predictions(self):
+        result = self.extend()
+        files = self.baseline(result)
+        settings = refresh.baseline_settings(self.archive_files(files), "owner/repo", 124, "ubuntu-latest")
+        self.assertEqual(settings["recorded_cases"], 2)
+        record_name = next(name for name in files if name.startswith("records/"))
+        for mutation in ("missing", "elapsed", "count"):
+            changed = copy.deepcopy(files)
+            if mutation == "missing":
+                del changed[record_name]
+            elif mutation == "elapsed":
+                changed[record_name]["elapsed_seconds"] = 999
+            else:
+                changed["refresh-campaign.json"]["reused_count"] = 0
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "Reused baseline"):
+                refresh.baseline_settings(self.archive_files(changed), "owner/repo", 124, "ubuntu-latest")
+
+    def test_refuses_changed_selected_revision_controls_or_adapter(self):
+        for mutation in ("source", "controls", "adapter"):
+            def alter(files):
+                manifest = files["manifest.json"]
+                if mutation == "controls":
+                    # A selected comparison from another control regime must
+                    # never be treated as an already-computed current case.
+                    original = manifest["configuration"]["controls"]["prol_spheroid"]
+                    original["precision"] = "changed"
+                    manifest["fingerprint"] = benchmark.fingerprint(campaign.manifest_identity(manifest))
+                elif mutation == "adapter":
+                    manifest["adapter_hashes"]["worker_python.py"] = "0" * 64
+                    manifest["fingerprint"] = benchmark.fingerprint(campaign.manifest_identity(manifest))
+            content = self.source(alter)
+            if mutation == "source":
+                self.lock["sources"]["prol_spheroid"]["sha"] = "b" * 40
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.extend(content)
+            self.lock["sources"]["prol_spheroid"]["sha"] = "a" * 40
+
+    def test_runtime_compares_selected_dependencies_and_compiler_only(self):
+        result = self.extend()
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        cases = benchmark.build_cases(result["configuration"], result["profile"], ["prol_spheroid"], 3)
+        compatible = copy.deepcopy(self.runtime)
+        compatible["environment_compatibility"].pop("r_packages")
+        compatible["environment_compatibility"].pop("julia_environments")
+        compatible["environment_compatibility"]["python_packages"] += "unrelated-package==1.0\n"
+        refresh.validate_reused_records(sidecar, cases, self.lock, "Linux", compatible)
+        compatible["environment_compatibility"]["prol_compiler"] = "different compiler"
+        with self.assertRaisesRegex(ValueError, "compiler or dependencies"):
+            refresh.validate_reused_records(sidecar, cases, self.lock, "Linux", compatible)
+
+    def test_cross_platform_adapter_comparison_accepts_only_line_ending_differences(self):
+        def windows(files):
+            hashes = files["manifest.json"]["adapter_hashes"]
+            for name in refresh._measurement_adapters("prol_spheroid"):
+                raw = (ROOT / "src" / name).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                hashes[name] = refresh.hashlib.sha256(raw).hexdigest()
+            files["manifest.json"]["fingerprint"] = benchmark.fingerprint(campaign.manifest_identity(files["manifest.json"]))
+        result = self.extend(self.source(windows, "windows-latest"), platform="windows-latest")
+        self.assertEqual(result["recorded_by_platform"], {"windows-latest": 2})
+
+    def test_chain_prol_to_echosms_to_liquid_keeps_seeded_and_other_comparisons(self):
+        prol = self.extend()
+        prol_files = self.baseline(prol, 124)
+        echo = self.extend(self.archive_files(prol_files), "echosms", 124)
+        self.assertEqual(echo["recorded_by_platform"], {"ubuntu-latest": 2})
+        echo_sidecar = echo["_retained_payloads"]["ubuntu-latest"]
+        self.assertEqual({row["software"] for row in echo_sidecar["rows"]}, {"acousticts", "prol_spheroid"})
+        self.assertEqual({row["measurement_origin_run_id"] for row in echo_sidecar["rows"]
+                          if row["software"] == "prol_spheroid"}, {123})
+        echo_files = self.baseline(echo, 125)
+        liquid = self.extend(self.archive_files(echo_files), "liquid_spheroid", 125)
+        self.assertEqual(liquid["recorded_by_platform"], {"ubuntu-latest": 0})
+        saved = liquid["_retained_payloads"]["ubuntu-latest"]["rows"]
+        self.assertEqual(len(saved), 6)
+        self.assertEqual({row["software"] for row in saved}, {"acousticts", "prol_spheroid", "echosms"})
+        self.assertTrue(all(row["elapsed_seconds"] == .2 and row["source_sha"] == "a" * 40 for row in saved))
+
+    def test_extending_preserves_prior_failures_and_drops_derived_reference_fields(self):
+        def failed(files):
+            identity = next(row["case_id"] for row in files["results.json"]
+                            if row["software"] == "prol_spheroid" and row["status"] == "ok")
+            files[f"records/{identity}.json"].update(status="nonconverged", elapsed_seconds=2.)
+            row = next(row for row in files["results.json"] if row["case_id"] == identity)
+            row.update(status="nonconverged", elapsed_seconds=2., reference_ts_db=-41,
+                       reference_id="b" * 64, delta_ts_db=None)
+        result = self.extend(self.source(failed))
+        seeds = result["_retained_payloads"]["ubuntu-latest"]["reused_records"]
+        self.assertEqual(sum(record["status"] == "nonconverged" for record in seeds.values()), 1)
+        self.assertTrue(all(not key.startswith("reference_") and key != "delta_ts_db"
+                            for record in seeds.values() for key in record))
+
+
 if __name__ == "__main__":
     unittest.main()

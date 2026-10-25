@@ -446,8 +446,19 @@ def run(args):
                         runtime=runtime["environment_fingerprint"], memory_observer=memory_provenance())),
                     workload="fresh_process_warmed_distinct_problem_single_prediction")
     retained_path = directory / "retained-results.json"
+    reused_records = {}
     if retained_path.exists():
-        identity["retained_fingerprint"] = fingerprint(read_json(retained_path))
+        retained = read_json(retained_path)
+        identity["retained_fingerprint"] = fingerprint(retained)
+        if retained.get("reused_records"):
+            from refresh import validate_reused_records
+
+            reused_records = validate_reused_records(retained, cases, lock,
+                                                     platform=platform.system(), runtime=runtime)
+            for case_id, original in reused_records.items():
+                path = directory / "records" / f"{case_id}.json"
+                if not path.is_file() or read_json(path) != original:
+                    raise ValueError("Continued measurements differ from their saved originals")
     from references import build_requests
     manifest = dict(identity, fingerprint=fingerprint(identity),
                     reference_requests=build_requests(configuration, lock, args.profile))

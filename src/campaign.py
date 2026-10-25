@@ -313,6 +313,12 @@ def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexpo
     configuration, profile = manifest["configuration"], manifest["profile"]
     validate_plan_size(configuration, profile, programs, repetitions)
     cases = build_cases(configuration, profile, programs, repetitions)
+    if retained and retained.get("reused_records"):
+        from refresh import validate_reused_records
+
+        reused = validate_reused_records(retained, cases, manifest["sources"], platform=manifest["platform"])
+        if any(records.get(identity) != record for identity, record in reused.items()):
+            raise ValueError("Continued measurements differ from their saved originals")
     identities = [case["case_id"] for case in cases]
     if identities != manifest["cases"] or identities != [row.get("case_id") for row in rows]:
         raise ValueError("Continuation case identities or software order do not match the manifest")
@@ -486,9 +492,9 @@ def resolve(inputs, configuration, repository, revision, api=None):
     if not isinstance(inputs, dict):
         raise ValueError("CAMPAIGN_INPUTS must contain a JSON object")
     mode = inputs.get("mode", "new")
-    if mode not in ("new", "resume", "refresh", "prepare"):
-        raise ValueError("mode must be new, resume, refresh, or prepare")
-    if mode == "refresh":
+    if mode not in ("new", "resume", "extend", "refresh", "prepare"):
+        raise ValueError("mode must be new, resume, extend, refresh, or prepare")
+    if mode in ("refresh", "extend"):
         from refresh import resolve_refresh
         if api is None:
             api = GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=240)
@@ -519,9 +525,9 @@ def main():
     inputs = _json(os.environ.get("CAMPAIGN_INPUTS", "{}"))
     repository = os.environ["GITHUB_REPOSITORY"]
     api = (GitHub(repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=600)
-           if isinstance(inputs, dict) and inputs.get("mode") in ("resume", "refresh") else None)
+           if isinstance(inputs, dict) and inputs.get("mode") in ("resume", "refresh", "extend") else None)
     result = resolve(inputs, read_json(args.config), repository, os.environ.get("GITHUB_SHA", ""), api)
-    if result["mode"] == "refresh":
+    if result["mode"] in ("refresh", "extend"):
         from refresh import write_baselines
         write_baselines(result, args.output.parent / "refresh-baselines", repository, os.environ["GITHUB_RUN_ID"])
     atomic_json(args.output, result)
