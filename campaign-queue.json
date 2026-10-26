@@ -312,7 +312,7 @@
     "liquid_spheroid:0.1": 40171498995,
     "liquid_spheroid:0.5": 40171501026
   },
-  "updated_at": "2026-10-26T05:10:39.205882+00:00",
+  "updated_at": "2026-10-26T14:11:02.470412+00:00",
   "history": [
     {
       "initial_run_id": 40170086146,
@@ -351,5 +351,18 @@
   "recovery": {
     "run_id": 40265517028,
     "reason": "Repair retained metadata export and restore Rtools GCC14.3 before continuing saved Prol and echo predictions"
+  },
+  "dispatch_intent": {
+    "key": "prol_spheroid:0.01",
+    "inputs": {
+      "timing_budget_minutes": "240",
+      "reference_budget_minutes": "0",
+      "case_order": "Complete each frequency sweep",
+      "mode": "extend",
+      "refresh_software": "prol_spheroid",
+      "resume_run_id": "40265517028"
+    },
+    "source_ref": "29c225487d549c516eea0bfbe5ad8cc4bd747007",
+    "created_at": "2026-10-26T14:11:02.470390+00:00"
   }
 }
