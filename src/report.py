@@ -38,7 +38,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 .coverage .progress-item{min-width:170px}.coverage .progress-track{height:7px}.coverage .progress-counts{font-size:12px}.coverage .progress-title{font-size:13px}
 </style>
 <h1>Spheroid timing progress</h1>
-<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><span id="run-state"></span></div>
+<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><a id="dataset-link" target="_blank" rel="noopener">Consolidated dataset</a><span id="run-state"></span></div>
 <p id="setup-status" class="note" hidden></p>
 <p id="connection" role="status" hidden></p>
 <p id="data-run-warning" role="status" hidden></p>
@@ -65,6 +65,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
 let externalReferenceCurves=[];
 const repository=data.repository;
+if(repository)document.getElementById('dataset-link').href=`https://github.com/${repository}/releases/tag/benchmark-dataset`;
 const capabilities=data.capabilities;
 function supportsBoundary(software,boundary){return !capabilities?.[software]||capabilities[software].includes(boundary);}
 function applicable(row){return supportsBoundary(row.software,row.boundary);}

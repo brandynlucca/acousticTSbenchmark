@@ -1,0 +1,37 @@
+name: Consolidate benchmark dataset
+on:
+  workflow_run:
+    workflows: [Dense spheroid timings, Attach cached references, Cached numerical references]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: '12,27,42,57 * * * *'
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: consolidated-benchmark-dataset
+  cancel-in-progress: false
+  queue: max
+jobs:
+  collect:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ijson==3.4.0
+      - name: Import new artifacts and publish cumulative downloads
+        id: sync
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python src/sync_dataset.py --directory "$RUNNER_TEMP/consolidated-dataset" --max-artifacts 8
+      - name: Continue the initial backfill in bounded batches
+        if: always() && steps.sync.outputs.pending_untried != '' && steps.sync.outputs.pending_untried != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main

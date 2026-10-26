@@ -196,7 +196,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
-      actions: read
+      actions: write
     timeout-minutes: ${{ inputs.mode == 'prepare' && 15 || 270 }}
     strategy:
       max-parallel: 1
@@ -752,6 +752,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Update consolidated dataset from saved checkpoint
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main
       - name: Publish live checkpoint
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
@@ -784,6 +791,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Update consolidated dataset from saved checkpoint
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main
       - name: Publish live checkpoint
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
@@ -816,6 +830,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Update consolidated dataset from saved checkpoint
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main
       - name: Publish live checkpoint
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
@@ -848,6 +869,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Update consolidated dataset from saved checkpoint
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main
       - name: Publish live checkpoint
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
@@ -880,6 +908,13 @@ jobs:
             ${{ runner.temp }}/benchmark-results/environments/
           if-no-files-found: warn
           retention-days: 14
+      - name: Update consolidated dataset from saved checkpoint
+        if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run dataset.yml --ref main
       - name: Publish live checkpoint
         if: ${{ always() && inputs.mode != 'prepare' && steps.prepare.outcome == 'success' }}
         continue-on-error: true
