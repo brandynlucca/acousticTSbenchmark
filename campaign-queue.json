@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "blocked",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
   "dispatch_ref": "benchmark-series-20261025",
@@ -338,6 +338,6 @@
     "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
     "created_at": "2026-10-26T03:44:04.264233+00:00"
   },
-  "updated_at": "2026-10-26T03:44:06.608233+00:00",
-  "reason": "Dispatched run does not match the pinned queue request"
+  "updated_at": "2026-10-26T04:52:46.207170+00:00",
+  "reason": "Investigating failed benchmark startup and preserving completed measurements"
 }
