@@ -226,9 +226,10 @@ def _environments(content):
 
 def resolve_refresh(inputs, repository, revision, api, sources=None):
     from campaign import (CAPABILITIES, ORDER_CHOICES, artifact_platform, checkpoint_settings,
-                          csv_values, read_checkpoint, select_resume_artifacts,
+                          continuation_platform, csv_values, read_checkpoint, select_resume_artifacts,
                           setup_only_checkpoint, timing_or_restore_started)
     requested = str(inputs.get("resume_run_id", "")).strip()
+    selected_platform = continuation_platform(inputs)
     mode = inputs.get("mode", "refresh")
     extend = mode == "extend"
     if mode not in ("refresh", "extend"):
@@ -252,9 +253,10 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         run = _run(api, current, repository)
         jobs = _collection(api, current, "jobs")
         artifacts = _collection(api, current, "artifacts")
-        selected = select_resume_artifacts(artifacts)
+        selected = select_resume_artifacts(artifacts, platform=selected_platform)
         if platforms is None:
-            platforms = {p for p in PLATFORMS if any(job.get("name") == f"benchmark ({p})" for job in jobs)} | set(selected)
+            platforms = ({selected_platform} if selected_platform is not None else
+                {p for p in PLATFORMS if any(job.get("name") == f"benchmark ({p})" for job in jobs)} | set(selected))
         parents = set()
         for platform, artifact in selected.items():
             content = api.archive(artifact["id"])

@@ -359,6 +359,30 @@ def pending_setup_cases(config_path, profile, software=None, repetitions=None):
     return [dict(case, status="pending") for case in cases]
 
 
+def setup_measurement_rows(directory, rows, platform):
+    """Keep validated selected-software measurements visible during continuation setup."""
+    directory = Path(directory)
+    path = directory / "retained-results.json"
+    if not path.is_file():
+        return rows
+    sidecar = read_retained(path)
+    if "reused_records" not in sidecar:
+        return rows
+    from campaign import MAX_RECORD_BYTES
+    from refresh import validate_reused_records
+
+    cases = [{key: value for key, value in row.items() if key != "status"} for row in rows]
+    records = validate_reused_records(sidecar, cases, read_json(ROOT / "sources.lock.json"),
+        platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
+    for identity, record in records.items():
+        saved = directory / "records" / f"{identity}.json"
+        if (not saved.is_file() or saved.stat().st_size > MAX_RECORD_BYTES or read_json(saved) != record):
+            raise ValueError("Setup measurements do not match their preserved records")
+    reference_path = directory / "references.json"
+    references = load_references(reference_path) if reference_path.is_file() else {}
+    return summarize(cases, records, references)
+
+
 def should_publish(current, proposed):
     if current is None:
         return True
@@ -569,7 +593,9 @@ def main():
             status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
         else:
             rows = pending_setup_cases(args.config, args.profile, args.software, args.repetitions)
-            status = dict(state="setup", planned=len(rows), recorded=0,
+            rows = setup_measurement_rows(args.directory, rows, args.platform)
+            status = dict(state="setup", planned=len(rows),
+                          recorded=sum(row["status"] != "pending" for row in rows),
                           updated_at=datetime.now(timezone.utc).isoformat())
         payload = compact_payload(args.repository, args.platform, args.run_id, args.run_attempt,
                                   comparison_rows(args.directory, rows), status, args.state)

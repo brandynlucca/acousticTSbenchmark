@@ -144,9 +144,20 @@ def artifact_platform(name):
     return None
 
 
-def select_resume_artifacts(artifacts, explicit=""):
+def continuation_platform(inputs):
+    """Return an explicit continuation platform, or retain the saved selection."""
+    selected = inputs.get("continuation_platform", "Keep saved platforms")
+    if selected == "Keep saved platforms":
+        return None
+    if not isinstance(selected, str) or selected not in PLATFORMS:
+        raise ValueError("continuation_platform must be Keep saved platforms or a supported runner platform")
+    return selected
+
+
+def select_resume_artifacts(artifacts, explicit="", platform=None):
     candidates = [item for item in artifacts if not item.get("expired", False)
-                  and artifact_platform(item.get("name", ""))]
+                  and artifact_platform(item.get("name", ""))
+                  and (platform is None or artifact_platform(item["name"]) == platform)]
     newest = lambda item: (item.get("created_at", ""), item["name"].startswith("results-"), int(item["id"]))
     if explicit:
         selected = max((item for item in candidates if item["name"] == explicit), key=newest, default=None)
@@ -154,12 +165,14 @@ def select_resume_artifacts(artifacts, explicit=""):
             raise ValueError("resume_artifact must name an available timing result or checkpoint artifact")
         return {artifact_platform(explicit): selected}
     result = {}
-    for platform in PLATFORMS:
+    for candidate_platform in PLATFORMS:
         # A later attempt can have a newer checkpoint but no final artifact yet.
-        options = [item for item in candidates if artifact_platform(item["name"]) == platform]
+        options = [item for item in candidates if artifact_platform(item["name"]) == candidate_platform]
         if options:
-            result[platform] = max(options, key=newest)
+            result[candidate_platform] = max(options, key=newest)
     if not result:
+        if platform is not None:
+            raise ValueError(f"The selected run has no available timing checkpoint for {platform}")
         raise ValueError("The selected run has no available timing checkpoints")
     return result
 
@@ -377,6 +390,7 @@ def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexpo
 
 
 def resume_campaign(inputs, repository, api):
+    selected_platform = continuation_platform(inputs)
     requested_order = inputs.get("resume_case_order", "Keep saved order")
     if not isinstance(requested_order, str) or requested_order not in ("Keep saved order", *ORDER_CHOICES):
         raise ValueError("resume_case_order must be Keep saved order, Complete each frequency sweep, or Frequency by frequency")
@@ -398,7 +412,7 @@ def resume_campaign(inputs, repository, api):
     else:
         raise ValueError("Too many artifacts to resolve this continuation")
     explicit = str(inputs.get("resume_artifact", "")).strip()
-    selected = select_resume_artifacts(artifacts, explicit)
+    selected = select_resume_artifacts(artifacts, explicit, selected_platform)
     jobs = None
 
     def original_jobs():
@@ -427,7 +441,7 @@ def resume_campaign(inputs, repository, api):
             continue
         source = setup_only_checkpoint(content, repository, run_id)
         if source is not None:
-            if explicit:
+            if explicit or selected_platform is not None:
                 raise ValueError("The selected artifact contains setup metadata only, with no timing checkpoint")
             job = next((job for job in original_jobs() if job["name"] == f"benchmark ({platform})"), None)
             earlier = any(item["id"] != artifact["id"] and artifact_platform(item.get("name", "")) == platform
@@ -453,7 +467,7 @@ def resume_campaign(inputs, repository, api):
         raise ValueError("Setup-only platform source does not match the saved timing campaign")
     shared.pop("sources_fingerprint")
     platforms = set(selected) | setup_only.keys()
-    if not explicit:
+    if not explicit and selected_platform is None:
         # A cancelled matrix can leave later platforms queued with no artifact.
         # Recover those jobs with the same resolved inputs and original source.
         for job in original_jobs():

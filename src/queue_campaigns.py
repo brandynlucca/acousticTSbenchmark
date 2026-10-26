@@ -10,8 +10,8 @@ import sys
 import time
 from urllib.parse import quote
 
-from campaign import artifact_platform
-from publish_progress import APIError, BRANCH, GitHub
+from campaign import artifact_platform, checkpoint_settings, select_resume_artifacts
+from publish_progress import APIError, BRANCH, GitHub, PLATFORMS
 
 
 QUEUE_FILE = "campaign-queue.json"
@@ -23,6 +23,19 @@ SOFTWARE = {"acousticts", "prol_spheroid", "echosms", "liquid_spheroid"}
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def request_platform(request):
+    inputs = request["inputs"]
+    platform = inputs.get("continuation_platform") if inputs.get("mode") == "extend" else inputs.get("platform")
+    if platform not in PLATFORMS:
+        raise ValueError("Finishing a queued software request requires one explicit runner platform")
+    return platform
+
+
+def receipt_run_ids(state):
+    return {receipt["run_id"] for current in state["dispatched"].values()
+            for receipt in [*current.get("history", []), current]}
 
 
 def validate_state(state, repository):
@@ -65,6 +78,10 @@ def validate_state(state, repository):
                 not parent and inputs.get("semimajor_m") != request["semimajor_m"] or
                 "resume_run_id" in inputs):
             raise ValueError("Queue inputs do not match the saved software and size")
+        if type(request.get("finish_before_next", False)) is not bool:
+            raise ValueError("finish_before_next must be a boolean")
+        if request.get("finish_before_next"):
+            request_platform(request)
         receipt = state["dispatched"].get(request["key"])
         if receipt is None:
             pending = True
@@ -73,18 +90,43 @@ def validate_state(state, repository):
               receipt["run_id"] in run_ids or not isinstance(receipt.get("inputs"), dict)):
             raise ValueError("Queue dispatch receipts must form an ordered prefix")
         else:
-            run_ids.add(receipt["run_id"])
+            history = receipt.get("history", [])
+            if not isinstance(history, list):
+                raise ValueError("Invalid benchmark continuation history")
+            for previous in [*history, receipt]:
+                if (not isinstance(previous, dict) or type(previous.get("run_id")) is not int or
+                        previous["run_id"] < 1 or previous["run_id"] in run_ids or
+                        not isinstance(previous.get("inputs"), dict) or
+                        previous is not receipt and "history" in previous or
+                        "recorded_before" in previous and
+                        (type(previous["recorded_before"]) is not int or previous["recorded_before"] < 0)):
+                    raise ValueError("Invalid or duplicate benchmark continuation receipt")
+                run_ids.add(previous["run_id"])
         seen.add(request["key"])
     if set(state["dispatched"]) - {request["key"] for request in state["requests"]}:
         raise ValueError("Unexpected benchmark queue receipt")
     intent = state.get("dispatch_intent")
     if intent is not None:
         index = len(state["dispatched"])
+        continuing = isinstance(intent, dict) and "continuation_of" in intent
+        if continuing:
+            index -= 1
         if (not isinstance(intent, dict) or index >= len(state["requests"]) or
+                index < 0 or
                 intent.get("key") != state["requests"][index]["key"] or
                 intent.get("source_ref") != state["source_ref"] or
                 not isinstance(intent.get("inputs"), dict)):
             raise ValueError("Invalid pending dispatch intent")
+        if continuing:
+            request = state["requests"][index]
+            receipt = state["dispatched"][request["key"]]
+            inputs = intent["inputs"]
+            if (not request.get("finish_before_next") or intent["continuation_of"] != receipt["run_id"] or
+                    type(intent.get("recorded_before")) is not int or intent["recorded_before"] < 0 or
+                    inputs.get("mode") != "extend" or inputs.get("refresh_software") != request["software"] or
+                    inputs.get("resume_run_id") != str(receipt["run_id"]) or
+                    inputs.get("continuation_platform") != request_platform(request)):
+                raise ValueError("Invalid pending software completion intent")
         datetime.fromisoformat(intent["created_at"])
 
 
@@ -142,6 +184,26 @@ def has_saved_baseline(api, run_id):
     raise ValueError("Too many artifacts to establish the predecessor baseline")
 
 
+def completion_progress(api, run, request, source_ref):
+    """Count immutable saved predictions for the exact requested software and size."""
+    artifacts = []
+    for page in range(1, 11):
+        entries = api.request("GET", f"/actions/runs/{run['id']}/artifacts?per_page=100&page={page}")["artifacts"]
+        artifacts.extend(entries)
+        if len(entries) < 100:
+            break
+    else:
+        raise ValueError("Too many artifacts to verify completed predictions")
+    platform = request_platform(request)
+    selected = select_resume_artifacts(artifacts, platform=platform)[platform]
+    settings = checkpoint_settings(api.archive(selected["id"]), api.repository, run.get("head_sha", ""), platform)
+    if (settings["software"] != request["software"] or
+            settings["configuration"]["geometry"]["semimajor_m"] != float(request["semimajor_m"]) or
+            settings["source_ref"] != source_ref):
+        raise ValueError("Saved checkpoint does not match the queued software, semimajor axis, and source")
+    return settings["recorded_cases"], settings["planned_cases"]
+
+
 def resolved_inputs(state, request):
     inputs = dict(request["inputs"])
     if request.get("parent"):
@@ -174,9 +236,16 @@ def record_receipt(api, state, sha, identity, inputs):
             break
     else:
         return pause(api, state, sha, "Dispatched run does not match the pinned queue request", "blocked")
-    key = state["dispatch_intent"]["key"]
-    state["dispatched"][key] = dict(run_id=identity,
+    intent = state["dispatch_intent"]
+    key = intent["key"]
+    receipt = dict(run_id=identity,
         url=f"https://github.com/{api.repository}/actions/runs/{identity}", inputs=inputs)
+    if "continuation_of" in intent:
+        previous = state["dispatched"][key]
+        receipt.update(recorded_before=intent["recorded_before"],
+                       history=[*previous.get("history", []),
+                                {name: value for name, value in previous.items() if name != "history"}])
+    state["dispatched"][key] = receipt
     state.pop("dispatch_intent")
     state.pop("reason", None)
     state.update(status="active", updated_at=utc_now())
@@ -195,7 +264,7 @@ def recover_intent(api, state, sha):
         if (started - timedelta(seconds=2) <= created <= started + timedelta(minutes=5) and
                 run.get("head_sha") == intent["source_ref"] and
                 run.get("display_title") == expected_title(intent["inputs"]) and
-                run.get("id") not in {value["run_id"] for value in state["dispatched"].values()}):
+                run.get("id") not in receipt_run_ids(state)):
             matches.append(run["id"])
     if len(matches) != 1:
         return pause(api, state, sha,
@@ -229,13 +298,30 @@ def advance(api):
                      f"Benchmark {previous} ended with {run.get('conclusion')}. Repair it before advancing")
     if not has_saved_baseline(api, previous):
         return pause(api, state, sha, f"Benchmark {previous} has no available timing checkpoint or retained baseline")
-    if index == len(state["requests"]):
+    request, inputs, continuation = None, None, {}
+    if index and state["requests"][index - 1].get("finish_before_next"):
+        pending_request = state["requests"][index - 1]
+        receipt = state["dispatched"][pending_request["key"]]
+        try:
+            recorded, planned = completion_progress(api, run, pending_request, state["source_ref"])
+        except (ValueError, KeyError) as error:
+            return pause(api, state, sha, f"Cannot verify benchmark {previous} completion: {error}")
+        if recorded < planned:
+            if "recorded_before" in receipt and recorded <= receipt["recorded_before"]:
+                return pause(api, state, sha,
+                    f"Benchmark {previous} added no saved predictions ({recorded}/{planned}). Inspect it before continuing")
+            request = pending_request
+            inputs = dict(request["inputs"], mode="extend", refresh_software=request["software"],
+                          resume_run_id=str(previous), continuation_platform=request_platform(request))
+            continuation = dict(continuation_of=previous, recorded_before=recorded)
+    if request is None and index == len(state["requests"]):
         state.update(status="complete", updated_at=utc_now())
         save_queue(api, state, sha)
         api.request("PUT", f"/actions/workflows/{QUEUE_WORKFLOW}/disable")
         return dict(status="complete", runs=index)
-    request = state["requests"][index]
-    inputs = resolved_inputs(state, request)
+    if request is None:
+        request = state["requests"][index]
+        inputs = resolved_inputs(state, request)
     if request.get("parent"):
         parent_id = int(inputs["resume_run_id"])
         parent = checked_run(api, parent_id)
@@ -250,7 +336,7 @@ def advance(api):
     if actual.get("object", {}).get("sha") != state["source_ref"] or actual["object"].get("type") != "commit":
         return pause(api, state, sha, "Dispatch ref no longer matches the saved benchmark commit")
     state["dispatch_intent"] = dict(key=request["key"], inputs=inputs,
-                                    source_ref=state["source_ref"], created_at=utc_now())
+                                    source_ref=state["source_ref"], created_at=utc_now(), **continuation)
     state["updated_at"] = utc_now()
     sha = save_queue(api, state, sha)
     # A timeout after this point may mean GitHub accepted the dispatch. The
@@ -263,13 +349,30 @@ def advance(api):
     return record_receipt(api, state, sha, identity, inputs)
 
 
+def advance_when_ready(api, wait_seconds=0):
+    """Wait briefly for a closing predecessor, without repeating a dispatch."""
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 120:
+        raise ValueError("wait_seconds must be between 0 and 120")
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        result = advance(api)
+        remaining = deadline - time.monotonic()
+        if result["status"] != "waiting" or remaining <= 0:
+            return result
+        time.sleep(min(5, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY"),
                         required=not os.environ.get("GITHUB_REPOSITORY"))
+    parser.add_argument("--wait-seconds", type=int, default=0,
+                        help="Wait up to 120 seconds for a closing predecessor (default: 0)")
     args = parser.parse_args()
-    api = GitHub(args.repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=120)
-    result = advance(api)
+    if not 0 <= args.wait_seconds <= 120:
+        parser.error("--wait-seconds must be between 0 and 120")
+    api = GitHub(args.repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=300 + args.wait_seconds)
+    result = advance_when_ready(api, args.wait_seconds)
     print(json.dumps(result))
 
 

@@ -4,8 +4,14 @@ on:
     workflows: [Dense spheroid timings]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      wait_seconds:
+        description: Allow the preceding workflow to finish closing before advancing
+        type: choice
+        options: ['0', '120']
+        default: '0'
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    - cron: '9,24,39,54 * * * *'
 permissions:
   contents: write
   actions: write
@@ -16,7 +22,7 @@ jobs:
   advance:
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -25,4 +31,5 @@ jobs:
       - name: Dispatch the next saved campaign when ready
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python src/queue_campaigns.py
+          QUEUE_WAIT_SECONDS: ${{ inputs.wait_seconds || '0' }}
+        run: python src/queue_campaigns.py --wait-seconds "$QUEUE_WAIT_SECONDS"

@@ -4,14 +4,18 @@ import base64
 import copy
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import queue_campaigns as queue
+import benchmark
 
 
 def request(program, size, parent):
@@ -31,6 +35,36 @@ def state():
             request("prol_spheroid", "0.001", "acousticts:0.001")])
 
 
+def timing_checkpoint(recorded=1, software="prol_spheroid", semimajor=.01, source_ref="a" * 40,
+                      platform="Linux", alter=None):
+    configuration = dict(schema_version=1, geometry=dict(semimajor_m=semimajor, aspect_ratios=[10]),
+        incidences_deg=[90], boundaries=["gas"], software=[software], repetitions=1, warmup=True,
+        frequency=dict(start_hz=1000, stop_hz=3000, step_hz=1000),
+        medium=dict(density_kg_m3=1026.8, sound_speed_m_s=1477.3),
+        materials=dict(gas=dict(density_kg_m3=1.24, sound_speed_m_s=345)),
+        controls={name: {} for name in benchmark.CAPABILITIES}, profiles=dict(pilot={}))
+    cases = benchmark.build_cases(configuration)
+    identity = dict(configuration=configuration, sources=dict(sources={software: dict(sha="a" * 40)}),
+        profile="pilot", cases=[case["case_id"] for case in cases], adapter_hashes={},
+        platform=platform, architecture="x86_64", environment_fingerprint="b" * 64,
+        workload="fresh_process_warmed_distinct_problem_single_prediction")
+    records = {case["case_id"]: dict(case_id=case["case_id"], status="ok", elapsed_seconds=.2,
+        ts_db=-40, source_sha="a" * 40) for case in cases[:recorded]}
+    files = {"manifest.json": dict(identity, fingerprint=benchmark.fingerprint(identity)),
+             "status.json": dict(state="budget_paused" if recorded < len(cases) else "complete",
+                                 planned=len(cases), recorded=recorded),
+             "results.json": benchmark.summarize(cases, records, {}),
+             "benchmark-source.json": dict(schema_version=1, repository="owner/repo", source_ref=source_ref),
+             **{f"records/{key}.json": value for key, value in records.items()}}
+    if alter:
+        alter(files)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, value in files.items():
+            archive.writestr(name, json.dumps(value))
+    return output.getvalue()
+
+
 class FakeAPI:
     repository = "owner/repo"
 
@@ -45,6 +79,8 @@ class FakeAPI:
         self.empty_receipt = False
         self.ref_sha = "a" * 40
         self.disabled = False
+        self.archives = {}
+        self.downloads = []
 
     def run(self, identity, inputs=None):
         return dict(id=identity, status="completed", conclusion="success", event="workflow_dispatch",
@@ -92,11 +128,26 @@ class FakeAPI:
         self.runs[identity].update(status="completed", conclusion=conclusion)
         self.artifacts[identity] = [dict(name=artifact, expired=False)] if artifact else []
 
+    def finish_predictions(self, identity, recorded=1, **kwargs):
+        self.finish(identity)
+        self.artifacts[identity][0]["id"] = identity * 100
+        self.archives[identity * 100] = timing_checkpoint(recorded=recorded, **kwargs)
+
+    def archive(self, identity):
+        self.downloads.append(identity)
+        return self.archives[identity]
+
     def dispatches(self):
         return [body for method, path, body in self.calls if method == "POST" and path.endswith("/dispatches")]
 
 
 class QueueTests(unittest.TestCase):
+    def completing_api(self):
+        saved = state()
+        saved["requests"][0]["finish_before_next"] = True
+        saved["requests"][0]["inputs"]["continuation_platform"] = "ubuntu-latest"
+        return FakeAPI(saved)
+
     def test_complete_sequence_resolves_same_size_parent_and_disables_controller(self):
         api = FakeAPI()
         receipts = []
@@ -291,6 +342,174 @@ class QueueTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "changed concurrently"):
             queue.advance(api)
         self.assertFalse(api.dispatches())
+
+    def test_finish_gate_extends_same_software_until_complete_and_preserves_receipt_history(self):
+        api = self.completing_api()
+        self.assertEqual(queue.advance(api)["run_id"], 101)
+        for previous, recorded in ((101, 1), (102, 2)):
+            api.finish_predictions(previous, recorded)
+            result = queue.advance(api)
+            self.assertEqual(result["key"], "prol_spheroid:0.01")
+            self.assertEqual(result["run_id"], previous + 1)
+            receipt = api.state["dispatched"][result["key"]]
+            self.assertEqual(receipt["recorded_before"], recorded)
+            self.assertEqual([item["run_id"] for item in receipt["history"]], list(range(101, previous + 1)))
+            self.assertTrue(all("history" not in item for item in receipt["history"]))
+            self.assertEqual(receipt["inputs"]["resume_run_id"], str(previous))
+            self.assertEqual(receipt["inputs"]["continuation_platform"], "ubuntu-latest")
+            self.assertEqual(receipt["inputs"]["refresh_software"], "prol_spheroid")
+            self.assertNotIn("finish_before_next", receipt["inputs"])
+            self.assertEqual(queue.advance(api)["status"], "waiting")
+        api.finish_predictions(103, 3)
+        result = queue.advance(api)
+        self.assertEqual(result["key"], "echosms:0.01")
+        self.assertEqual(api.dispatches()[-1]["inputs"]["resume_run_id"], "103")
+        self.assertEqual(len(api.dispatches()), 4)
+
+    def test_last_request_is_not_complete_until_all_predictions_are_saved(self):
+        api = self.completing_api()
+        api.state["requests"] = api.state["requests"][:1]
+        queue.advance(api)
+        api.finish_predictions(101, 1)
+        self.assertEqual(queue.advance(api)["status"], "dispatched")
+        self.assertFalse(api.disabled)
+        api.finish_predictions(102, 3)
+        self.assertEqual(queue.advance(api)["status"], "complete")
+        self.assertTrue(api.disabled)
+        self.assertEqual(len(api.dispatches()), 2)
+
+    def test_no_progress_or_lost_records_pause_instead_of_repeating_empty_runs(self):
+        for first, second in ((0, 0), (1, 1), (2, 1)):
+            with self.subTest(first=first, second=second):
+                api = self.completing_api()
+                queue.advance(api)
+                api.finish_predictions(101, first)
+                queue.advance(api)
+                api.finish_predictions(102, second)
+                result = queue.advance(api)
+                self.assertEqual(result["status"], "paused")
+                self.assertIn("no saved predictions", result["reason"])
+                self.assertEqual(queue.advance(api)["status"], "paused")
+                self.assertEqual(len(api.dispatches()), 2)
+
+    def test_completion_checks_actual_checkpoint_inputs_sources_platform_and_records(self):
+        for kwargs in (dict(software="echosms"), dict(semimajor=.07), dict(source_ref="b" * 40),
+                       dict(platform="Windows"), dict(alter=lambda files: files["status.json"].update(recorded=3))):
+            with self.subTest(kwargs=kwargs):
+                api = self.completing_api()
+                queue.advance(api)
+                api.finish_predictions(101, **kwargs)
+                result = queue.advance(api)
+                self.assertEqual(result["status"], "paused")
+                self.assertIn("Cannot verify", result["reason"])
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_completion_downloads_only_selected_platform_and_requires_its_checkpoint(self):
+        api = self.completing_api()
+        queue.advance(api)
+        api.finish_predictions(101)
+        api.artifacts[101].append(dict(id=999, name="results-windows-latest", expired=False))
+        api.archives[999] = b"corrupt unrelated checkpoint"
+        self.assertEqual(queue.advance(api)["status"], "dispatched")
+        self.assertEqual(api.downloads, [10100])
+        api.finish(102, artifact="results-windows-latest")
+        api.artifacts[102][0]["id"] = 999
+        self.assertEqual(queue.advance(api)["status"], "paused")
+        self.assertEqual(api.downloads, [10100])
+
+    def test_failed_or_cancelled_continuation_never_retries_automatically(self):
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                api = self.completing_api()
+                queue.advance(api)
+                api.finish_predictions(101)
+                queue.advance(api)
+                api.finish(102, conclusion)
+                self.assertEqual(queue.advance(api)["status"], "paused")
+                self.assertEqual(len(api.dispatches()), 2)
+
+    def test_lost_continuation_receipt_recovers_history_without_second_post(self):
+        api = self.completing_api()
+        queue.advance(api)
+        original = copy.deepcopy(api.state["dispatched"]["prol_spheroid:0.01"])
+        api.finish_predictions(101, 1)
+        api.dispatch_error = TimeoutError("Accepted response lost")
+        api.accept_before_error = True
+        with self.assertRaises(TimeoutError):
+            queue.advance(api)
+        self.assertEqual(api.state["dispatch_intent"]["continuation_of"], 101)
+        self.assertEqual(api.state["dispatch_intent"]["recorded_before"], 1)
+        self.assertEqual(api.state["dispatched"]["prol_spheroid:0.01"], original)
+        self.assertEqual(queue.advance(api)["run_id"], 102)
+        receipt = api.state["dispatched"]["prol_spheroid:0.01"]
+        self.assertEqual(receipt["history"], [original])
+        self.assertNotIn("dispatch_intent", api.state)
+        self.assertEqual(queue.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 2)
+
+    def test_completion_gate_and_continuation_history_metadata_are_validated(self):
+        for value in ("true", 1, None):
+            api = self.completing_api()
+            api.state["requests"][0]["finish_before_next"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "boolean"):
+                queue.advance(api)
+        api = self.completing_api()
+        api.state["requests"][0]["inputs"]["continuation_platform"] = "Keep saved platforms"
+        with self.assertRaisesRegex(ValueError, "explicit runner"):
+            queue.advance(api)
+        api = self.completing_api()
+        queue.advance(api)
+        api.finish_predictions(101)
+        queue.advance(api)
+        api.state["dispatched"]["prol_spheroid:0.01"]["history"][0]["run_id"] = 102
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            queue.advance(api)
+
+    def test_short_wait_retries_only_active_predecessor_and_never_a_dispatch(self):
+        api = FakeAPI()
+        waiting = dict(status="waiting", run_id=100)
+        dispatched = dict(status="dispatched", run_id=101)
+        with patch.object(queue, "advance", side_effect=[waiting, waiting, dispatched]) as advance, \
+                patch.object(queue.time, "monotonic", side_effect=[0, 0, 5, 10]), \
+                patch.object(queue.time, "sleep") as sleep:
+            self.assertEqual(queue.advance_when_ready(api, 10), dispatched)
+            self.assertEqual(advance.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 5])
+        for status in ("dispatched", "paused", "blocked", "complete"):
+            with self.subTest(status=status), patch.object(queue, "advance", return_value=dict(status=status)) as advance, \
+                    patch.object(queue.time, "sleep") as sleep:
+                self.assertEqual(queue.advance_when_ready(api, 120)["status"], status)
+                advance.assert_called_once_with(api)
+                sleep.assert_not_called()
+
+    def test_wait_has_bounded_duration_and_default_never_sleeps(self):
+        api = FakeAPI()
+        waiting = dict(status="waiting", run_id=100)
+        with patch.object(queue, "advance", return_value=waiting) as advance, \
+                patch.object(queue.time, "monotonic", side_effect=[0, 0, 4, 6]), \
+                patch.object(queue.time, "sleep") as sleep:
+            self.assertEqual(queue.advance_when_ready(api, 6), waiting)
+            self.assertEqual(advance.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 2])
+        api.runs[100]["status"] = "in_progress"
+        with patch.object(queue.time, "sleep") as sleep:
+            self.assertEqual(queue.advance_when_ready(api)["status"], "waiting")
+            sleep.assert_not_called()
+        for value in (-1, 121, "10", True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                queue.advance_when_ready(api, value)
+
+    def test_cli_network_budget_reserves_checkpoint_verification_after_waiting(self):
+        for wait_seconds in (0, 120):
+            arguments = ["queue_campaigns.py", "--repository", "owner/repo", "--wait-seconds", str(wait_seconds)]
+            with self.subTest(wait_seconds=wait_seconds), patch.object(sys, "argv", arguments), \
+                    patch.dict(os.environ, GITHUB_TOKEN="fixture-token"), \
+                    patch.object(queue, "GitHub") as client, \
+                    patch.object(queue, "advance_when_ready", return_value=dict(status="waiting")) as advance, \
+                    patch("builtins.print"):
+                queue.main()
+                client.assert_called_once_with("owner/repo", "fixture-token", timeout_seconds=300 + wait_seconds)
+                advance.assert_called_once_with(client.return_value, wait_seconds)
 
 
 if __name__ == "__main__":

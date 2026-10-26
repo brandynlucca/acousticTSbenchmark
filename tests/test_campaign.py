@@ -237,6 +237,50 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result["platforms"], ["ubuntu-latest", "windows-latest"])
         self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2, "windows-latest": 3})
 
+    def test_selected_resume_platform_ignores_other_artifacts_and_unstarted_jobs(self):
+        linux, original = checkpoint(source_ref="a" * 40)
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-windows-latest")]
+        api, _ = self.api(entries, {1: linux, 2: b"broken Windows artifact"})
+        previous_request = api.request.side_effect
+        api.request.side_effect = lambda method, path: (dict(jobs=[
+            dict(name=f"benchmark ({platform})", steps=None) for platform in campaign.PLATFORMS])
+            if "/jobs?" in path else previous_request(method, path))
+        result = self.resolve(dict(mode="resume", resume_run_id="123",
+                                   continuation_platform="ubuntu-latest"), api)
+        self.assertEqual(result["platforms"], ["ubuntu-latest"])
+        self.assertEqual(result["configuration"], original)
+        self.assertEqual(result["source_ref"], "a" * 40)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+        self.assertEqual(result["resume_artifacts"], {"ubuntu-latest": "results-ubuntu-latest"})
+        api.archive.assert_called_once_with(1)
+
+    def test_selected_resume_platform_requires_its_own_available_checkpoint(self):
+        linux, _ = checkpoint()
+        entries = [dict(id=1, name="results-ubuntu-latest"),
+                   dict(id=2, name="results-windows-latest", expired=True)]
+        api, _ = self.api(entries, {1: linux})
+        for selection in ("windows-latest", "macos-latest"):
+            with self.subTest(selection=selection), self.assertRaisesRegex(ValueError, selection):
+                self.resolve(dict(mode="resume", resume_run_id="123", continuation_platform=selection), api)
+        api.archive.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "resume_artifact"):
+            self.resolve(dict(mode="resume", resume_run_id="123", continuation_platform="windows-latest",
+                              resume_artifact="results-ubuntu-latest"), api)
+        for selection in (None, [], "all", "ubuntu"):
+            with self.subTest(selection=selection), self.assertRaisesRegex(ValueError, "continuation_platform"):
+                self.resolve(dict(mode="resume", resume_run_id="123", continuation_platform=selection), api)
+        api.archive.assert_not_called()
+
+    def test_explicit_keep_saved_platforms_preserves_all_platforms(self):
+        linux, _ = checkpoint()
+        windows, _ = checkpoint("windows-latest", count=3)
+        api, _ = self.api([dict(id=1, name="results-ubuntu-latest"),
+                          dict(id=2, name="results-windows-latest")], {1: linux, 2: windows})
+        result = self.resolve(dict(mode="resume", resume_run_id="123",
+                                   continuation_platform="Keep saved platforms"), api)
+        self.assertEqual(result["platforms"], ["ubuntu-latest", "windows-latest"])
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2, "windows-latest": 3})
+
     def test_newer_attempt_checkpoint_beats_old_final_and_explicit_artifact_selects_one_platform(self):
         entries = [dict(id=9, name="checkpoint-ubuntu-latest-1-2", created_at="2026-02-02"),
                    dict(id=1, name="results-ubuntu-latest", created_at="2026-02-01"),
@@ -677,6 +721,31 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["windows-latest"]["rows"]}, {122})
         self.assertEqual({row["retained_from_run_id"] for row in result["_retained_payloads"]["ubuntu-latest"]["rows"]}, {123})
 
+    def test_refresh_single_platform_does_not_traverse_omitted_platform_ancestry(self):
+        api = self.ancestry_api(mismatch=True)
+        result = self.resolve(dict(mode="refresh", resume_run_id="123",
+                                   continuation_platform="ubuntu-latest"), api)
+        self.assertEqual(result["platforms"], ["ubuntu-latest"])
+        self.assertEqual(result["retained_by_platform"], {"ubuntu-latest": 2})
+        self.assertEqual(set(result["_retained_payloads"]), {"ubuntu-latest"})
+        api.archive.assert_called_once_with(1)
+        self.assertFalse(any("/runs/122" in call.args[1] for call in api.request.call_args_list))
+
+    def test_refresh_platform_filter_precedes_validation_and_rejects_missing_checkpoint(self):
+        content, _ = checkpoint(count=4)
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-windows-latest")]
+        api, _ = self.api(entries, {1: content, 2: b"corrupt unrelated checkpoint"})
+        result = self.resolve(dict(mode="refresh", resume_run_id="123",
+                                   continuation_platform="ubuntu-latest"), api)
+        self.assertEqual(result["platforms"], ["ubuntu-latest"])
+        self.assertEqual(result["retained_by_platform"], {"ubuntu-latest": 2})
+        api.archive.assert_called_once_with(1)
+        api.archive.reset_mock()
+        with self.assertRaisesRegex(ValueError, "macos-latest"):
+            self.resolve(dict(mode="refresh", resume_run_id="123",
+                              continuation_platform="macos-latest"), api)
+        api.archive.assert_not_called()
+
     def test_refresh_refuses_ancestral_configuration_mismatch(self):
         with self.assertRaisesRegex(ValueError, "different physical campaign"):
             self.resolve(dict(mode="refresh", resume_run_id="123"), self.ancestry_api(mismatch=True))
@@ -863,6 +932,29 @@ class ExtendTests(unittest.TestCase):
         cases = benchmark.build_cases(result["configuration"], result["profile"], ["prol_spheroid"], 3)
         self.assertEqual(refresh.validate_reused_records(sidecar, cases, self.lock, "Linux", self.runtime),
                          sidecar["reused_records"])
+
+    def test_extend_single_platform_preserves_original_predictions_and_comparisons(self):
+        content = self.source()
+        entries = [dict(id=1, name="results-ubuntu-latest"), dict(id=2, name="results-windows-latest")]
+        api, _ = self.api(entries, {1: content, 2: b"invalid omitted platform"})
+        previous_request = api.request.side_effect
+        api.request.side_effect = lambda method, path: (dict(jobs=[
+            dict(name=f"benchmark ({platform})", steps=None) for platform in campaign.PLATFORMS])
+            if "/jobs?" in path else previous_request(method, path))
+        result = refresh.resolve_refresh(dict(mode="extend", resume_run_id="123",
+            refresh_software="acousticts", continuation_platform="ubuntu-latest"),
+            "owner/repo", "e" * 40, api, sources=self.lock)
+        self.assertEqual(result["platforms"], ["ubuntu-latest"])
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+        self.assertEqual(result["retained_by_platform"], {"ubuntu-latest": 4})
+        api.archive.assert_called_once_with(1)
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        original = {row["case_id"]: row for row in campaign.read_checkpoint(content)[0]["results.json"]}
+        for identity, record in sidecar["reused_records"].items():
+            expected = {key: value for key, value in original[identity].items()
+                        if not key.startswith("reference_") and key != "delta_ts_db"}
+            self.assertEqual(record, dict(expected, measurement_origin_run_id=123))
+        self.assertEqual({row["software"] for row in sidecar["rows"]}, {"prol_spheroid", "echosms"})
 
     def test_extend_after_failed_export_keeps_saved_and_unexported_predictions(self):
         def interrupted(files):

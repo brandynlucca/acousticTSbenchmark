@@ -9,7 +9,7 @@ on:
         options: [new, resume, extend, refresh, prepare]
         default: new
       platform:
-        description: New-run platform (continuations restore original platforms and settings)
+        description: Platform for new benchmarks or environment preparation
         type: choice
         options: [ubuntu-latest, windows-latest, macos-latest, all]
         default: ubuntu-latest
@@ -60,6 +60,11 @@ on:
         description: Previous run ID for resume, extend, or refresh (restores the saved grid)
         type: string
         default: ''
+      continuation_platform:
+        description: Platform for resume, extend, or refresh (other saved results remain available)
+        type: choice
+        options: ['Keep saved platforms', ubuntu-latest, windows-latest, macos-latest]
+        default: Keep saved platforms
       refresh_software:
         description: Selected software CSV for extend or refresh (other results are retained)
         type: string
@@ -91,6 +96,30 @@ concurrency:
   cancel-in-progress: false
   queue: max
 jobs:
+  notify-queue:
+    if: ${{ always() && inputs.mode != 'prepare' }}
+    needs: [matrix, benchmark, references, comparisons]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Wake the saved benchmark queue after results are saved
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          path = f"repos/{os.environ['GH_REPO']}/actions/workflows/queue.yml"
+          workflow = json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+          if workflow['state'] == 'active':
+              subprocess.run(['gh', 'workflow', 'run', 'queue.yml', '--ref', 'main',
+                              '-f', 'wait_seconds=120'], check=True)
+          else:
+              print('Saved benchmark queue is disabled')
+          PY
   comparisons:
     if: ${{ always() && inputs.mode != 'prepare' }}
     needs: [benchmark, references]

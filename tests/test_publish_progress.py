@@ -60,20 +60,24 @@ class ProgressTests(unittest.TestCase):
                        provenance=[dict(run_id=11, manifest_fingerprint="b" * 64)])
         return active, sidecar
 
-    def setup_baseline_fixture(self):
+    def setup_baseline_fixture(self, software="acousticts"):
         import benchmark
         active, sidecar = self.retained_fixture()
         config = self.campaign()
         config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        config["controls"].setdefault(software, {})
+        active = [dict(case, status="pending") for case in benchmark.build_cases(config, "pilot", [software], 1)]
         sources = dict(sources={name: dict(sha="a" * 40) for name in benchmark.CAPABILITIES})
-        original_cases = benchmark.build_cases(config, "pilot", ["acousticts", "echosms"], 1)
+        original_cases = benchmark.build_cases(config, "pilot", [software, "echosms"], 1)
         identity = dict(configuration=config, sources=sources, profile="pilot",
             cases=[row["case_id"] for row in original_cases], adapter_hashes=benchmark.adapter_hashes(),
             platform="Linux", architecture="x86_64", environment_fingerprint="b" * 64,
             workload="fresh_process_warmed_distinct_problem_single_prediction")
         environment = dict(platform="Linux", architecture="x86_64", threads=1,
-            runtime=dict(source_shas=dict(acousticts="a" * 40),
-                         environment_compatibility=dict(r_packages=dict(R="4.5.2"))))
+            runtime=dict(source_shas={software: "a" * 40},
+                         environment_compatibility=dict(r_packages=dict(R="4.5.2"),
+                             python_packages="numpy==2.2.6\nscipy==1.15.3\npandas==2.3.0\nmatplotlib==3.10.3\n",
+                             prol_compiler="GNU Fortran 14.2.0", prol_flags=["-O2"])))
         environment_id = benchmark.fingerprint(environment)
         sidecar["provenance"] = [dict(run_id=11,
             manifest=dict(identity, fingerprint=benchmark.fingerprint(identity)),
@@ -82,7 +86,7 @@ class ProgressTests(unittest.TestCase):
         seed = dict(active[0], status="ok", source_sha="a" * 40, elapsed_seconds=.1, ts_db=-29,
                     invocation_id="preserved", measurement_origin_run_id=11)
         sidecar["reused_records"] = {seed["case_id"]: seed}
-        settings = dict(configuration=config, profile="pilot", software="acousticts", repetitions=1,
+        settings = dict(configuration=config, profile="pilot", software=software, repetitions=1,
                         source_ref="a" * 40, planned_cases=2, sources_fingerprint=benchmark.fingerprint(sources))
         metadata = dict(schema_version=1, repository="owner/repo", run_id=12, platform="ubuntu-latest",
                         settings=settings, sources=sources, reused_count=1,
@@ -218,6 +222,81 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(payload["retained_count"], 2)
         self.assertEqual({row["software"] for row in payload["rows"]}, {"echosms"})
         self.assertFalse((self.directory / "results.json").exists())
+
+    def test_setup_keeps_selected_prol_measurements_visible_before_first_new_prediction(self):
+        import benchmark
+        files = self.setup_baseline_fixture("prol_spheroid")
+        sidecar = files["retained-results.json"]
+        seed = next(iter(sidecar["reused_records"].values()))
+        seed.update(memory_delta_peak_bytes=4096, memory_baseline_rss_bytes=1048576,
+                    memory_peak_rss_bytes=1052672, memory_method="sampled_process_tree_rss_above_baseline",
+                    memory_status="ok")
+        for name, value in files.items():
+            benchmark.atomic_json(self.directory / name, value)
+        before = {name: (self.directory / name).read_bytes() for name in files}
+        metadata = files["refresh-campaign.json"]
+        arguments = ["publish_progress.py", "--repository", "owner/repo", "--platform", "ubuntu-latest",
+                     "--directory", str(self.directory), "--run-id", "124", "--state", "setup",
+                     "--config", str(self.config_file(metadata["settings"]["configuration"])), "--profile", "pilot",
+                     "--software", "prol_spheroid", "--repetitions", "1"]
+        original_read = progress.read_json
+        with patch.object(sys, "argv", arguments), patch.object(progress, "GitHub"), \
+                patch.object(progress, "read_json", side_effect=lambda path: metadata["sources"]
+                    if Path(path) == progress.ROOT / "sources.lock.json" else original_read(path)), \
+                patch.object(progress, "publish", return_value=True) as publish:
+            progress.main()
+        payload = publish.call_args.args[1]
+        self.assertEqual(payload["state"], "setup")
+        self.assertEqual(payload["status"]["recorded"], 1)
+        self.assertEqual(payload["status"]["outcomes"], dict(ok=1, pending=1))
+        self.assertEqual(payload["active_software"], ["prol_spheroid"])
+        self.assertEqual(payload["retained_count"], 2)
+        active = [row for row in payload["rows"] if row["software"] == "prol_spheroid"]
+        self.assertEqual(len(active), 1)
+        for key in ("elapsed_seconds", "ts_db", "source_sha", "memory_delta_peak_bytes",
+                    "memory_baseline_rss_bytes", "memory_peak_rss_bytes"):
+            self.assertEqual(active[0][key], seed[key])
+        retained = [row for row in payload["rows"] if row["software"] == "echosms"]
+        for row, original in zip(retained, sidecar["rows"]):
+            for key in ("elapsed_seconds", "ts_db", "source_sha", "retained_from_run_id"):
+                self.assertEqual(row[key], original[key])
+        self.assertEqual({name: (self.directory / name).read_bytes() for name in files}, before)
+        self.assertFalse((self.directory / "results.json").exists())
+
+    def test_setup_seed_requires_matching_saved_record_source_platform_and_prediction_inputs(self):
+        import benchmark
+        for change in ("missing", "elapsed", "source", "platform", "prediction", "provenance"):
+            with self.subTest(change=change):
+                files = self.setup_baseline_fixture("prol_spheroid")
+                metadata = files["refresh-campaign.json"]
+                sidecar = files["retained-results.json"]
+                record_name = next(name for name in files if name.startswith("records/"))
+                for name, value in files.items():
+                    benchmark.atomic_json(self.directory / name, value)
+                config = metadata["settings"]["configuration"]
+                rows = progress.pending_setup_cases(self.config_file(config), "pilot", "prol_spheroid", 1)
+                selected_platform = "ubuntu-latest"
+                sources = copy.deepcopy(metadata["sources"])
+                if change == "missing":
+                    (self.directory / record_name).unlink()
+                elif change == "elapsed":
+                    record = copy.deepcopy(files[record_name])
+                    record["elapsed_seconds"] = 999
+                    benchmark.atomic_json(self.directory / record_name, record)
+                elif change == "source":
+                    sources["sources"]["prol_spheroid"]["sha"] = "b" * 40
+                elif change == "platform":
+                    selected_platform = "windows-latest"
+                elif change == "prediction":
+                    rows[0]["incidence_deg"] = 37
+                else:
+                    sidecar["provenance"][0]["manifest"]["workload"] = "different"
+                    benchmark.atomic_json(self.directory / "retained-results.json", sidecar)
+                original_read = progress.read_json
+                with patch.object(progress, "read_json", side_effect=lambda path: sources
+                        if Path(path) == progress.ROOT / "sources.lock.json" else original_read(path)), \
+                        self.assertRaises(ValueError):
+                    progress.setup_measurement_rows(self.directory, rows, selected_platform)
 
     def test_artifact_republication_preserves_retained_curves_and_active_counts(self):
         import benchmark
