@@ -4,8 +4,8 @@
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
-  "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f",
-  "dispatch_ref": "benchmark-ubuntu-001-20261026",
+  "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
+  "dispatch_ref": "benchmark-progress-60s-20261026",
   "dispatched": {
     "acousticts:0.01": {
       "run_id": 40340271674,
@@ -18,7 +18,8 @@
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
         "resume_run_id": "40265517028"
-      }
+      },
+      "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f"
     },
     "prol_spheroid:0.01": {
       "run_id": 40348321189,
@@ -31,7 +32,8 @@
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
         "resume_run_id": "40340271674"
-      }
+      },
+      "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f"
     }
   },
   "recovery": {
@@ -454,5 +456,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-26T15:20:18.881424+00:00"
+  "updated_at": "2026-10-26T18:18:14.110754+00:00"
 }
