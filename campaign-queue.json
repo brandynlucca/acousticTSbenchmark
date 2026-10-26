@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
   "dispatch_ref": "benchmark-series-20261025",
@@ -337,5 +337,6 @@
     "liquid_spheroid:0.1": 40171498995,
     "liquid_spheroid:0.5": 40171501026
   },
-  "updated_at": "2026-10-26T04:56:11.260649+00:00"
+  "updated_at": "2026-10-26T04:56:12.329853+00:00",
+  "reason": "Repairing benchmark startup failures"
 }
