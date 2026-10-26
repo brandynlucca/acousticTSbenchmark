@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "paused",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
   "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
   "dispatch_ref": "benchmark-series-20261025",
@@ -302,6 +302,18 @@
         "refresh_software": "prol_spheroid",
         "resume_run_id": "40170086146"
       }
+    },
+    "echosms:0.01": {
+      "run_id": 40265517028,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40265517028",
+      "inputs": {
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "mode": "extend",
+        "refresh_software": "echosms",
+        "resume_run_id": "40209471033"
+      }
     }
   },
   "cancelled_runs": {
@@ -325,19 +337,5 @@
     "liquid_spheroid:0.1": 40171498995,
     "liquid_spheroid:0.5": 40171501026
   },
-  "dispatch_intent": {
-    "key": "echosms:0.01",
-    "inputs": {
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "case_order": "Complete each frequency sweep",
-      "mode": "extend",
-      "refresh_software": "echosms",
-      "resume_run_id": "40209471033"
-    },
-    "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
-    "created_at": "2026-10-26T03:44:04.264233+00:00"
-  },
-  "updated_at": "2026-10-26T04:52:46.207170+00:00",
-  "reason": "Investigating failed benchmark startup and preserving completed measurements"
+  "updated_at": "2026-10-26T04:56:11.260649+00:00"
 }
