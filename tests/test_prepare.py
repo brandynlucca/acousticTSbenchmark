@@ -31,6 +31,28 @@ class PreparationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_windows_prol_uses_same_compiler_without_r_setup(self):
+        compiler = self.path / "x86_64-w64-mingw32.static.posix/bin/gfortran.exe"
+        compiler.parent.mkdir(parents=True)
+        compiler.touch()
+        with patch.dict(os.environ, {"RTOOLS45_HOME": str(self.path), "FC": "gfortran", "PATH": "other"}), \
+                patch.object(prepare.subprocess, "run", return_value=SimpleNamespace(
+                    stdout="GNU Fortran (GCC) 14.3.0\nCopyright")):
+            self.assertEqual(prepare.configure_windows_prol(), compiler)
+            self.assertEqual(os.environ["FC"], str(compiler))
+            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(compiler.parent))
+
+    def test_windows_prol_rejects_silent_compiler_change(self):
+        compiler = self.path / "x86_64-w64-mingw32.static.posix/bin/gfortran.exe"
+        compiler.parent.mkdir(parents=True)
+        compiler.touch()
+        with patch.dict(os.environ, {"RTOOLS45_HOME": str(self.path), "FC": "gfortran"}), \
+                patch.object(prepare.subprocess, "run", return_value=SimpleNamespace(
+                    stdout="GNU Fortran (GCC) 15.0.0\nCopyright")):
+            with self.assertRaisesRegex(RuntimeError, "requires Rtools GCC 14.3.0"):
+                prepare.configure_windows_prol()
+            self.assertEqual(os.environ["FC"], "gfortran")
+
     def test_setup_timeout_terminates_compiler_descendants(self):
         ready, escaped = self.path / "child.ready", self.path / "child.escaped"
         child = ("from pathlib import Path; import time; "
@@ -320,6 +342,7 @@ class PreparationTests(unittest.TestCase):
         with patch.object(prepare, "obtain_source", side_effect=self.fake_source), \
                 patch.object(prepare, "execute", side_effect=fake_execute), \
                 patch.object(prepare, "compile_prol", return_value=native), \
+                patch.object(prepare, "configure_windows_prol"), \
                 patch.object(sys, "argv", ["prepare.py", "--directory", str(self.path),
                                          "--software", "prol_spheroid,echosms"]):
             prepare.main()

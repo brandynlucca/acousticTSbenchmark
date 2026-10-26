@@ -29,6 +29,10 @@ ROW_FIELDS += ("memory_delta_peak_bytes", "memory_baseline_rss_bytes", "memory_p
                "memory_sample_interval_seconds", "memory_samples", "memory_status", "memory_method")
 ROW_FIELDS += ("source_sha", "measurement_role", "retained_from_run_id")
 MAX_JSON_BYTES = 128 * 1024 * 1024
+# Older continuations embedded the full reference plan in every provenance
+# manifest. Keep those saved measurements readable while new baselines omit
+# that duplicate plan. Other progress metadata retains its smaller bound.
+MAX_RETAINED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
@@ -129,6 +133,39 @@ class GitHub:
             return self.read(response, MAX_ARCHIVE_BYTES)
 
 
+def json_size_limit(name):
+    return MAX_RETAINED_BYTES if name == "retained-results.json" else MAX_JSON_BYTES
+
+
+def read_retained(path):
+    path = Path(path)
+    if path.stat().st_size > MAX_RETAINED_BYTES:
+        raise ValueError("Retained measurements exceed the supported size")
+    return read_json(path)
+
+
+def write_retained(path, value):
+    """Reject oversized baselines before installing them or starting workers."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    size = 0
+    try:
+        with temporary.open("wb") as stream:
+            encoder = json.JSONEncoder(allow_nan=False, separators=(",", ":"))
+            for chunk in encoder.iterencode(value):
+                encoded = chunk.encode("utf-8")
+                size += len(encoded)
+                if size > MAX_RETAINED_BYTES:
+                    raise ValueError("Retained measurements exceed the supported size")
+                stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def retained_comparison_rows(sidecar, active_rows, references=None):
     """Validate saved measurements and derive comparisons without changing their provenance."""
     if (not isinstance(sidecar, dict) or sidecar.get("schema_version") != 1 or
@@ -169,11 +206,9 @@ def comparison_rows(directory, rows, references=None):
     path = directory / "retained-results.json"
     if not path.is_file():
         return rows
-    if path.stat().st_size > MAX_JSON_BYTES:
-        raise ValueError("Retained measurements exceed the supported size")
     if references is None and (directory / "references.json").is_file():
         references = load_references(directory / "references.json")
-    return rows + retained_comparison_rows(read_json(path), rows, references)
+    return rows + retained_comparison_rows(read_retained(path), rows, references)
 
 
 def curves_from_rows(rows):
@@ -372,7 +407,7 @@ def artifact_payload(api, platform, run_id, state=None):
             name = PurePosixPath(entry.filename).name
             if name not in ("results.json", "status.json", "retained-results.json", "references.json"):
                 continue
-            if name in values or entry.file_size > MAX_JSON_BYTES:
+            if name in values or entry.file_size > json_size_limit(name):
                 raise ValueError("Ambiguous or oversized progress JSON in artifact")
             values[name] = json.loads(archive.read(entry))
     if "results.json" not in values:

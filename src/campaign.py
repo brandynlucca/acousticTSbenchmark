@@ -15,11 +15,10 @@ import sys
 import zipfile
 
 from benchmark import BOUNDARIES, CAPABILITIES, ROOT, STATUSES, atomic_json, build_cases, fingerprint, read_json
-from publish_progress import GitHub, PLATFORMS
+from publish_progress import GitHub, PLATFORMS, MAX_JSON_BYTES, json_size_limit
 
 
 MAX_CASES = 250_000
-MAX_JSON_BYTES = 128 * 1024 * 1024
 MAX_RECORD_BYTES = 8 * 1024 * 1024
 MAX_SELECTED_BYTES = 512 * 1024 * 1024
 IDENTITY_FIELDS = ("configuration", "sources", "profile", "cases", "adapter_hashes",
@@ -197,7 +196,7 @@ def read_checkpoint(content):
                 "manifest.json", "status.json", "results.json", "benchmark-source.json", "retained-results.json")
             if not metadata and not record:
                 continue
-            maximum = MAX_RECORD_BYTES if record else MAX_JSON_BYTES
+            maximum = MAX_RECORD_BYTES if record else json_size_limit(path.name)
             total += entry.file_size
             if entry.file_size > maximum or total > MAX_SELECTED_BYTES:
                 raise ValueError("Timing artifact JSON exceeds the supported size")

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import queue_campaigns as queue
@@ -136,10 +137,14 @@ class QueueTests(unittest.TestCase):
         queue.advance(api)
         self.assertFalse(api.dispatches())
 
-    def test_failure_with_retained_baseline_can_continue(self):
-        api = FakeAPI()
-        api.finish(100, "failure", "retained-windows-latest")
-        self.assertEqual(queue.advance(api)["status"], "dispatched")
+    def test_unsuccessful_run_pauses_even_with_retained_baseline(self):
+        for conclusion in ("failure", "timed_out", "action_required", "startup_failure", None):
+            with self.subTest(conclusion=conclusion):
+                api = FakeAPI()
+                api.finish(100, conclusion, "retained-windows-latest")
+                self.assertEqual(queue.advance(api)["status"], "paused")
+                self.assertFalse(api.dispatches())
+                self.assertIn("Repair it", api.state["reason"])
 
     def test_no_baseline_or_expired_results_pause(self):
         for entries in ([], [dict(name="environment-ubuntu-latest")],
@@ -149,6 +154,31 @@ class QueueTests(unittest.TestCase):
                 api.artifacts[100] = entries
                 self.assertEqual(queue.advance(api)["status"], "paused")
                 self.assertFalse(api.dispatches())
+
+    def test_explicit_recovery_waits_for_active_run_and_retains_its_baseline(self):
+        saved = state()
+        saved.update(initial_key="echosms_baseline:0.01",
+                     recovery=dict(run_id=100, reason="Fixed compiler selection and retained metadata size"))
+        saved["requests"][0]["parent"] = saved["initial_key"]
+        api = FakeAPI(saved)
+        api.runs[100].update(status="in_progress", conclusion=None)
+        self.assertEqual(queue.advance(api)["status"], "waiting")
+        self.assertFalse(api.dispatches())
+        api.finish(100, "failure")
+        self.assertEqual(queue.advance(api)["status"], "dispatched")
+        self.assertEqual(api.dispatches()[0]["inputs"]["resume_run_id"], "100")
+        # An explicit repair never authorizes ignoring a subsequent failure.
+        api.finish(101, "failure")
+        self.assertEqual(queue.advance(api)["status"], "paused")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_recovery_cannot_bypass_cancellation_or_missing_artifacts(self):
+        for conclusion, artifact in (("cancelled", "results-ubuntu-latest"), ("failure", None)):
+            api = FakeAPI()
+            api.state["recovery"] = dict(run_id=100, reason="Explicit repair")
+            api.finish(100, conclusion, artifact)
+            self.assertEqual(queue.advance(api)["status"], "paused")
+            self.assertFalse(api.dispatches())
 
     def test_dispatch_intent_is_saved_before_post_and_timeout_never_retried(self):
         api = FakeAPI()
@@ -175,6 +205,37 @@ class QueueTests(unittest.TestCase):
         self.assertNotIn("dispatch_intent", api.state)
         self.assertEqual(len(api.dispatches()), 1)
         self.assertEqual(queue.advance(api)["status"], "waiting")
+
+    def test_delayed_dispatch_metadata_retries_only_reads(self):
+        api = FakeAPI()
+        original = api.request
+        reads = []
+        def delayed(method, path, body=None):
+            result = original(method, path, body)
+            if method == "GET" and path == "/actions/runs/101":
+                reads.append(path)
+                if len(reads) < 3:
+                    result["display_title"] = "Dense spheroid timings"
+            return result
+        api.request = delayed
+        with patch.object(queue.time, "sleep"):
+            self.assertEqual(queue.advance(api)["status"], "dispatched")
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_persistent_wrong_dispatch_metadata_blocks_without_redispatch(self):
+        api = FakeAPI()
+        original = api.request
+        def wrong(method, path, body=None):
+            result = original(method, path, body)
+            if method == "GET" and path == "/actions/runs/101":
+                result["head_sha"] = "b" * 40
+            return result
+        api.request = wrong
+        with patch.object(queue.time, "sleep"):
+            self.assertEqual(queue.advance(api)["status"], "blocked")
+        self.assertEqual(len(api.dispatches()), 1)
+        self.assertIn("dispatch_intent", api.state)
 
     def test_empty_dispatch_receipt_blocks_then_recovers_existing_run(self):
         api = FakeAPI()

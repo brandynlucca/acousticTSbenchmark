@@ -106,6 +106,55 @@ class ProgressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "metadata"):
                 progress.retained_comparison_rows(sidecar, active)
 
+    def test_large_retained_history_uses_its_own_bound_without_rewriting_saved_data(self):
+        active, sidecar = self.retained_fixture()
+        sidecar["provenance"][0]["legacy_reference_plan"] = "x" * 20000
+        path = self.directory / "retained-results.json"
+        original = json.dumps(sidecar, indent=2).encode()
+        path.write_bytes(original)
+        with patch.object(progress, "MAX_JSON_BYTES", 10000), \
+                patch.object(progress, "MAX_RETAINED_BYTES", len(original)):
+            combined = progress.comparison_rows(self.directory, active)
+            self.assertEqual(len(combined), 4)
+        self.assertEqual(path.read_bytes(), original)
+        with patch.object(progress, "MAX_RETAINED_BYTES", len(original) - 1):
+            with self.assertRaisesRegex(ValueError, "supported size"):
+                progress.comparison_rows(self.directory, active)
+
+    def test_retained_writer_is_compact_and_rejects_oversize_before_replacing_a_baseline(self):
+        _, sidecar = self.retained_fixture()
+        path = self.directory / "retained-results.json"
+        progress.write_retained(path, sidecar)
+        encoded = path.read_bytes()
+        self.assertEqual(json.loads(encoded), sidecar)
+        self.assertLess(len(encoded), len(json.dumps(sidecar, indent=2)))
+        with patch.object(progress, "MAX_RETAINED_BYTES", len(encoded) - 1):
+            with self.assertRaisesRegex(ValueError, "supported size"):
+                progress.write_retained(path, sidecar)
+        self.assertEqual(path.read_bytes(), encoded)
+        self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_artifact_progress_accepts_large_legacy_history_but_preserves_the_retained_bound(self):
+        active, sidecar = self.retained_fixture()
+        sidecar["provenance"][0]["legacy_reference_plan"] = "x" * 20000
+        encoded = json.dumps(sidecar).encode()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("results.json", json.dumps(active))
+            archive.writestr("retained-results.json", encoded)
+        api = Mock(repository="owner/repo")
+        api.request.side_effect = lambda method, path: (dict(artifacts=[dict(id=7, name="results-ubuntu-latest")])
+            if "/artifacts?" in path else dict(status="completed", run_attempt=1))
+        api.archive.return_value = stream.getvalue()
+        with patch.object(progress, "MAX_JSON_BYTES", 10000), \
+                patch.object(progress, "MAX_RETAINED_BYTES", len(encoded)):
+            payload = progress.artifact_payload(api, "ubuntu-latest", 12)
+        self.assertEqual(payload["retained_count"], 2)
+        self.assertEqual(payload["status"]["recorded"], 0)
+        with patch.object(progress, "MAX_RETAINED_BYTES", len(encoded) - 1):
+            with self.assertRaisesRegex(ValueError, "oversized"):
+                progress.artifact_payload(api, "ubuntu-latest", 12)
+
     def test_setup_publishes_retained_curves_before_active_results_exist(self):
         _, sidecar = self.retained_fixture()
         (self.directory / "retained-results.json").write_text(json.dumps(sidecar), encoding="utf-8")

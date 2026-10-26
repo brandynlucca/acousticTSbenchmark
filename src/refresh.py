@@ -11,7 +11,7 @@ import re
 import zipfile
 
 from benchmark import atomic_json, build_cases, fingerprint, read_json, ROOT, STATUSES, summarize
-from publish_progress import PLATFORMS, retained_comparison_rows
+from publish_progress import PLATFORMS, json_size_limit, retained_comparison_rows, write_retained
 
 
 def _measurement_adapters(program):
@@ -130,7 +130,7 @@ def validate_reused_records(sidecar, cases, sources, platform=None, runtime=None
 
 def baseline_settings(content, repository, run_id, platform):
     """Recognize an immutable refresh baseline saved before platform setup."""
-    from campaign import MAX_JSON_BYTES, _json, validate_plan_size
+    from campaign import MAX_RECORD_BYTES, MAX_SELECTED_BYTES, _json, validate_plan_size
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         names = archive.namelist()
         if "manifest.json" in names or "refresh-campaign.json" not in names:
@@ -141,10 +141,13 @@ def baseline_settings(content, repository, run_id, platform):
             raise ValueError("Unexpected files in a refresh baseline")
         if len(names) != len(set(names)) or "retained-results.json" not in names:
             raise ValueError("Incomplete or duplicate refresh baseline metadata")
-        values = {}
+        values, total = {}, 0
         for name in ("refresh-campaign.json", "retained-results.json", *sorted(seed_paths)):
             entry = archive.getinfo(name)
-            if entry.file_size > MAX_JSON_BYTES or (entry.external_attr >> 16) & 0o170000 == 0o120000:
+            total += entry.file_size
+            maximum = MAX_RECORD_BYTES if name in seed_paths else json_size_limit(name)
+            if (entry.file_size > maximum or total > MAX_SELECTED_BYTES or
+                    (entry.external_attr >> 16) & 0o170000 == 0o120000):
                 raise ValueError("Invalid refresh baseline file")
             values[name] = _json(archive.read(entry))
     meta, retained = values["refresh-campaign.json"], values["retained-results.json"]
@@ -360,6 +363,21 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         retained_by_platform={p: len(found[p]["rows"]) for p in platforms}, _retained_payloads=found)
 
 
+def compact_provenance(sidecar):
+    """Keep timing evidence without copying a reference request plan at each handoff."""
+    proofs = []
+    for original in sidecar["provenance"]:
+        proof = dict(original)
+        if "reference_requests" in proof.get("manifest", {}):
+            manifest = dict(proof["manifest"])
+            requests = manifest.pop("reference_requests")
+            # Reference plans are not part of the timing manifest identity.
+            # The artifact digest still identifies the full original archive.
+            proof.update(manifest=manifest, reference_requests_fingerprint=fingerprint(requests))
+        proofs.append(proof)
+    return dict(sidecar, provenance=proofs)
+
+
 def write_baselines(result, directory, repository, run_id, sources=None):
     """Save comparison data for every platform before sequential timing starts."""
     sources = read_json(ROOT / "sources.lock.json") if sources is None else sources
@@ -368,12 +386,13 @@ def write_baselines(result, directory, repository, run_id, sources=None):
     settings = {key: result[key] for key in fields}
     settings["sources_fingerprint"] = fingerprint(sources)
     for platform, retained in payloads.items():
+        retained = compact_provenance(retained)
         target = directory / platform
         cases = build_cases(settings["configuration"], settings["profile"],
                             settings["software"].split(","), settings["repetitions"])
         seeds = validate_reused_records(retained, cases, sources,
             platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
-        atomic_json(target / "retained-results.json", retained)
+        write_retained(target / "retained-results.json", retained)
         for identity, record in seeds.items():
             atomic_json(target / "records" / f"{identity}.json", record)
         atomic_json(target / "refresh-campaign.json", dict(schema_version=1, repository=repository,

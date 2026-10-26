@@ -19,6 +19,7 @@ import benchmark
 import campaign
 import resume_order
 import refresh
+import publish_progress as progress
 
 
 def configuration():
@@ -694,6 +695,30 @@ class RefreshTests(unittest.TestCase):
             with self.subTest(altered=altered), self.assertRaises(ValueError):
                 refresh.baseline_settings(self.archive_files(changed), "owner/repo", 124, "ubuntu-latest")
 
+    def test_legacy_retained_size_limit_is_shared_by_baseline_and_checkpoint_readers(self):
+        result, _, _ = self.single_refresh()
+        lock = {"sources": {name: {"sha": "f" * 40} for name in benchmark.CAPABILITIES}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            refresh.write_baselines(result, root, "owner/repo", 124, sources=lock)
+            files = {name: benchmark.read_json(root / "ubuntu-latest" / name)
+                     for name in ("refresh-campaign.json", "retained-results.json")}
+        files["retained-results.json"]["provenance"][0]["legacy_reference_plan"] = "x" * 200000
+        files["refresh-campaign.json"]["retained_fingerprint"] = benchmark.fingerprint(files["retained-results.json"])
+        baseline = self.archive_files(files)
+        checkpoint_content = self.archive_files({"manifest.json": {}, "status.json": {}, "results.json": [],
+            "retained-results.json": files["retained-results.json"]})
+        with patch.object(progress, "MAX_JSON_BYTES", 100000), patch.object(progress, "MAX_RETAINED_BYTES", 300000):
+            settings = refresh.baseline_settings(baseline, "owner/repo", 124, "ubuntu-latest")
+            self.assertEqual(settings["recorded_cases"], 0)
+            restored, _ = campaign.read_checkpoint(checkpoint_content)
+            self.assertEqual(restored["retained-results.json"], files["retained-results.json"])
+        with patch.object(progress, "MAX_RETAINED_BYTES", 200000):
+            with self.assertRaisesRegex(ValueError, "Invalid refresh baseline file"):
+                refresh.baseline_settings(baseline, "owner/repo", 124, "ubuntu-latest")
+            with self.assertRaisesRegex(ValueError, "supported size"):
+                campaign.read_checkpoint(checkpoint_content)
+
     def test_resume_accepts_completed_timing_plus_queued_refresh_baseline(self):
         result, content, _ = self.single_refresh()
         result["platforms"].append("windows-latest")
@@ -823,6 +848,28 @@ class ExtendTests(unittest.TestCase):
                 changed["refresh-campaign.json"]["reused_count"] = 0
             with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "Reused baseline"):
                 refresh.baseline_settings(self.archive_files(changed), "owner/repo", 124, "ubuntu-latest")
+
+    def test_new_baseline_omits_duplicate_reference_plans_without_changing_measurement_evidence(self):
+        def reference_plan(files):
+            files["manifest.json"]["reference_requests"] = [dict(frequency_hz=1000, details="x" * 10000)]
+        result = self.extend(self.source(reference_plan))
+        original = copy.deepcopy(result["_retained_payloads"]["ubuntu-latest"])
+        saved = self.baseline(result)
+        sidecar = saved["retained-results.json"]
+        self.assertEqual(sidecar["rows"], original["rows"])
+        self.assertEqual(sidecar["reused_records"], original["reused_records"])
+        old_proof, new_proof = original["provenance"][0], sidecar["provenance"][0]
+        self.assertEqual(new_proof["environments"], old_proof["environments"])
+        self.assertEqual(new_proof["archive_sha256"], old_proof["archive_sha256"])
+        self.assertEqual(campaign.manifest_identity(new_proof["manifest"]),
+                         campaign.manifest_identity(old_proof["manifest"]))
+        self.assertEqual(new_proof["manifest"]["fingerprint"], old_proof["manifest"]["fingerprint"])
+        self.assertNotIn("reference_requests", new_proof["manifest"])
+        self.assertEqual(new_proof["reference_requests_fingerprint"],
+                         benchmark.fingerprint(old_proof["manifest"]["reference_requests"]))
+        self.assertEqual(refresh.compact_provenance(sidecar), sidecar)
+        settings = refresh.baseline_settings(self.archive_files(saved), "owner/repo", 124, "ubuntu-latest")
+        self.assertEqual(settings["recorded_cases"], 2)
 
     def test_refuses_changed_selected_revision_controls_or_adapter(self):
         for mutation in ("source", "controls", "adapter"):

@@ -448,7 +448,8 @@ def run(args):
     retained_path = directory / "retained-results.json"
     reused_records = {}
     if retained_path.exists():
-        retained = read_json(retained_path)
+        from publish_progress import read_retained
+        retained = read_retained(retained_path)
         identity["retained_fingerprint"] = fingerprint(retained)
         if retained.get("reused_records"):
             from refresh import validate_reused_records

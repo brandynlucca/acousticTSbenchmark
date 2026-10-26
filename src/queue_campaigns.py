@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from urllib.parse import quote
 
 from campaign import artifact_platform
@@ -37,7 +38,15 @@ def validate_state(state, repository):
     ref = state.get("dispatch_ref", "main")
     if not isinstance(ref, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", ref):
         raise ValueError("Queue dispatch ref must be main or an exact tag name")
-    seen = {"acousticts:0.01"}
+    initial_key = state.get("initial_key", "acousticts:0.01")
+    if not isinstance(initial_key, str) or not re.fullmatch(r"[a-z0-9_]+:0\.(?:001|01|07|1|5)", initial_key):
+        raise ValueError("Invalid initial benchmark identity")
+    recovery = state.get("recovery")
+    if recovery is not None and (not isinstance(recovery, dict) or
+            recovery.get("run_id") != state["initial_run_id"] or
+            not isinstance(recovery.get("reason"), str) or not recovery["reason"].strip()):
+        raise ValueError("Recovery must identify the initial failed run and its repair")
+    seen = {initial_key}
     pending = False
     run_ids = {state["initial_run_id"]}
     for request in state["requests"]:
@@ -136,7 +145,7 @@ def has_saved_baseline(api, run_id):
 def resolved_inputs(state, request):
     inputs = dict(request["inputs"])
     if request.get("parent"):
-        identities = {"acousticts:0.01": state["initial_run_id"],
+        identities = {state.get("initial_key", "acousticts:0.01"): state["initial_run_id"],
                       **{key: value["run_id"] for key, value in state["dispatched"].items()}}
         inputs["resume_run_id"] = str(identities[request["parent"]])
     return inputs
@@ -155,8 +164,15 @@ def pause(api, state, sha, reason, status="paused"):
 
 
 def record_receipt(api, state, sha, identity, inputs):
-    run = checked_run(api, identity)
-    if run.get("head_sha") != state["source_ref"] or run.get("display_title") != expected_title(inputs):
+    # GitHub may return the new ID before its title and commit metadata settle.
+    # Retry only the read, never the accepted dispatch.
+    for delay in (0, 1, 2, 4, 8):
+        if delay:
+            time.sleep(delay)
+        run = checked_run(api, identity)
+        if run.get("head_sha") == state["source_ref"] and run.get("display_title") == expected_title(inputs):
+            break
+    else:
         return pause(api, state, sha, "Dispatched run does not match the pinned queue request", "blocked")
     key = state["dispatch_intent"]["key"]
     state["dispatched"][key] = dict(run_id=identity,
@@ -206,6 +222,11 @@ def advance(api):
         return dict(status="waiting", run_id=previous, run_status=run.get("status"))
     if run.get("conclusion") == "cancelled":
         return pause(api, state, sha, f"Benchmark {previous} was cancelled. The sequence is paused")
+    recovering = (index == 0 and state.get("recovery", {}).get("run_id") == previous and
+                  run.get("conclusion") == "failure")
+    if run.get("conclusion") != "success" and not recovering:
+        return pause(api, state, sha,
+                     f"Benchmark {previous} ended with {run.get('conclusion')}. Repair it before advancing")
     if not has_saved_baseline(api, previous):
         return pause(api, state, sha, f"Benchmark {previous} has no available timing checkpoint or retained baseline")
     if index == len(state["requests"]):
@@ -218,7 +239,9 @@ def advance(api):
     if request.get("parent"):
         parent_id = int(inputs["resume_run_id"])
         parent = checked_run(api, parent_id)
-        if (parent.get("status") != "completed" or parent.get("conclusion") == "cancelled" or
+        recover_parent = recovering and parent_id == previous
+        if (parent.get("status") != "completed" or
+                parent.get("conclusion") != "success" and not recover_parent or
                 not has_saved_baseline(api, parent_id)):
             return pause(api, state, sha, f"Required same-size parent {parent_id} is not available for continuation")
     ref = state.get("dispatch_ref", "main")

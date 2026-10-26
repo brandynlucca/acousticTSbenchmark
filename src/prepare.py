@@ -254,6 +254,23 @@ def obtain_source(name, source, directory):
     return destination
 
 
+def configure_windows_prol():
+    """Use the same Rtools compiler for combined and Python-only campaigns."""
+    root = Path(os.environ.get("RTOOLS45_HOME", "C:/rtools45"))
+    directory = root / "x86_64-w64-mingw32.static.posix/bin"
+    compiler = directory / "gfortran.exe"
+    if not compiler.is_file():
+        raise RuntimeError(f"Prol_Spheroid requires the pinned Rtools45 compiler at {compiler}")
+    version = subprocess.run([str(compiler), "--version"], capture_output=True, text=True,
+                             check=True, timeout=30).stdout
+    if version.splitlines()[0] != "GNU Fortran (GCC) 14.3.0":
+        raise RuntimeError(f"Prol_Spheroid requires Rtools GCC 14.3.0, found {version.splitlines()[0]}")
+    os.environ["FC"] = str(compiler)
+    os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+    print(f"Pinned Prol_Spheroid compiler: {compiler}", flush=True)
+    return compiler
+
+
 def compile_prol(source, build):
     build.mkdir(parents=True, exist_ok=True)
     compiler = os.environ.get("FC", "gfortran")
@@ -325,6 +342,8 @@ def main():
                     runtime["availability"].setdefault(name, dict(status="setup_error", message=str(error)))
     if "prol_spheroid" in runtime["source_paths"] and "prol_spheroid" not in runtime["availability"]:
         try:
+            if os.name == "nt":
+                configure_windows_prol()
             runtime["native_executables"]["prol_spheroid"] = str(compile_prol(
                 Path(runtime["source_paths"]["prol_spheroid"]), workspace / "prol-build"))
             lock_evidence["prol_compiler"] = execute(
