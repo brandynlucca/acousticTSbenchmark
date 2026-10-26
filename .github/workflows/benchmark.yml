@@ -507,8 +507,9 @@ jobs:
                   for variable, compiler in compilers.items():
                       output.write(f"{variable}={compiler}\nFPM_{variable}={compiler}\n")
           PY
-      - uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
-        if: runner.os == 'Windows' || (runner.os == 'Linux' && steps.compiler-reuse.outputs.usable != 'true')
+      - name: Install fallback Linux GCC 14 compilers
+        uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
+        if: runner.os == 'Linux' && steps.compiler-reuse.outputs.usable != 'true'
         timeout-minutes: 5
         with:
           compiler: gcc

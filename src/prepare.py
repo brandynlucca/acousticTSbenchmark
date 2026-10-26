@@ -263,8 +263,9 @@ def configure_windows_prol():
         raise RuntimeError(f"Prol_Spheroid requires the pinned Rtools45 compiler at {compiler}")
     version = subprocess.run([str(compiler), "--version"], capture_output=True, text=True,
                              check=True, timeout=30).stdout
-    if version.splitlines()[0] != "GNU Fortran (GCC) 14.3.0":
-        raise RuntimeError(f"Prol_Spheroid requires Rtools GCC 14.3.0, found {version.splitlines()[0]}")
+    heading = next(iter(version.splitlines()), "no compiler version")
+    if heading != "GNU Fortran (GCC) 14.3.0":
+        raise RuntimeError(f"Prol_Spheroid requires Rtools GCC 14.3.0, found {heading}")
     os.environ["FC"] = str(compiler)
     os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
     print(f"Pinned Prol_Spheroid compiler: {compiler}", flush=True)

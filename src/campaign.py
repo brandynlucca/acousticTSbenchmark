@@ -172,7 +172,7 @@ def _json(content):
     return value
 
 
-def read_checkpoint(content):
+def read_checkpoint(content, *, allow_unexported=False):
     """Read only bounded JSON metadata and case records, without extracting files."""
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         entries = archive.infolist()
@@ -204,8 +204,26 @@ def read_checkpoint(content):
             if key in target or (record and not re.fullmatch(r"[0-9a-f]{64}", key)):
                 raise ValueError("Duplicate or invalid timing artifact record")
             target[key] = _json(archive.read(entry))
-    if not {"manifest.json", "status.json", "results.json"} <= values.keys():
+    if not {"manifest.json", "results.json"} <= values.keys():
         raise ValueError("Timing artifact lacks its manifest, status, or complete case table")
+    if "status.json" not in values:
+        if not allow_unexported:
+            raise ValueError("Timing artifact lacks its manifest, status, or complete case table")
+        rows = values["results.json"]
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("Invalid interrupted timing case table")
+        # Export writes the complete case table before the status file. An
+        # interrupted export can therefore preserve every observation without
+        # its derived counters. checkpoint_settings still validates each row
+        # against the manifest and the independently saved measurement record.
+        counts = {}
+        for row in rows:
+            outcome = row.get("status", "pending")
+            if not isinstance(outcome, str):
+                raise ValueError("Invalid interrupted timing case status")
+            counts[outcome] = counts.get(outcome, 0) + 1
+        values["status.json"] = dict(state="interrupted", planned=len(rows),
+            recorded=len(rows) - counts.get("pending", 0), outcomes=counts)
     return values, records
 
 
@@ -286,7 +304,7 @@ def prove_unstarted_ancestry(source, platform, repository, api):
 
 
 def checkpoint_settings(content, repository, head_sha, platform, *, allow_unexported=False):
-    values, records = read_checkpoint(content)
+    values, records = read_checkpoint(content, allow_unexported=allow_unexported)
     manifest, status, rows = (values[name] for name in ("manifest.json", "status.json", "results.json"))
     if not isinstance(manifest, dict) or not isinstance(status, dict) or not isinstance(rows, list) or not rows:
         raise ValueError("Invalid timing manifest, status, or case table")
@@ -421,10 +439,10 @@ def resume_campaign(inputs, repository, api):
             recorded[platform] = 0
             del selected[platform]
             continue
-        # Cancellation may interrupt the next table export after atomic case
+        # Failure or cancellation may interrupt an export after atomic case
         # records were saved. The runner rebuilds derived tables on resume.
         settings = checkpoint_settings(content, repository, run.get("head_sha", ""), platform,
-                                       allow_unexported=run.get("conclusion") == "cancelled")
+                                       allow_unexported=run.get("conclusion") in {"cancelled", "failure"})
         recorded[platform] = settings.pop("recorded_cases")
         if shared is not None and fingerprint(settings) != fingerprint(shared):
             raise ValueError("Selected platforms have different configurations, software selections, or source revisions")
@@ -481,7 +499,7 @@ def reference_campaign(run_id, repository, api=None):
             if setup_only_checkpoint(content, repository, run_id) is not None:
                 continue
             settings = checkpoint_settings(content, repository, run.get("head_sha", ""), platform,
-                                           allow_unexported=run.get("conclusion") == "cancelled")
+                                           allow_unexported=run.get("conclusion") in {"cancelled", "failure"})
         return {key: settings[key] for key in ("configuration", "profile", "source_ref")}
     raise ValueError("The timing run has not saved its reference configuration yet")
 

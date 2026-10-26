@@ -272,9 +272,10 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
                     if parent is not None:
                         parents.add(parent)
                     continue
+                interrupted = run.get("conclusion") in {"cancelled", "failure"}
                 settings = checkpoint_settings(content, repository, run.get("head_sha", ""), platform,
-                                               allow_unexported=run.get("conclusion") == "cancelled")
-                values, records = read_checkpoint(content)
+                                               allow_unexported=interrupted)
+                values, records = read_checkpoint(content, allow_unexported=interrupted)
                 manifest = values["manifest.json"]
                 source = values.get("benchmark-source.json", {})
                 cases = build_cases(settings["configuration"], settings["profile"],

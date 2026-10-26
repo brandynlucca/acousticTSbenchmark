@@ -60,6 +60,49 @@ class ProgressTests(unittest.TestCase):
                        provenance=[dict(run_id=11, manifest_fingerprint="b" * 64)])
         return active, sidecar
 
+    def setup_baseline_fixture(self):
+        import benchmark
+        active, sidecar = self.retained_fixture()
+        config = self.campaign()
+        config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        sources = dict(sources={name: dict(sha="a" * 40) for name in benchmark.CAPABILITIES})
+        original_cases = benchmark.build_cases(config, "pilot", ["acousticts", "echosms"], 1)
+        identity = dict(configuration=config, sources=sources, profile="pilot",
+            cases=[row["case_id"] for row in original_cases], adapter_hashes=benchmark.adapter_hashes(),
+            platform="Linux", architecture="x86_64", environment_fingerprint="b" * 64,
+            workload="fresh_process_warmed_distinct_problem_single_prediction")
+        environment = dict(platform="Linux", architecture="x86_64", threads=1,
+            runtime=dict(source_shas=dict(acousticts="a" * 40),
+                         environment_compatibility=dict(r_packages=dict(R="4.5.2"))))
+        environment_id = benchmark.fingerprint(environment)
+        sidecar["provenance"] = [dict(run_id=11,
+            manifest=dict(identity, fingerprint=benchmark.fingerprint(identity)),
+            environments=dict(evidence={environment_id: environment},
+                              invocations={"preserved": dict(environment_fingerprint=environment_id)}))]
+        seed = dict(active[0], status="ok", source_sha="a" * 40, elapsed_seconds=.1, ts_db=-29,
+                    invocation_id="preserved", measurement_origin_run_id=11)
+        sidecar["reused_records"] = {seed["case_id"]: seed}
+        settings = dict(configuration=config, profile="pilot", software="acousticts", repetitions=1,
+                        source_ref="a" * 40, planned_cases=2, sources_fingerprint=benchmark.fingerprint(sources))
+        metadata = dict(schema_version=1, repository="owner/repo", run_id=12, platform="ubuntu-latest",
+                        settings=settings, sources=sources, reused_count=1,
+                        retained_fingerprint=benchmark.fingerprint(sidecar))
+        return {"refresh-campaign.json": metadata, "retained-results.json": sidecar,
+                f"records/{seed['case_id']}.json": seed}
+
+    @staticmethod
+    def artifact_api(files, name="results-ubuntu-latest", run=None):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            for filename, value in files.items():
+                archive.writestr(filename, json.dumps(value))
+        api = Mock(repository="owner/repo")
+        status = run or dict(status="completed", conclusion="failure", run_attempt=1)
+        api.request.side_effect = lambda method, path: (dict(artifacts=[dict(id=7, name=name)])
+            if "/artifacts?" in path else status)
+        api.archive.return_value = stream.getvalue()
+        return api
+
     def test_retained_curves_do_not_advance_active_progress(self):
         active, sidecar = self.retained_fixture()
         path = self.directory / "retained-results.json"
@@ -202,6 +245,62 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(payload["rows"][0]["delta_ts_db"], 2)
         self.assertEqual(payload["rows"][0]["reference_id"], reference["reference_id"])
         self.assertIsNone(payload["rows"][1]["delta_ts_db"])
+
+    def test_artifact_republication_accepts_large_reference_evidence_with_a_separate_bound(self):
+        import benchmark
+        active, sidecar = self.retained_fixture()
+        reference = dict({key: sidecar["rows"][0][key] for key in benchmark.PHYSICAL_FIELDS},
+            reference_id="d" * 64, source_sha="c" * 40, qualified=True, qualification="fixture",
+            software="acousticscattering", controls={}, ts_db=-32, uncertainty_db=.01,
+            diagnostics=dict(mesh="x" * 20000))
+        reference_payload = dict(references=[reference])
+        api = self.artifact_api({"results.json": active, "retained-results.json": sidecar,
+                                 "references.json": reference_payload})
+        length = len(json.dumps(reference_payload).encode())
+        with patch.object(progress, "MAX_JSON_BYTES", 10000), \
+                patch.object(progress, "MAX_REFERENCE_BYTES", length):
+            payload = progress.artifact_payload(api, "ubuntu-latest", 12)
+        self.assertEqual(payload["retained_count"], 2)
+        self.assertEqual(payload["rows"][0]["delta_ts_db"], 2)
+        self.assertEqual(payload["reference_curves"][0]["ts_db"], -32)
+        self.assertNotIn("diagnostics", json.dumps(payload))
+        with patch.object(progress, "MAX_REFERENCE_BYTES", length - 1):
+            with self.assertRaisesRegex(ValueError, "oversized"):
+                progress.artifact_payload(api, "ubuntu-latest", 12)
+
+    def test_failed_setup_publishes_validated_seed_and_retained_measurements(self):
+        files = self.setup_baseline_fixture()
+        for name in ("results-ubuntu-latest", "retained-ubuntu-latest"):
+            with self.subTest(artifact=name):
+                payload = progress.artifact_payload(self.artifact_api(files, name), "ubuntu-latest", 12)
+                self.assertEqual(payload["state"], "completed")
+                self.assertEqual(payload["run_conclusion"], "failure")
+                self.assertEqual(payload["status"], dict(state="setup_failed", planned=2, recorded=1,
+                                                       outcomes=dict(ok=1, pending=1)))
+                self.assertEqual(payload["retained_count"], 2)
+                active = [row for row in payload["rows"] if row.get("measurement_role") != "retained"]
+                self.assertEqual(len(active), 1)
+                self.assertEqual(active[0]["elapsed_seconds"], .1)
+                self.assertEqual(active[0]["ts_db"], -29)
+        for alteration in ("missing_seed", "changed_seed", "wrong_run"):
+            changed = copy.deepcopy(files)
+            seed = next(name for name in changed if name.startswith("records/"))
+            if alteration == "missing_seed":
+                changed.pop(seed)
+            elif alteration == "changed_seed":
+                changed[seed]["elapsed_seconds"] = 999
+            else:
+                changed["refresh-campaign.json"]["run_id"] = 99
+            with self.subTest(alteration=alteration), self.assertRaises(ValueError):
+                progress.artifact_payload(self.artifact_api(changed), "ubuntu-latest", 12)
+
+    def test_empty_or_unvalidated_setup_artifact_does_not_invent_results(self):
+        files = self.setup_baseline_fixture()
+        for name in ("refresh-campaign.json", "retained-results.json"):
+            changed = dict(files)
+            changed.pop(name)
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                progress.artifact_payload(self.artifact_api(changed), "ubuntu-latest", 12)
 
     def test_public_payload_omits_pending_and_private_diagnostics(self):
         payload = self.payload()

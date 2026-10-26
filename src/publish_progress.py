@@ -33,6 +33,7 @@ MAX_JSON_BYTES = 128 * 1024 * 1024
 # manifest. Keep those saved measurements readable while new baselines omit
 # that duplicate plan. Other progress metadata retains its smaller bound.
 MAX_RETAINED_BYTES = 512 * 1024 * 1024
+MAX_REFERENCE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
@@ -134,7 +135,11 @@ class GitHub:
 
 
 def json_size_limit(name):
-    return MAX_RETAINED_BYTES if name == "retained-results.json" else MAX_JSON_BYTES
+    if name == "retained-results.json":
+        return MAX_RETAINED_BYTES
+    if name == "references.json":
+        return MAX_REFERENCE_BYTES
+    return MAX_JSON_BYTES
 
 
 def read_retained(path):
@@ -374,7 +379,7 @@ def should_publish(current, proposed):
 def select_artifact(artifacts, platform):
     checkpoint = re.compile(rf"checkpoint-{re.escape(platform)}-\d+-\d+\Z")
     candidates = [artifact for artifact in artifacts if not artifact.get("expired", False)
-                  and (artifact["name"] in (f"results-{platform}", f"compared-results-{platform}") or
+                  and (artifact["name"] in (f"results-{platform}", f"compared-results-{platform}", f"retained-{platform}") or
                        checkpoint.fullmatch(artifact["name"]))]
     # Artifact IDs are unique identifiers, not a chronological sequence.
     return max(candidates, key=lambda artifact: (artifact.get("created_at", ""),
@@ -401,8 +406,15 @@ def artifact_payload(api, platform, run_id, state=None):
     if (not attempt_match and attempt > 1 and
             selected.get("created_at", "") < run.get("run_started_at", "")):
         raise ValueError("The final artifact predates this run attempt. Import its checkpoint instead")
-    values = {}
-    with zipfile.ZipFile(io.BytesIO(api.archive(selected["id"]))) as archive:
+    values, baseline = {}, None
+    content = api.archive(selected["id"])
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        if not any(PurePosixPath(entry.filename).name == "results.json" for entry in archive.infolist()):
+            from refresh import baseline_settings
+
+            baseline = baseline_settings(content, api.repository, run_id, platform)
+            if baseline is None:
+                raise ValueError("Selected artifact contains no results.json or validated setup baseline")
         for entry in archive.infolist():
             name = PurePosixPath(entry.filename).name
             if name not in ("results.json", "status.json", "retained-results.json", "references.json"):
@@ -410,15 +422,19 @@ def artifact_payload(api, platform, run_id, state=None):
             if name in values or entry.file_size > json_size_limit(name):
                 raise ValueError("Ambiguous or oversized progress JSON in artifact")
             values[name] = json.loads(archive.read(entry))
-    if "results.json" not in values:
-        raise ValueError("Selected artifact contains no results.json")
     inferred = "completed" if run.get("status") == "completed" else None
-    rows = values["results.json"]
+    references = None
+    if "references.json" in values:
+        from benchmark import references_from_value
+        references = references_from_value(values["references.json"])
+    if baseline is not None:
+        cases = build_cases(baseline["configuration"], baseline["profile"],
+                            baseline["software"].split(","), baseline["repetitions"])
+        rows = summarize(cases, values["retained-results.json"].get("reused_records", {}), references or {})
+        values["status.json"] = dict(state="setup_failed" if inferred else "setup", planned=len(cases))
+    else:
+        rows = values["results.json"]
     if "retained-results.json" in values:
-        references = None
-        if "references.json" in values:
-            from benchmark import references_from_value
-            references = references_from_value(values["references.json"])
         rows = rows + retained_comparison_rows(values["retained-results.json"], rows, references)
     payload = compact_payload(api.repository, platform, run_id, attempt, rows,
                               values.get("status.json"), state or inferred)

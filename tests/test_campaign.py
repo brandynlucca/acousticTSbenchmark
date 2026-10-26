@@ -403,6 +403,38 @@ class CampaignTests(unittest.TestCase):
         result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
         self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
 
+    def test_failed_or_cancelled_export_recovers_missing_summary_from_preserved_records(self):
+        content, _ = checkpoint(alter=lambda files: files.pop("status.json"))
+        with self.assertRaisesRegex(ValueError, "lacks its manifest, status"):
+            campaign.read_checkpoint(content)
+        for conclusion in ("failure", "cancelled"):
+            with self.subTest(conclusion=conclusion):
+                api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+                run["conclusion"] = conclusion
+                result = self.resolve(dict(mode="resume", resume_run_id="123"), api)
+                self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 2})
+        values, records = campaign.read_checkpoint(content, allow_unexported=True)
+        self.assertEqual(values["status.json"], dict(state="interrupted", planned=18, recorded=2,
+                                                   outcomes=dict(ok=2, pending=16)))
+        self.assertEqual(len(records), 2)
+
+    def test_missing_summary_cannot_bypass_manifest_case_or_record_validation(self):
+        mutations = (
+            lambda files: files.pop("results.json"),
+            lambda files: files["results.json"].pop(),
+            lambda files: files["results.json"][0].update(elapsed_seconds=999),
+            lambda files: files.pop(next(name for name in files if name.startswith("records/"))),
+            lambda files: files["manifest.json"].update(fingerprint="invalid"),
+        )
+        for mutation in mutations:
+            def interrupted(files):
+                files.pop("status.json")
+                mutation(files)
+            content, _ = checkpoint(alter=interrupted)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                campaign.checkpoint_settings(content, "owner/repo", "a" * 40, "ubuntu-latest",
+                                             allow_unexported=True)
+
     def test_changed_order_missing_records_and_tampered_metadata_are_rejected(self):
         def missing(files):
             files.pop(next(name for name in files if name.startswith("records/")))
@@ -831,6 +863,27 @@ class ExtendTests(unittest.TestCase):
         cases = benchmark.build_cases(result["configuration"], result["profile"], ["prol_spheroid"], 3)
         self.assertEqual(refresh.validate_reused_records(sidecar, cases, self.lock, "Linux", self.runtime),
                          sidecar["reused_records"])
+
+    def test_extend_after_failed_export_keeps_saved_and_unexported_predictions(self):
+        def interrupted(files):
+            files.pop("status.json")
+            row = next(row for row in files["results.json"]
+                       if row["software"] == "prol_spheroid" and row["status"] == "pending")
+            files[f"records/{row['case_id']}.json"] = dict(case_id=row["case_id"], status="ok",
+                elapsed_seconds=.7, ts_db=-41, source_sha="a" * 40, invocation_id="preserved")
+        content = self.source(interrupted)
+        api, run = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        run["conclusion"] = "failure"
+        result = refresh.resolve_refresh(dict(mode="extend", resume_run_id="123", refresh_software="prol_spheroid"),
+                                         "owner/repo", "e" * 40, api, sources=self.lock)
+        self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 3})
+        saved = self.baseline(result)
+        sidecar = saved["retained-results.json"]
+        self.assertEqual(len(sidecar["rows"]), 4)
+        self.assertEqual(len(sidecar["reused_records"]), 3)
+        self.assertEqual(sorted(row["elapsed_seconds"] for row in sidecar["reused_records"].values()), [.2, .2, .7])
+        self.assertEqual(refresh.baseline_settings(self.archive_files(saved), "owner/repo", 124,
+                                                  "ubuntu-latest")["recorded_cases"], 3)
 
     def test_baseline_binds_seed_records_and_rejects_missing_or_changed_predictions(self):
         result = self.extend()
