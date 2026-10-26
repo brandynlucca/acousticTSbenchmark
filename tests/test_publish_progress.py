@@ -2,6 +2,8 @@
 
 import base64
 import copy
+import gzip
+import hashlib
 import io
 import json
 import os
@@ -10,15 +12,98 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import publish_progress as progress
 
 
+class GitAPI:
+    """Small in-memory Git object store with an atomic branch reference."""
+
+    repository = "owner/repo"
+
+    def __init__(self, snapshots=None, *, empty=False):
+        self.blobs, self.trees, self.commits = {}, {}, {}
+        self.head = None
+        self.counter = 0
+        self.conflict = None
+        self.ref_error = None
+        self.request = Mock(side_effect=self._request)
+        if not empty:
+            self.install(snapshots or {})
+
+    def object_id(self):
+        self.counter += 1
+        return f"{self.counter:040x}"
+
+    def add_blob(self, value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        sha = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        self.blobs[sha] = raw
+        return sha
+
+    def install(self, snapshots):
+        tree = dict(self.trees[self.commits[self.head]["tree"]]) if self.head else {}
+        tree.update({name: self.add_blob(value) for name, value in snapshots.items()})
+        tree_id, commit_id = self.object_id(), self.object_id()
+        self.trees[tree_id] = tree
+        self.commits[commit_id] = {"tree": tree_id, "parents": [self.head] if self.head else []}
+        self.head = commit_id
+
+    def current(self, name):
+        tree = self.trees[self.commits[self.head]["tree"]]
+        return json.loads(self.blobs[tree[name]]) if name in tree else None
+
+    def _request(self, method, path, body=None):
+        if method == "GET" and path == "/git/ref/heads/benchmark-data":
+            if self.head is None:
+                raise progress.APIError(404, "Missing")
+            return {"object": {"sha": self.head}}
+        if method == "GET" and path.startswith("/git/commits/"):
+            return {"tree": {"sha": self.commits[path.rsplit("/", 1)[-1]]["tree"]}}
+        if method == "GET" and path.startswith("/git/trees/"):
+            tree = self.trees[path.rsplit("/", 1)[-1]]
+            return {"tree": [dict(path=name, type="blob", sha=sha, size=len(self.blobs[sha])) for name, sha in tree.items()]}
+        if method == "GET" and path.startswith("/git/blobs/"):
+            sha = path.rsplit("/", 1)[-1]
+            return dict(sha=sha, encoding="base64", size=len(self.blobs[sha]), content=base64.b64encode(self.blobs[sha]).decode())
+        if method == "POST" and path == "/git/blobs":
+            raw = base64.b64decode(body["content"])
+            sha = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+            self.blobs[sha] = raw
+            return {"sha": sha}
+        if method == "POST" and path == "/git/trees":
+            tree = dict(self.trees.get(body.get("base_tree"), {}))
+            tree.update({entry["path"]: entry["sha"] for entry in body["tree"]})
+            sha = self.object_id()
+            self.trees[sha] = tree
+            return {"sha": sha}
+        if method == "POST" and path == "/git/commits":
+            sha = self.object_id()
+            self.commits[sha] = {"tree": body["tree"], "parents": body["parents"]}
+            return {"sha": sha}
+        if (method, path) in (("PATCH", "/git/refs/heads/benchmark-data"), ("POST", "/git/refs")):
+            if self.ref_error:
+                raise self.ref_error
+            if self.conflict is not None:
+                changes, self.conflict = self.conflict, None
+                self.install(changes)
+                raise progress.APIError(409, "Conflict")
+            if method == "PATCH":
+                if body.get("force") is not False or self.commits[body["sha"]]["parents"] != [self.head]:
+                    raise AssertionError("Publication must advance the current branch without force")
+            elif self.head is not None:
+                raise progress.APIError(422, "Already exists")
+            self.head = body["sha"]
+            return {"object": {"sha": self.head}}
+        raise AssertionError(f"Unexpected Git operation: {method} {path}")
+
+
 class ProgressTests(unittest.TestCase):
     def setUp(self):
+        progress._SNAPSHOT_GUARDS.clear()
         scratch = progress.ROOT / ".scratch/codex/dense-benchmark/tests"
         scratch.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=scratch)
@@ -618,76 +703,55 @@ class ProgressTests(unittest.TestCase):
 
     def test_conflicting_update_rereads_and_preserves_newer_run(self):
         proposed, newer = self.payload(12), self.payload(13)
-
-        def content(payload, sha):
-            return dict(sha=sha, encoding="base64",
-                        content=base64.b64encode(json.dumps(payload).encode()).decode())
-
-        api = Mock()
-        api.request.side_effect = [{"ref": "exists"}, content(self.payload(11), "old-sha"),
-            progress.APIError(409, "Conflict"), {"ref": "exists"}, content(newer, "new-sha")]
+        api = GitAPI({"ubuntu-latest.json": self.payload(11)})
+        api.conflict = {"ubuntu-latest.json": newer}
         self.assertFalse(progress.publish(api, proposed))
-        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
-        self.assertEqual(len(puts), 1)
-        self.assertEqual(puts[0].args[2]["sha"], "old-sha")
+        self.assertEqual(api.current("ubuntu-latest.json"), newer)
+        self.assertEqual(sum(call.args[0] == "PATCH" for call in api.request.call_args_list), 1)
 
-    def test_size_snapshot_updates_before_latest_with_separate_revision_guards(self):
+    def test_size_and_latest_snapshots_publish_in_one_atomic_commit(self):
         proposed = dict(self.payload(12), semimajor_m=.01)
         previous = dict(self.payload(11), semimajor_m=.07)
-        api = Mock()
-        api.request.side_effect = [{"ref": "exists"}, progress.APIError(404, "Missing"), {},
-            {"ref": "exists"}, dict(sha="latest-sha", encoding="base64",
-                content=base64.b64encode(json.dumps(previous).encode()).decode()), {}]
+        api = GitAPI({"ubuntu-latest.json": previous, "dataset.json": {"preserved": True}})
         self.assertTrue(progress.publish(api, proposed))
-        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
-        self.assertEqual([call.args[1] for call in puts],
-                         ["/contents/ubuntu-latest-a-0.01.json", "/contents/ubuntu-latest.json"])
-        self.assertNotIn("sha", puts[0].args[2])
-        self.assertEqual(puts[1].args[2]["sha"], "latest-sha")
-        for call in puts:
-            self.assertEqual(json.loads(base64.b64decode(call.args[2]["content"])), proposed)
+        self.assertEqual(api.current("ubuntu-latest-a-0.01.json"), proposed)
+        self.assertEqual(api.current("ubuntu-latest.json"), proposed)
+        self.assertEqual(api.current("dataset.json"), {"preserved": True})
+        self.assertEqual(sum(call.args[1] == "/git/blobs" for call in api.request.call_args_list), 1)
+        self.assertEqual(sum(call.args[0] == "PATCH" for call in api.request.call_args_list), 1)
+        tree = api.trees[api.commits[api.head]["tree"]]
+        self.assertEqual(tree["ubuntu-latest.json"], tree["ubuntu-latest-a-0.01.json"])
 
     def test_older_size_can_update_without_overwriting_latest_other_size(self):
         proposed = dict(self.payload(12), semimajor_m=.07)
-
-        def content(payload, sha):
-            return dict(sha=sha, encoding="base64",
-                        content=base64.b64encode(json.dumps(payload).encode()).decode())
-
-        api = Mock()
-        api.request.side_effect = [{"ref": "exists"}, content(dict(self.payload(11), semimajor_m=.07), "size-sha"), {},
-            {"ref": "exists"}, content(dict(self.payload(13), semimajor_m=.01), "latest-sha")]
+        newer = dict(self.payload(13), semimajor_m=.01)
+        api = GitAPI({"ubuntu-latest-a-0.07.json": dict(self.payload(11), semimajor_m=.07), "ubuntu-latest.json": newer})
         self.assertTrue(progress.publish(api, proposed))
-        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
-        self.assertEqual(len(puts), 1)
-        self.assertEqual(puts[0].args[1], "/contents/ubuntu-latest-a-0.07.json")
-        self.assertEqual(puts[0].args[2]["sha"], "size-sha")
+        self.assertEqual(api.current("ubuntu-latest-a-0.07.json"), proposed)
+        self.assertEqual(api.current("ubuntu-latest.json"), newer)
 
     def test_size_conflict_preserves_newer_size_and_latest_snapshots(self):
         proposed = dict(self.payload(12), semimajor_m=.01)
-
-        def content(run, sha):
-            payload = dict(self.payload(run), semimajor_m=.01)
-            return dict(sha=sha, encoding="base64",
-                        content=base64.b64encode(json.dumps(payload).encode()).decode())
-
-        api = Mock()
-        api.request.side_effect = [{"ref": "exists"}, content(11, "old-size-sha"), progress.APIError(409, "Conflict"),
-            {"ref": "exists"}, content(13, "new-size-sha"), {"ref": "exists"}, content(13, "latest-sha")]
+        old = dict(self.payload(11), semimajor_m=.01)
+        newer = dict(self.payload(13), semimajor_m=.01)
+        names = ("ubuntu-latest-a-0.01.json", "ubuntu-latest.json")
+        api = GitAPI({name: old for name in names})
+        api.conflict = {name: newer for name in names}
         self.assertFalse(progress.publish(api, proposed))
-        puts = [call for call in api.request.call_args_list if call.args[0] == "PUT"]
-        self.assertEqual(len(puts), 1)
-        self.assertEqual(puts[0].args[1], "/contents/ubuntu-latest-a-0.01.json")
-        self.assertEqual(puts[0].args[2]["sha"], "old-size-sha")
+        for name in names:
+            self.assertEqual(api.current(name), newer)
 
-    def test_failed_size_publication_does_not_advance_latest_snapshot(self):
-        api = Mock()
-        api.request.side_effect = [{"ref": "exists"}, progress.APIError(404, "Missing"),
-                                   progress.APIError(500, "Failed")]
+    def test_failed_reference_update_preserves_both_snapshot_aliases(self):
+        previous = dict(self.payload(11), semimajor_m=.1)
+        names = ("ubuntu-latest-a-0.1.json", "ubuntu-latest.json")
+        api = GitAPI({name: previous for name in names})
+        initial_head = api.head
+        api.ref_error = progress.APIError(500, "Failed")
         with self.assertRaises(progress.APIError):
             progress.publish(api, dict(self.payload(), semimajor_m=.1))
-        self.assertEqual(api.request.call_count, 3)
-        self.assertEqual(api.request.call_args.args[1], "/contents/ubuntu-latest-a-0.1.json")
+        self.assertEqual(api.head, initial_head)
+        for name in names:
+            self.assertEqual(api.current(name), previous)
 
     def test_snapshot_filenames_are_limited_to_the_selected_platform_and_five_sizes(self):
         api = Mock()
@@ -727,15 +791,86 @@ class ProgressTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "size"):
                 progress.existing_snapshot(api, "ubuntu-latest")
 
-    def test_bootstrap_commit_contains_only_platform_data_and_no_parent(self):
+    def test_large_snapshot_compression_is_lossless_and_deterministic(self):
+        payload = dict(self.payload(), semimajor_m=.01, padding="repeated scientific data " * 8000,
+                       precision_examples=[0, None, -0.0, 1e-17, -123.45678901234567])
+        encoded = progress.encode_snapshot(payload)
+        self.assertEqual(encoded["schema_version"], 2)
+        self.assertEqual(encoded["encoding"], "gzip-base64")
+        self.assertEqual(encoded["status"], payload["status"])
+        self.assertEqual(encoded, progress.encode_snapshot(payload))
+        self.assertEqual(progress.decode_snapshot(encoded), payload)
+        self.assertLess(len(json.dumps(encoded)), encoded["decoded_bytes"] // 10)
+        self.assertEqual(json.loads(gzip.decompress(base64.b64decode(encoded["data"]))), payload)
+
+    def test_small_snapshot_remains_compatible_with_existing_reader(self):
+        payload = self.payload()
+        self.assertEqual(progress.encode_snapshot(payload), payload)
+        self.assertEqual(progress.encode_snapshot(payload)["schema_version"], 1)
+
+    def test_compressed_snapshot_rejects_size_and_guard_tampering(self):
+        payload = dict(self.payload(), padding="x" * 70000)
+        value = progress.encode_snapshot(payload)
+        with self.assertRaisesRegex(ValueError, "size"):
+            progress.decode_snapshot(dict(value, decoded_bytes=value["decoded_bytes"] - 1))
+        with self.assertRaisesRegex(ValueError, "metadata"):
+            progress.decode_snapshot(dict(value, run_id=value["run_id"] + 1))
+        with self.assertRaisesRegex(ValueError, "Invalid compressed"):
+            progress.decode_snapshot(dict(value, decoded_bytes=progress.MAX_SNAPSHOT_BYTES + 1))
+        with patch.object(progress, "MAX_SNAPSHOT_BYTES", 100):
+            with self.assertRaisesRegex(ValueError, "size"):
+                progress.encode_snapshot(payload)
+
+    def test_existing_snapshot_transparently_decodes_envelope(self):
+        payload = dict(self.payload(), padding="x" * 70000)
+        encoded = progress.encode_snapshot(payload)
         api = Mock()
-        api.request.side_effect = [progress.APIError(404, "Missing"), {"sha": "blob"},
-                                   {"sha": "tree"}, {"sha": "commit"}, {"ref": "created"}]
+        api.request.return_value = dict(sha="compressed-sha", encoding="base64",
+            content=base64.b64encode(json.dumps(encoded).encode()).decode())
+        result, sha = progress.existing_snapshot(api, "ubuntu-latest")
+        self.assertEqual(result, payload)
+        self.assertEqual(sha, "compressed-sha")
+
+    def test_cached_blob_metadata_avoids_downloading_previous_large_snapshots(self):
+        initial = dict(self.payload(11), semimajor_m=.01, padding="x" * 70000)
+        names = ("ubuntu-latest-a-0.01.json", "ubuntu-latest.json")
+        api = GitAPI({name: progress.encode_snapshot(initial) for name in names})
+        proposed = dict(initial, run_id=12)
+        self.assertTrue(progress.publish(api, proposed))
+        downloads = sum(call.args[0] == "GET" and call.args[1].startswith("/git/blobs/") for call in api.request.call_args_list)
+        self.assertEqual(downloads, 1)
+        self.assertTrue(progress.publish(api, dict(proposed, run_id=13)))
+        self.assertEqual(sum(call.args[0] == "GET" and call.args[1].startswith("/git/blobs/") for call in api.request.call_args_list), downloads)
+        for name in names:
+            self.assertEqual(progress.decode_snapshot(api.current(name))["run_id"], 13)
+
+    def test_conflict_reuses_blob_and_preserves_another_writers_updates(self):
+        proposed = dict(self.payload(12), semimajor_m=.01)
+        api = GitAPI({"ubuntu-latest.json": self.payload(11), "dataset.json": {"generation": 1}})
+        api.conflict = {"dataset.json": {"generation": 2}, "queue.json": {"keep": True}}
+        self.assertTrue(progress.publish(api, proposed))
+        self.assertEqual(api.current("dataset.json"), {"generation": 2})
+        self.assertEqual(api.current("queue.json"), {"keep": True})
+        self.assertEqual(api.current("ubuntu-latest.json"), proposed)
+        self.assertEqual(api.current("ubuntu-latest-a-0.01.json"), proposed)
+        self.assertEqual(sum(call.args[0] == "POST" and call.args[1] == "/git/blobs" for call in api.request.call_args_list), 1)
+
+    def test_safe_errors_include_status_and_endpoint_but_never_query_or_credentials(self):
+        error = progress.APIError(409, "secret response", method="PATCH", path="/git/refs/heads/benchmark-data?token=secret")
+        self.assertEqual(progress.safe_error_summary(error), "APIError HTTP 409 during PATCH /git/refs/heads/benchmark-data")
+        api = progress.GitHub("owner/repo", "secret")
+        api.opener = Mock()
+        api.opener.open.side_effect = URLError("https://secret@example.com/?token=secret")
+        with self.assertRaises(URLError) as raised:
+            api.request("GET", "/git/trees/test?private=secret")
+        self.assertEqual(progress.safe_error_summary(raised.exception), "URLError during GET /git/trees/test")
+
+    def test_bootstrap_commit_contains_only_platform_data_and_no_parent(self):
+        api = GitAPI(empty=True)
         self.assertTrue(progress.publish(api, self.payload()))
-        tree_call = api.request.call_args_list[2]
-        self.assertEqual(tree_call.args[2]["tree"], [dict(path="ubuntu-latest.json", mode="100644",
-                                                         type="blob", sha="blob")])
-        self.assertEqual(api.request.call_args_list[3].args[2]["parents"], [])
+        commit = api.commits[api.head]
+        self.assertEqual(commit["parents"], [])
+        self.assertEqual(set(api.trees[commit["tree"]]), {"ubuntu-latest.json"})
 
 
 if __name__ == "__main__":

@@ -243,10 +243,8 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/benchmark-results
       - name: Check out current workflow controllers
-        if: runner.os == 'macOS' || inputs.mode == 'resume'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Preserve controllers for source-pinned resumes
-        if: runner.os == 'macOS' || inputs.mode == 'resume'
         shell: bash
         run: |
           python - <<'PY'
@@ -621,6 +619,7 @@ jobs:
           publisher_spec.loader.exec_module(publisher)
           GitHub, compact_payload, publish = publisher.GitHub, publisher.compact_payload, publisher.publish
           comparison_rows = publisher.comparison_rows
+          safe_error_summary = publisher.safe_error_summary
 
           def main():
               duration = float(sys.argv[1])
@@ -685,18 +684,19 @@ jobs:
                       reference_path = os.environ.get("BENCHMARK_REFERENCES")
                       references = load_references(reference_path) if reference_path and Path(reference_path).is_file() else None
                       rows = comparison_rows(directory, rows, references=references)
-                      api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
-                                   timeout_seconds=15)
                       payload = compact_payload(os.environ["GITHUB_REPOSITORY"],
                           os.environ["BENCHMARK_PLATFORM"], int(os.environ["GITHUB_RUN_ID"]),
                           int(os.environ["GITHUB_RUN_ATTEMPT"]), rows, status(), "running")
+                      api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"],
+                                   timeout_seconds=45)
                       publish(api, payload)
+                      print(f"Progress published: {status().get('recorded', 0)} recorded", flush=True)
                       retry_after = float("-inf")
                   except Exception as error:
-                      print(f"Progress publication failed ({type(error).__name__}), retrying after 30 seconds",
+                      print(f"Progress publication failed ({safe_error_summary(error)}), retrying after one minute",
                             file=sys.stderr, flush=True)
-                      retry_after = time.monotonic() + 30
-                  next_publish = time.monotonic() + 30
+                      retry_after = time.monotonic() + 60
+                  next_publish = now + 60
 
               worker_environment = os.environ.copy()
               for key in ("GITHUB_TOKEN", "GH_TOKEN"):
@@ -711,7 +711,8 @@ jobs:
                       before = status()
                       if before.get("state") == "complete" or deadline - time.time() < timeout:
                           break
-                      seconds = min(30, max(1, stop - time.monotonic()))
+                      seconds = min(60, max(1, stop - time.monotonic()),
+                                    max(1, max(next_publish, retry_after) - time.monotonic()))
                       arguments = command + ["--chunk-seconds", str(seconds)]
                       if first_result:
                           arguments += ["--max-cases", "1"]

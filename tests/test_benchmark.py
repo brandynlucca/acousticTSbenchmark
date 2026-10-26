@@ -384,7 +384,7 @@ class ProgressTests(unittest.TestCase):
 
         args = self.arguments()
         clock, active, measurements, published, events = [0.0], [False], [], [], []
-        finishes = iter((1, 10, 30, 32, 40))
+        finishes = iter((1, 30, 60, 62, 70))
 
         def measure(case, runtime, directory, timeout):
             active[0] = True
@@ -407,10 +407,10 @@ class ProgressTests(unittest.TestCase):
              patch.object(b, "measure", side_effect=measure), patch.object(publish_progress, "GitHub") as api, \
              patch.object(publish_progress, "publish", side_effect=publish):
             self.assertEqual(b.run(args), 0)
-        self.assertEqual(published, [(0, 0), (1, 1), (4, 32), (5, 40)])
+        self.assertEqual(published, [(0, 0), (1, 1), (4, 62), (5, 70)])
         self.assertEqual(events[:3], [("publish", 0), ("measure", 1), ("publish", 1)])
         self.assertEqual(api.call_count, 4)
-        self.assertTrue(all(call.kwargs["timeout_seconds"] == 15 for call in api.call_args_list))
+        self.assertTrue(all(call.kwargs["timeout_seconds"] == 45 for call in api.call_args_list))
         self.assertEqual(b.read_json(self.path / "run/manifest.json")["workload"],
                          "fresh_process_warmed_distinct_problem_single_prediction")
 
@@ -419,7 +419,7 @@ class ProgressTests(unittest.TestCase):
 
         args = self.arguments()
         clock, attempts, count = [0.0], [], [0]
-        finishes = iter((1, 10, 29, 31, 32))
+        finishes = iter((1, 30, 59, 61, 62))
 
         def measure(*args):
             clock[0] = next(finishes)
@@ -435,12 +435,12 @@ class ProgressTests(unittest.TestCase):
              patch.object(b, "measure", side_effect=measure), patch.object(publish_progress, "GitHub"), \
              patch.object(publish_progress, "publish", side_effect=fail), redirect_stderr(errors):
             self.assertEqual(b.run(args), 0)
-        self.assertEqual(attempts, [(0, 0), (4, 31), (5, 32)])  # Final checkpoint is always attempted.
+        self.assertEqual(attempts, [(0, 0), (4, 61), (5, 62)])  # Final checkpoint is always attempted.
         self.assertEqual(count[0], 5)
         self.assertEqual(b.read_json(self.path / "run/status.json")["recorded"], 5)
         self.assertNotIn("secret-for-publication", errors.getvalue())
         self.assertNotIn("private signed URL", errors.getvalue())
-        self.assertIn("retrying after 30 seconds", errors.getvalue())
+        self.assertIn("retrying after one minute", errors.getvalue())
 
     def test_publication_is_opt_in(self):
         import publish_progress
@@ -488,7 +488,7 @@ class CampaignWorkflowTests(unittest.TestCase):
             self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
             self.assertNotIn("GH_TOKEN", kwargs["env"])
             self.assertNotIn("--publish-progress", command)
-            self.assertLessEqual(float(command[command.index("--chunk-seconds") + 1]), 30)
+            self.assertLessEqual(float(command[command.index("--chunk-seconds") + 1]), 60)
             commands.append(command)
             clock[0] += 90
             status = b.read_json(self.directory / "status.json")
@@ -525,6 +525,38 @@ class CampaignWorkflowTests(unittest.TestCase):
         self.environment["BENCHMARK_DEADLINE"] = "1000"
         _, commands, _ = self.execute(1)
         self.assertEqual(commands, [])
+
+    def test_slow_publication_failure_keeps_useful_worker_chunks_during_backoff(self):
+        clock, chunks, publication_times = [0.0], [], []
+
+        def publish(api, data):
+            publication_times.append(clock[0])
+            if len(publication_times) == 1:
+                clock[0] += 45
+                raise TimeoutError("Publication deadline exceeded")
+
+        def run(command, **kwargs):
+            seconds = float(command[command.index("--chunk-seconds") + 1])
+            chunks.append(seconds)
+            # The first chunk returns after one prediction, even with time left.
+            clock[0] += 1 if "--max-cases" in command else seconds
+            status = b.read_json(self.directory / "status.json")
+            status["recorded"] += 1
+            if len(chunks) == 3:
+                status["state"] = "complete"
+            b.atomic_json(self.directory / "status.json", status)
+
+        with patch.dict(os.environ, self.environment), patch.object(sys, "argv", ["controller", "300"]), \
+             patch.object(self.namespace["time"], "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(self.namespace["time"], "time", side_effect=lambda: 1000 + clock[0]), \
+             patch.object(self.namespace["subprocess"], "run", side_effect=run), \
+             patch.dict(self.namespace, GitHub=lambda *a, **k: None, compact_payload=lambda *a: a[-2],
+                        publish=publish), redirect_stderr(io.StringIO()):
+            self.namespace["main"]()
+
+        self.assertEqual(chunks, [60, 59, 60])
+        self.assertEqual(publication_times[:2], [0, 105])
+        self.assertEqual(b.read_json(self.directory / "status.json")["recorded"], 126)
 
     def test_selected_budget_can_continue_beyond_the_original_45_minutes(self):
         self.environment.update(BENCHMARK_BUDGET_SECONDS="7200", BENCHMARK_DEADLINE="8200")

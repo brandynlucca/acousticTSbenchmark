@@ -14,7 +14,7 @@ def render_report(path, rows, status, repository=None):
                           "capabilities": CAPABILITIES}, allow_nan=False).replace("<", "\\u003c")
     document = '''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<meta http-equiv="refresh" content="30"><title>Spheroid timing progress</title>
+<meta http-equiv="refresh" content="60"><title>Spheroid timing progress</title>
 <style>
 body{font:16px system-ui,sans-serif;color:#20252b;background:#fafaf8;margin:28px auto;max-width:1300px;padding:0 20px}
 h1{font-size:25px}label{margin-right:24px}select{font:inherit;padding:5px}a{color:#005b88}
@@ -56,10 +56,11 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
-<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
+<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
-<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th><th>RMSE ΔTS (dB)</th><th>Matched predictions</th></tr></thead><tbody id="coverage"></tbody></table></div>
-<p class="note" id="rmse-note">RMSE takes the median ΔTS across successful matched repetitions of each physical prediction, then √mean(ΔTS²) across those predictions, with equal weight per prediction. Only finite differences with a matched reference are included. Unavailable means no valid comparisons. The matched count includes each frequency and incidence combination once at the selected aspect ratio.</p>
+<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Total solve time (s)</th><th>Average solve time (s)</th><th>RMSE ΔTS (dB)</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<p class="note">Total and average solve time include successful timed predictions only.</p>
+<p class="note" id="rmse-note">RMSE uses the median ΔTS across successful repetitions of each prediction, then √mean(ΔTS²) across predictions with valid comparisons. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. Unavailable means no valid comparisons.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
@@ -370,7 +371,11 @@ function render(){
   const planned=plannedGroups.some(c=>c.software===software&&c.boundary===boundary);
   const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!planned&&!group.length&&!completion?.planned)continue;
   const good=group.filter(r=>r.status==='ok'),pending=group.filter(r=>r.status==='pending');
-  const total=coverage?.elapsed_seconds_sum??good.reduce((sum,r)=>sum+r.elapsed_seconds,0),shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
+  const timed=good.filter(r=>Number.isFinite(r.elapsed_seconds)&&r.elapsed_seconds>=0);
+  const seconds=timed.reduce((sum,r)=>sum+r.elapsed_seconds,0);
+  const total=coverage?.elapsed_seconds_sum??seconds,shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
+  const average=timed.length?seconds/timed.length:null;
+  const shownAverage=average===null?'Unavailable':average>0&&average<.01?average.toExponential(2):average.toFixed(2);
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
   const remaining=completion?.pending??'Unknown';
   const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
@@ -378,7 +383,7 @@ function render(){
   const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
   const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
-  for(const value of [successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  for(const value of [successful,other,remaining,shownTotal,shownAverage,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
@@ -388,7 +393,7 @@ if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
  document.getElementById('livebar').hidden=false;document.getElementById('connection').hidden=false;
  document.getElementById('manifest-link').hidden=true;
- document.getElementById('refresh-note').textContent='This dashboard checks for updates every 30 seconds. New runs publish completed results between cases at 30-second intervals. A long-running case appears when it finishes. Older runs publish only between chunks. GitHub caching can add delay. Full CSV and JSON remain available in the run artifacts.';
+ document.getElementById('refresh-note').textContent='This dashboard checks for updates every minute. New runs publish between cases once per minute. Long predictions and GitHub caching can delay updates. Full CSV and JSON are available in the run artifacts.';
  const platform=document.getElementById('platform'),connection=document.getElementById('connection'),runLink=document.getElementById('run-link');
  const runState=document.getElementById('run-state');
  const workflowURL=`https://github.com/${repository}/actions/workflows/benchmark.yml`;
@@ -424,6 +429,25 @@ if(repository){
   try{const response=await fetch(url,{headers,cache:'no-store',signal:controller.signal});return {status:response.status,ok:response.ok,value:response.ok?await response.json():null};}
   finally{clearTimeout(timer);}
  }
+ async function decodeSnapshot(value){
+  if(value?.schema_version!==2)return value;
+  const limit=64*1024*1024;
+  if(value.encoding!=='gzip-base64'||typeof value.data!=='string'||value.data.length>Math.ceil(limit/3)*4||
+     !Number.isInteger(value.decoded_bytes)||value.decoded_bytes<1||value.decoded_bytes>limit)throw new Error('Invalid compressed progress data');
+  const binary=atob(value.data),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+  const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  const chunks=[];let size=0;
+  try{while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.length;
+    if(size>value.decoded_bytes)throw new Error('Progress data exceeds its declared size');chunks.push(chunk.value);}}
+  finally{await reader.cancel();reader.releaseLock();}
+  if(size!==value.decoded_bytes)throw new Error('Incomplete compressed progress data');
+  const decoded=JSON.parse(await new Blob(chunks).text());
+  for(const key of ['run_id','run_attempt','platform','semimajor_m','published_at','state']){
+   if(decoded[key]!==value[key])throw new Error('Progress data identity mismatch');
+  }
+  if(JSON.stringify(decoded.status)!==JSON.stringify(value.status))throw new Error('Progress status mismatch');
+  return decoded;
+ }
  function clearReferenceOverlay(){externalReferenceCurves=[];lastReferenceCheck=0;referenceRun=null;}
  async function pollReferences(requestGeneration){
   const runId=data.run_id;if(!runId)return;
@@ -456,7 +480,7 @@ if(repository){
     }
     if(!response||(!response.ok&&response.status!==404)){publicFeed=true;response=await fetchJSON(feed+filename+'?t='+Date.now());}
     if(response.ok){
-     const value=response.value;
+     const value=response.value=await decodeSnapshot(response.value);
      if(value.schema_version!==1||!Array.isArray(value.rows)||value.platform!==chosen)throw new Error('Unexpected progress data');
      const sizes=[value.semimajor_m,...value.rows.map(r=>r.semimajor_m)].filter(a=>a!==undefined&&a!==null);
      if(sizes.some(a=>!Number.isFinite(a)||a<=0)||new Set(sizes).size>1)throw new Error('Progress data contains inconsistent semimajor axes');
@@ -501,13 +525,13 @@ if(repository){
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
-  }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points stay visible.`;showRun();}}
+  }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in one minute. Existing points stay visible.`;showRun();}}
   finally{busy=false;if(requestGeneration!==generation)poll();}
  }
  function changeSelection(){generation++;clearReferenceOverlay();data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();}
  platform.addEventListener('change',()=>{try{localStorage.setItem('benchmark-platform',platform.value);}catch(e){}changeSelection();});
  semimajor.addEventListener('change',changeSelection);
- connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,30000);
+ connection.textContent='Connecting to benchmark progress…';poll();setInterval(poll,60000);
 }
 </script></html>'''.replace("PAYLOAD", payload)
     path = Path(path)

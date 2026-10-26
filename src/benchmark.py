@@ -394,24 +394,25 @@ class ProgressPublisher:
     def publish(self, directory, status, *, first_result=False, force=False):
         if not self.due(first_result=first_result, force=force):
             return
+        started = time.monotonic()
         try:
-            from publish_progress import GitHub, compact_payload, comparison_rows, publish
+            from publish_progress import GitHub, compact_payload, comparison_rows, publish, safe_error_summary
 
             # A new API instance gives each publication its own short deadline.
             repository = os.environ["GITHUB_REPOSITORY"]
-            api = GitHub(repository, os.environ["GITHUB_TOKEN"], timeout_seconds=15)
             payload = compact_payload(repository, os.environ["BENCHMARK_PLATFORM"],
                 int(os.environ["GITHUB_RUN_ID"]), int(os.getenv("GITHUB_RUN_ATTEMPT", "1")),
                 comparison_rows(directory, read_json(directory / "results.json")), status, "running")
+            api = GitHub(repository, os.environ["GITHUB_TOKEN"], timeout_seconds=45)
             publish(api, payload)
             self.retry_after = float("-inf")
         except Exception as error:
             # Error messages can contain URLs or credentials supplied by libraries.
-            # Report only the exception type and keep every recorded measurement.
-            print(f"Progress publication failed ({type(error).__name__}), retrying after 30 seconds",
+            # Log safe request metadata and keep every recorded measurement.
+            print(f"Progress publication failed ({safe_error_summary(error)}), retrying after one minute",
                   file=sys.stderr, flush=True)
-            self.retry_after = time.monotonic() + 30
-        self.next_update = time.monotonic() + 30
+            self.retry_after = time.monotonic() + 60
+        self.next_update = started + 60
 
 
 def run(args):

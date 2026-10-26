@@ -108,7 +108,8 @@ class FakeAPI:
                 raise self.dispatch_error
             identity = self.next_run
             self.next_run += 1
-            self.runs[identity] = dict(self.run(identity, body["inputs"]), status="pending", conclusion=None)
+            self.runs[identity] = dict(self.run(identity, body["inputs"]), status="pending", conclusion=None,
+                                       head_sha=self.ref_sha)
             if self.dispatch_error:
                 raise self.dispatch_error
             return {} if self.empty_receipt else dict(workflow_run_id=identity)
@@ -377,6 +378,23 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(queue.advance(api)["status"], "complete")
         self.assertTrue(api.disabled)
         self.assertEqual(len(api.dispatches()), 2)
+
+    def test_controller_update_preserves_original_checkpoint_revision(self):
+        api = self.completing_api()
+        queue.advance(api)
+        api.finish_predictions(101, 1)
+        # A publication-only update must not relabel the earlier measurements.
+        api.state.update(source_ref="b" * 40, dispatch_ref="updated-progress-controller")
+        api.ref_sha = "b" * 40
+        result = queue.advance(api)
+        self.assertEqual(result["status"], "dispatched")
+        receipt = api.state["dispatched"]["prol_spheroid:0.01"]
+        self.assertEqual(receipt["source_ref"], "b" * 40)
+        self.assertEqual(receipt["history"][0]["source_ref"], "a" * 40)
+        self.assertEqual(receipt["recorded_before"], 1)
+        self.assertEqual(api.dispatches()[-1]["inputs"]["resume_run_id"], "101")
+        api.finish_predictions(102, 3, source_ref="b" * 40)
+        self.assertEqual(queue.advance(api)["key"], "echosms:0.01")
 
     def test_no_progress_or_lost_records_pause_instead_of_repeating_empty_runs(self):
         for first, second in ((0, 0), (1, 1), (2, 1)):

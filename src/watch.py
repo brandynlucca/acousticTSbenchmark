@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--run", required=True, type=int)
     parser.add_argument("--platform", default="ubuntu-latest")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--interval", default=30, type=float)
+    parser.add_argument("--interval", default=60, type=float)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     if args.interval < 10:

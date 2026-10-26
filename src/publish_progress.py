@@ -2,7 +2,10 @@
 
 import argparse
 import base64
+from collections import OrderedDict
 from datetime import datetime, timezone
+import gzip
+import hashlib
 import io
 import json
 import math
@@ -11,7 +14,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
@@ -36,12 +39,35 @@ MAX_RETAINED_BYTES = 512 * 1024 * 1024
 MAX_REFERENCE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+SNAPSHOT_COMPRESSION_THRESHOLD = 64 * 1024
+SNAPSHOT_GUARD_FIELDS = ("run_id", "run_attempt", "platform", "semimajor_m", "published_at", "state", "status")
+_SNAPSHOT_GUARDS = OrderedDict()
 
 
 class APIError(RuntimeError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, *, method=None, path=None):
         super().__init__(f"GitHub API HTTP {status}: {message}")
         self.status = status
+        self.method = method
+        self.path = path
+
+
+def safe_error_summary(error, api=None):
+    """Describe network failures without including remote URLs or credentials."""
+    description = type(error).__name__
+    if isinstance(error, APIError):
+        description += f" HTTP {error.status}"
+    if isinstance(error, URLError) and isinstance(getattr(error.reason, "errno", None), int):
+        description += f" errno {error.reason.errno}"
+    request = getattr(api, "last_request", None)
+    method, path = getattr(error, "method", None), getattr(error, "path", None)
+    if not method and isinstance(request, tuple) and len(request) == 2:
+        method, path = request
+    if isinstance(path, str):
+        path = path.split("?", 1)[0]
+    if method in ("GET", "POST", "PUT", "PATCH", "DELETE") and isinstance(path, str) and re.fullmatch(r"/[A-Za-z0-9_./-]+", path):
+        description += f" during {method} {path}"
+    return description
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -82,6 +108,7 @@ class GitHub:
     def request(self, method, path, body=None):
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("GitHub API paths must be relative to the repository")
+        self.last_request = (method, path)
         data = None if body is None else json.dumps(body, allow_nan=False).encode("utf-8")
         request = Request(f"https://api.github.com/repos/{self.repository}{path}", data=data,
                           method=method, headers={"Accept": "application/vnd.github+json",
@@ -95,7 +122,10 @@ class GitHub:
                 return json.loads(content) if content else None
         except HTTPError as error:
             # Do not include headers, tokens, signed URLs, or request bodies in errors.
-            raise APIError(error.code, error.reason) from None
+            raise APIError(error.code, error.reason, method=method, path=path) from None
+        except OSError as error:
+            error.method, error.path = method, path
+            raise
 
     def archive(self, artifact_id):
         return self._download_archive(f"/actions/artifacts/{int(artifact_id)}/zip")
@@ -479,6 +509,61 @@ def snapshot_filename(platform, semimajor=None):
     return f"{platform}-a-{format(semimajor, '.15g')}.json"
 
 
+def encode_snapshot(payload):
+    """Keep small snapshots readable and compress large snapshots losslessly."""
+    serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(serialized) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Progress snapshot exceeds the supported size")
+    if len(serialized) <= SNAPSHOT_COMPRESSION_THRESHOLD:
+        return dict(payload)
+    envelope = {key: payload.get(key) for key in SNAPSHOT_GUARD_FIELDS}
+    envelope.update(schema_version=2, encoding="gzip-base64", decoded_bytes=len(serialized),
+        data=base64.b64encode(gzip.compress(serialized, compresslevel=6, mtime=0)).decode("ascii"))
+    if len(json.dumps(envelope, allow_nan=False, separators=(",", ":")).encode("utf-8")) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Encoded progress snapshot exceeds the supported size")
+    return envelope
+
+
+def decode_snapshot(value):
+    """Decode a bounded compressed envelope and validate its ordering metadata."""
+    if not isinstance(value, dict):
+        raise ValueError("Progress snapshot must contain an object")
+    if value.get("schema_version") != 2:
+        return value
+    expected = value.get("decoded_bytes")
+    encoded = value.get("data")
+    if (value.get("encoding") != "gzip-base64" or type(expected) is not int
+            or not 0 < expected <= MAX_SNAPSHOT_BYTES or not isinstance(encoded, str)
+            or len(encoded) > 4 * ((MAX_SNAPSHOT_BYTES + 2) // 3)):
+        raise ValueError("Invalid compressed progress snapshot")
+    compressed = base64.b64decode(encoded, validate=True)
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+        decoded = stream.read(expected + 1)
+    if len(decoded) != expected:
+        raise ValueError("Decoded progress snapshot has an invalid size")
+    result = json.loads(decoded)
+    if (not isinstance(result, dict) or result.get("schema_version") != 1
+            or any(result.get(key) != value.get(key) for key in SNAPSHOT_GUARD_FIELDS)):
+        raise ValueError("Decoded progress snapshot disagrees with its publication metadata")
+    return result
+
+
+def _blob_snapshot(value):
+    if value.get("encoding") != "base64":
+        raise ValueError("GitHub returned an unsupported content encoding")
+    encoded = "".join(value["content"].split())
+    if (int(value.get("size", 0)) > MAX_SNAPSHOT_BYTES or
+            len(encoded) > 4 * ((MAX_SNAPSHOT_BYTES + 2) // 3)):
+        raise ValueError("Existing progress snapshot exceeds the supported size")
+    decoded = base64.b64decode(encoded, validate=True)
+    if len(decoded) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Existing progress snapshot exceeds the supported size")
+    result = json.loads(decoded)
+    if not isinstance(result, dict):
+        raise ValueError("Progress snapshot must contain an object")
+    return result
+
+
 def existing_snapshot(api, platform, filename=None):
     allowed = {snapshot_filename(platform), *(snapshot_filename(platform, size) for size in SEMIMAJOR_OPTIONS)}
     filename = snapshot_filename(platform) if filename is None else filename
@@ -497,65 +582,94 @@ def existing_snapshot(api, platform, filename=None):
     value = content
     if content.get("encoding") == "none" or not content.get("content"):
         value = api.request("GET", f"/git/blobs/{content['sha']}")
-    if value.get("encoding") != "base64":
-        raise ValueError("GitHub returned an unsupported content encoding")
-    encoded = "".join(value["content"].split())
-    if (int(value.get("size", 0)) > MAX_SNAPSHOT_BYTES or
-            len(encoded) > 4 * ((MAX_SNAPSHOT_BYTES + 2) // 3)):
-        raise ValueError("Existing progress snapshot exceeds the supported size")
-    decoded = base64.b64decode(encoded, validate=True)
-    if len(decoded) > MAX_SNAPSHOT_BYTES:
-        raise ValueError("Existing progress snapshot exceeds the supported size")
-    return json.loads(decoded), content["sha"]
+    return decode_snapshot(_blob_snapshot(value)), content["sha"]
 
 
-def _publish_snapshot(api, payload, filename, encoded):
+def _cache_guard(api, sha, value):
+    key = (api.repository, sha)
+    guard = {field: value.get(field) for field in SNAPSHOT_GUARD_FIELDS}
+    if not isinstance(guard.get("status"), dict):
+        raise ValueError("Progress publication metadata lacks its status")
+    guard["status"] = {field: guard["status"].get(field) for field in ("recorded", "updated_at")}
+    _SNAPSHOT_GUARDS[key] = guard
+    _SNAPSHOT_GUARDS.move_to_end(key)
+    while len(_SNAPSHOT_GUARDS) > 64:
+        _SNAPSHOT_GUARDS.popitem(last=False)
+    return _SNAPSHOT_GUARDS[key]
+
+
+def _snapshot_guard(api, entry):
+    if entry is None:
+        return None
+    if entry.get("type") != "blob" or entry.get("size", 0) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("Invalid or oversized progress snapshot tree entry")
+    key = (api.repository, entry["sha"])
+    if key in _SNAPSHOT_GUARDS:
+        _SNAPSHOT_GUARDS.move_to_end(key)
+        return _SNAPSHOT_GUARDS[key]
+    value = _blob_snapshot(api.request("GET", f"/git/blobs/{entry['sha']}"))
+    if value.get("schema_version") == 2 and value.get("encoding") != "gzip-base64":
+        raise ValueError("Unsupported compressed progress snapshot")
+    return _cache_guard(api, entry["sha"], value)
+
+
+def _progress_tree(api):
+    try:
+        head = api.request("GET", f"/git/ref/heads/{BRANCH}")["object"]["sha"]
+    except APIError as error:
+        if error.status == 404:
+            return None, None, {}
+        raise
+    commit = api.request("GET", f"/git/commits/{head}")
+    tree_sha = commit["tree"]["sha"]
+    tree = api.request("GET", f"/git/trees/{tree_sha}")
+    if tree.get("truncated"):
+        raise ValueError("Progress branch tree listing is incomplete")
+    return head, tree_sha, {entry["path"]: entry for entry in tree["tree"]}
+
+
+def publish(api, payload):
+    """Atomically update both progress aliases with one compressed Git blob."""
     platform = payload["platform"]
+    names = [snapshot_filename(platform)]
+    semimajor = payload.get("semimajor_m")
+    if not isinstance(semimajor, bool) and semimajor in SEMIMAJOR_OPTIONS:
+        names.insert(0, snapshot_filename(platform, semimajor))
+    value = encode_snapshot(payload)
+    serialized = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    encoded = base64.b64encode(serialized).decode()
+    proposed_sha = hashlib.sha1(f"blob {len(serialized)}\0".encode() + serialized).hexdigest()
+    _cache_guard(api, proposed_sha, payload)
+    blob = None
     message = f"Update {platform} progress for run {payload['run_id']} attempt {payload['run_attempt']}"
-    for _ in range(4):
-        try:
-            api.request("GET", f"/git/ref/heads/{BRANCH}")
-        except APIError as error:
-            if error.status != 404:
-                raise
-            blob = api.request("POST", "/git/blobs", dict(content=encoded, encoding="base64"))
-            tree = api.request("POST", "/git/trees", {"tree": [dict(path=filename,
-                               mode="100644", type="blob", sha=blob["sha"])]})
-            commit = api.request("POST", "/git/commits", dict(message=message, tree=tree["sha"], parents=[]))
-            try:
-                api.request("POST", "/git/refs", dict(ref=f"refs/heads/{BRANCH}", sha=commit["sha"]))
-                return True
-            except APIError as conflict:
-                if conflict.status not in (409, 422):
-                    raise
-                continue
-        current, sha = existing_snapshot(api, platform, filename)
-        if not should_publish(current, payload):
+    for attempt in range(4):
+        head, tree_sha, entries = _progress_tree(api)
+        selected = [name for name in names if entries.get(name, {}).get("sha") != proposed_sha
+                    and should_publish(_snapshot_guard(api, entries.get(name)), payload)]
+        if not selected:
             return False
-        body = dict(message=message, content=encoded, branch=BRANCH)
-        if sha is not None:
-            body["sha"] = sha
+        if blob is None:
+            blob = api.request("POST", "/git/blobs", dict(content=encoded, encoding="base64"))
+            if blob["sha"] != proposed_sha:
+                raise ValueError("Published progress blob does not match its content")
+        body = dict(tree=[dict(path=name, mode="100644", type="blob", sha=blob["sha"]) for name in selected])
+        if tree_sha:
+            body["base_tree"] = tree_sha
+        tree = api.request("POST", "/git/trees", body)
+        commit = api.request("POST", "/git/commits", dict(message=message, tree=tree["sha"],
+                             parents=[head] if head else []))
         try:
-            api.request("PUT", f"/contents/{filename}", body)
+            if head:
+                api.request("PATCH", f"/git/refs/heads/{BRANCH}", dict(sha=commit["sha"], force=False))
+            else:
+                api.request("POST", "/git/refs", dict(ref=f"refs/heads/{BRANCH}", sha=commit["sha"]))
             return True
         except APIError as error:
             if error.status not in (409, 422):
                 raise
+            if attempt < 3:
+                time.sleep(.1 * (attempt + 1))
     raise RuntimeError("Progress changed concurrently too often. Retry publication")
-
-
-def publish(api, payload):
-    platform = payload["platform"]
-    latest = snapshot_filename(platform)
-    serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
-    if len(serialized) > MAX_SNAPSHOT_BYTES:
-        raise ValueError("Progress snapshot exceeds the supported size")
-    encoded = base64.b64encode(serialized).decode()
-    semimajor = payload.get("semimajor_m")
-    changed = False
-    if not isinstance(semimajor, bool) and semimajor in SEMIMAJOR_OPTIONS:
-        changed = _publish_snapshot(api, payload, snapshot_filename(platform, semimajor), encoded)
-    return _publish_snapshot(api, payload, latest, encoded) or changed
 
 
 def main():
@@ -599,6 +713,7 @@ def main():
                           updated_at=datetime.now(timezone.utc).isoformat())
         payload = compact_payload(args.repository, args.platform, args.run_id, args.run_attempt,
                                   comparison_rows(args.directory, rows), status, args.state)
+    api = GitHub(args.repository, os.environ.get("GITHUB_TOKEN"), timeout_seconds=45)
     changed = publish(api, payload)
     print(f"{'Published' if changed else 'Kept newer snapshot for'} {args.platform} progress")
 
@@ -607,5 +722,5 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, RuntimeError, OSError, zipfile.BadZipFile) as error:
-        print(f"Progress publication failed: {error}", file=sys.stderr)
+        print(f"Progress publication failed: {safe_error_summary(error)}", file=sys.stderr)
         raise SystemExit(1)

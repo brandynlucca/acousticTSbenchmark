@@ -99,7 +99,9 @@ def validate_state(state, repository):
                         not isinstance(previous.get("inputs"), dict) or
                         previous is not receipt and "history" in previous or
                         "recorded_before" in previous and
-                        (type(previous["recorded_before"]) is not int or previous["recorded_before"] < 0)):
+                        (type(previous["recorded_before"]) is not int or previous["recorded_before"] < 0) or
+                        "source_ref" in previous and (not isinstance(previous["source_ref"], str) or
+                            not re.fullmatch(r"[a-f0-9]{40}", previous["source_ref"]))):
                     raise ValueError("Invalid or duplicate benchmark continuation receipt")
                 run_ids.add(previous["run_id"])
         seen.add(request["key"])
@@ -239,7 +241,8 @@ def record_receipt(api, state, sha, identity, inputs):
     intent = state["dispatch_intent"]
     key = intent["key"]
     receipt = dict(run_id=identity,
-        url=f"https://github.com/{api.repository}/actions/runs/{identity}", inputs=inputs)
+        url=f"https://github.com/{api.repository}/actions/runs/{identity}", inputs=inputs,
+        source_ref=state["source_ref"])
     if "continuation_of" in intent:
         previous = state["dispatched"][key]
         receipt.update(recorded_before=intent["recorded_before"],
@@ -303,7 +306,8 @@ def advance(api):
         pending_request = state["requests"][index - 1]
         receipt = state["dispatched"][pending_request["key"]]
         try:
-            recorded, planned = completion_progress(api, run, pending_request, state["source_ref"])
+            recorded, planned = completion_progress(api, run, pending_request,
+                receipt.get("source_ref", state["source_ref"]))
         except (ValueError, KeyError) as error:
             return pause(api, state, sha, f"Cannot verify benchmark {previous} completion: {error}")
         if recorded < planned:
