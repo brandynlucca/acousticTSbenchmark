@@ -6,10 +6,12 @@ from pathlib import Path
 
 
 def render_report(path, rows, status, repository=None):
+    from benchmark import CAPABILITIES
     from reference_curves import curves_from_rows
 
     payload = json.dumps({"rows": rows, "status": status, "repository": repository,
-                          "reference_curves": curves_from_rows(rows)}, allow_nan=False).replace("<", "\\u003c")
+                          "reference_curves": curves_from_rows(rows),
+                          "capabilities": CAPABILITIES}, allow_nan=False).replace("<", "\\u003c")
     document = '''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <meta http-equiv="refresh" content="30"><title>Spheroid timing progress</title>
@@ -43,7 +45,6 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p id="data-run" hidden>Displayed data: <a id="data-run-link" target="_blank" rel="noopener"></a><span id="data-run-detail"></span></p>
 <p id="status"></p>
 <p id="latest-prediction" class="note" hidden></p>
-<p id="retained-status" class="note" hidden></p>
 <p id="reference-status" class="note"></p>
 <p><a id="csv-link" href="results.csv">Download CSV</a> · <a id="json-link" href="results.json">Full records</a> <span id="manifest-link">· <a href="manifest.json">Campaign manifest</a></span></p>
 <p><label>Semimajor axis a (m) <select id="semimajor" aria-describedby="coverage-note"></select></label>
@@ -52,7 +53,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
-<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Coverage of the displayed campaign grid. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
+<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
@@ -64,6 +65,9 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
 let externalReferenceCurves=[];
 const repository=data.repository;
+const capabilities=data.capabilities;
+function supportsBoundary(software,boundary){return !capabilities?.[software]||capabilities[software].includes(boundary);}
+function applicable(row){return supportsBoundary(row.software,row.boundary);}
 const referenceColor='#228B22';
 const colors={acousticts:'#0072B2',prol_spheroid:'#D55E00',echosms:'#CC79A7',liquid_spheroid:'#6b5b00'};
 const labels={acousticts:'acousticTS',prol_spheroid:'Prol_Spheroid',acousticscattering:'AcousticScattering.jl',echosms:'echoSMs',liquid_spheroid:'liquid_spheroid'};
@@ -115,20 +119,16 @@ updateAspects();
 updateIncidences();
 try {aspect.value=localStorage.getItem('benchmark-aspect')||aspect.value; if(!aspect.value)aspect.selectedIndex=0;metric.value=localStorage.getItem('benchmark-metric')||metric.value;axis.value=localStorage.getItem('benchmark-axis')||axis.value;layout.value=localStorage.getItem('benchmark-layout')||'paired';}catch(e){}
 function updateStatus(){
- const s=data.status,counts=s.outcomes||{},success=counts.ok||0,pending=counts.pending??Math.max(0,(s.planned||0)-(s.recorded||0));
- const other=Math.max(0,(s.recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
+ const s=data.status,active=benchmarkProgress().filter(summary=>!summary.retained),known=active.length&&active.every(summary=>summary.planned!==null);
+ const observations=rows.filter(r=>matchesSize(r)&&applicable(r)&&r.measurement_role!=='retained'&&r.status!=='pending');
+ const planned=known?active.reduce((sum,g)=>sum+g.planned,0):null,recorded=known?active.reduce((sum,g)=>sum+g.recorded,0):observations.length;
+ const success=known?active.reduce((sum,g)=>sum+g.success,0):observations.filter(r=>r.status==='ok').length,pending=known?planned-recorded:null;
+ const other=Math.max(0,(recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
  const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
- document.getElementById('status').textContent=s.planned?`${s.recorded} / ${s.planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:'Waiting for the first benchmark checkpoint.';
- const latest=rows.filter(r=>r.measurement_role!=='retained'&&r.status!=='pending').at(-1),latestNote=document.getElementById('latest-prediction');
+ document.getElementById('status').textContent=planned?`${recorded} / ${planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:known?'No supported benchmark cases in this run.':recorded?`${recorded} recorded · ${success} successful · ${other} failed or skipped · Planned total unavailable`:'Waiting for the benchmark plan.';
+ const latest=rows.filter(r=>applicable(r)&&r.measurement_role!=='retained'&&r.status!=='pending').at(-1),latestNote=document.getElementById('latest-prediction');
  latestNote.hidden=!latest;
  if(latest)latestNote.textContent=`Latest recorded prediction: ${labels[latest.software]||latest.software}, ${boundaryLabels[latest.boundary]||latest.boundary}, a = ${latest.semimajor_m??snapshotSize(data)} m, aspect ratio ${latest.aspect_ratio}, ${latest.incidence_deg}°, ${latest.frequency_hz/1000} kHz. Other selections update when their predictions run.`;
- const retained=rows.filter(r=>r.measurement_role==='retained'),note=document.getElementById('retained-status');
- note.hidden=!retained.length;
- if(retained.length){
-  const active=data.active_software||[...new Set(rows.filter(r=>r.measurement_role!=='retained').map(r=>r.software))];
-  const origins=[...new Set(retained.map(r=>`${labels[r.software]||r.software} (${(r.source_sha||'').slice(0,7)}, run ${r.retained_from_run_id})`))];
-  note.textContent=`Active software: ${active.map(name=>labels[name]||name).join(', ')}. ${retained.length} saved measurements retained for comparison: ${origins.join(', ')}. Progress counts above apply only to the active software. Retained curves use their original versions. BEM / FEM-BEM remains the reference for ΔTS.`;
- }
 }
 updateStatus();
 const legend=document.getElementById('legend');
@@ -178,21 +178,22 @@ function benchmarkProgress(selected=false,boundary=null){
  const templates=active.map(name=>(groups||[]).filter(g=>g.software===name).map(g=>[key(g),g.planned]).sort((a,b)=>a[0].localeCompare(b[0])));
  const known=!!groups&&templates.length>0&&templates[0].length>0&&templates.every(t=>JSON.stringify(t)===JSON.stringify(templates[0]));
  const template=known?new Map(templates[0]):null;
- const total=known?groups.filter(g=>g.software===active[0]&&inScope(g)).reduce((sum,g)=>sum+g.planned,0):null;
  return programs.map(software=>{
-  const scoped=(groups||[]).filter(g=>g.software===software&&inScope(g));
-  const observed=rows.filter(r=>matchesSize(r)&&r.software===software&&inScope(r)&&r.status!=='pending');
+  const supported=g=>supportsBoundary(software,g.boundary);
+  const total=known?groups.filter(g=>g.software===active[0]&&inScope(g)&&supported(g)).reduce((sum,g)=>sum+g.planned,0):null;
+  const scoped=(groups||[]).filter(g=>g.software===software&&inScope(g)&&supported(g));
+  const observed=rows.filter(r=>matchesSize(r)&&r.software===software&&inScope(r)&&supported(r)&&r.status!=='pending');
   const success=groups?scoped.reduce((sum,g)=>sum+g.success,0):observed.filter(r=>r.status==='ok').length;
   const other=groups?scoped.reduce((sum,g)=>sum+g.other_recorded,0):observed.filter(r=>r.status!=='ok').length;
   const compatible=known&&scoped.every(g=>template.has(key(g))&&g.success+g.other_recorded<=template.get(key(g)))&&observed.every(r=>!data.axes?.[r.aspect_ratio]?.frequencies_hz||data.axes[r.aspect_ratio].frequencies_hz.includes(r.frequency_hz));
-  const planned=compatible&&total>0?total:null,recorded=success+other;
+  const planned=compatible?total:null,recorded=success+other;
   return {software,retained:retained.has(software),success,other,recorded,planned,pending:planned===null?null:planned-recorded};
- });
+ }).filter(summary=>!boundary||supportsBoundary(summary.software,boundary));
 }
 function progressBar(summary,showName=true){
  const {software,success,other,recorded,planned,pending}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',colors[software]);
  const title=document.createElement('div');title.className='progress-title';
- if(showName){const name=document.createElement('strong');name.textContent=labels[software]+(summary.retained?' (retained)':'');title.append(name);}
+ if(showName){const name=document.createElement('strong');name.textContent=labels[software];title.append(name);}
  const percent=planned===null?null:(recorded===planned?100:Math.min(99.99,100*recorded/planned));
  const number=document.createElement('span');number.textContent=percent===null?'Total unavailable':`${percent.toFixed(2)}%`;title.append(number);node.append(title);
  const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${labels[software]} recorded cases`);track.setAttribute('aria-valuemin','0');
@@ -204,9 +205,9 @@ function progressBar(summary,showName=true){
  if(showName){const detail=document.createElement('div');detail.textContent=`${success.toLocaleString()} successful · ${other.toLocaleString()} failed or skipped`;counts.append(detail);}node.append(counts);return node;
 }
 function renderProgress(){
- const selected=document.getElementById('progress-scope').value==='selected',container=document.getElementById('software-progress'),summaries=benchmarkProgress(selected);
+ const selected=document.getElementById('progress-scope').value==='selected',container=document.getElementById('software-progress'),all=benchmarkProgress(selected),summaries=all.filter(summary=>summary.planned!==0);
  container.replaceChildren(...summaries.map(summary=>progressBar(summary)));
- document.getElementById('progress-context').textContent=!summaries.length?'Waiting for the benchmark plan.':`${data.platform?data.platform+' · ':''}a = ${semimajor.value} m · ${selected?'aspect ratio '+aspect.value+' · '+(incidence.value==='all'?'all incidences':incidence.value+'° incidence'):'all aspect ratios and incidences'} · all planned boundaries`;
+ document.getElementById('progress-context').textContent=!summaries.length?(all.length?'No supported cases in this selection.':'Waiting for the benchmark plan.'):`${data.platform?data.platform+' · ':''}a = ${semimajor.value} m · ${selected?'aspect ratio '+aspect.value+' · '+(incidence.value==='all'?'all incidences':incidence.value+'° incidence'):'all aspect ratios and incidences'} · supported boundaries only`;
 }
 function extentFor(values,zero=false){let lo=values.length?values.reduce((a,b)=>Math.min(a,b)):0,hi=values.length?values.reduce((a,b)=>Math.max(a,b)):1;if(zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}if(lo===hi){lo-=.5;hi+=.5;}const padding=(hi-lo)*.08;return [lo-padding,hi+padding];}
 function angleStyle(angle){
@@ -264,12 +265,12 @@ function render(){
  axis.disabled=layout.value==='tradeoff';
  try{localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
- const selected=rows.filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
+ const selected=rows.filter(r=>applicable(r)&&matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
  const selectedReferences=referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
  const showReferences=layout.value==='single'&&field==='ts_db';
  referenceLegend.hidden=!showReferences||!selectedReferences.length;
- const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
- const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>r.aspect_ratio===Number(aspect.value));
+ const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
+ const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value));
  const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db)),failures=selected.filter(timedFailure);
  const selectedSoftware=new Set([...selected.map(r=>r.software),...plannedGroups.map(r=>r.software)]);
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
@@ -280,7 +281,7 @@ function render(){
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
  renderAngles(selectedAngles);
- document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Campaign progress above includes every planned case in the displayed run.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
+ document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Only boundaries supported by each software are included.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
  plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
@@ -362,6 +363,7 @@ function render(){
  const table=document.getElementById('coverage');table.replaceChildren();
  const completions=Object.fromEntries(Object.keys(boundaryLabels).map(boundary=>[boundary,benchmarkProgress(true,boundary)]));
  for(const software of Object.keys(colors))for(const boundary of Object.keys(boundaryLabels)){
+  if(!supportsBoundary(software,boundary))continue;
   const completion=completions[boundary].find(summary=>summary.software===software);
   const coverage=coverageGroups?.find(c=>c.software===software&&c.boundary===boundary);
   const planned=plannedGroups.some(c=>c.software===software&&c.boundary===boundary);
@@ -372,7 +374,7 @@ function render(){
   const remaining=completion?.pending??'Unknown';
   const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
-  const softwareLabel=labels[software]+(completion?.retained||group.some(r=>r.measurement_role==='retained')?' (retained)':'');
+  const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
   const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
   for(const value of [successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
@@ -408,7 +410,7 @@ if(repository){
   if(data.run_id){
    dataLink.href=data.run_url||`https://github.com/${repository}/actions/runs/${data.run_id}`;
    dataLink.textContent=`Run ${data.run_id}`;
-   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value} · a = ${semimajor.value} m. ${data.retained_count?'Progress counts cover this run. Retained comparison curves are identified below.':'Counts, failures and plots below belong to this run.'}`;
+   document.getElementById('data-run-detail').textContent=` · attempt ${data.run_attempt||1} · ${data.platform||platform.value} · a = ${semimajor.value} m. Progress counts above cover the active software. Each software has its own completion bar below.`;
   }
   const warning=document.getElementById('data-run-warning'),old=data.run_id&&current&&runOrder(current,data)>0;
   warning.hidden=!old;
@@ -494,7 +496,7 @@ if(repository){
    document.getElementById('csv-link').href=data.artifacts_url||((data.run_url||runLink.href)+'#artifacts');
    const jsonLink=document.getElementById('json-link');jsonLink.hidden=false;jsonLink.href=url;jsonLink.textContent='Progress JSON';
    showRun();
-  }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points are retained.`;showRun();}}
+  }catch(error){if(requestGeneration===generation){connection.textContent=`Unable to refresh: ${error.message}. Retrying in 30 seconds. Existing points stay visible.`;showRun();}}
   finally{busy=false;if(requestGeneration!==generation)poll();}
  }
  function changeSelection(){generation++;clearReferenceOverlay();data={rows:[],status:{},repository};rows=[];revision='';updateAspects();updateIncidences();updateStatus();render();showRun();document.getElementById('csv-link').href=workflowURL;document.getElementById('json-link').hidden=true;connection.textContent='Connecting…';poll();}
