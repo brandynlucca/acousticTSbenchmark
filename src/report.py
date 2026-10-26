@@ -462,7 +462,10 @@ if(repository){
     }
     return response;
    }
-   let filename=`${chosen}.json`,response=await snapshot(filename,!preferredSize||snapshotSize(data)===Number(preferredSize));
+   // Size snapshots are published first. The platform alias may lag if a
+   // publisher reaches its deadline before updating the second file.
+   let filename=preferredSize?`${chosen}-a-${Number(preferredSize)}.json`:`${chosen}.json`,response=await snapshot(filename,true);
+   if(preferredSize&&response.status===404){filename=`${chosen}.json`;response=await snapshot(filename,false);}
    if(requestGeneration!==generation)return;
    // Source-pinned older runs omit a. A one-time artifact import records their exact size.
    if(response.ok&&snapshotSize(response.value)===null){
@@ -477,8 +480,9 @@ if(repository){
    if(requestGeneration!==generation)return;
    const latestSize=response.ok?snapshotSize(response.value):null;
    if(!preferredSize&&latestSize!==null){preferredSize=String(latestSize);updateSizes();semimajor.value=preferredSize;}
-   if(preferredSize&&latestSize!==Number(preferredSize)){
-    filename=`${chosen}-a-${Number(preferredSize)}.json`;response=await snapshot(filename,true);
+   if(preferredSize&&filename!==`${chosen}-a-${Number(preferredSize)}.json`){
+    const sizedFilename=`${chosen}-a-${Number(preferredSize)}.json`,sized=await snapshot(sizedFilename,false);
+    if(sized.ok||latestSize!==Number(preferredSize)){filename=sizedFilename;response=sized;}
    }
    if(requestGeneration!==generation)return;
    if(response.status===404){connection.textContent=`No results have been published for ${chosen} at a = ${semimajor.value} m yet. Run a benchmark at this size to populate it.`;showRun();return;}
