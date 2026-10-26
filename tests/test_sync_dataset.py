@@ -64,6 +64,8 @@ class SyncDatasetTests(unittest.TestCase):
         expected = hashlib.sha256(b"download").hexdigest()
         self.assertEqual(api.download("/actions/artifacts/123/zip", path, expected=expected), expected)
         self.assertEqual(path.read_bytes(), b"download")
+        request = api.opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
 
     def test_download_limit_removes_partial_output(self):
         api = sync.DatasetAPI("owner/repository", "secret")
@@ -85,6 +87,7 @@ class SyncDatasetTests(unittest.TestCase):
         original = api.opener.open.call_args_list[0].args[0]
         redirected = api.opener.open.call_args_list[1].args[0]
         self.assertEqual(original.get_header("Authorization"), "Bearer secret")
+        self.assertEqual(original.get_header("Accept"), "application/octet-stream")
         self.assertIsNone(redirected.get_header("Authorization"))
 
     def test_download_rejects_untrusted_redirect_and_path(self):

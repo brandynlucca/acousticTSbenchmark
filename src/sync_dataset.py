@@ -53,7 +53,8 @@ class DatasetAPI(GitHub):
         if not re.fullmatch(r"/actions/artifacts/\d+/zip|/releases/assets/\d+", path):
             raise ValueError("Unsupported dataset download path")
         request = Request(f"https://api.github.com/repos/{self.repository}{path}", headers={
-            "Authorization": f"Bearer {self.token}", "Accept": "application/octet-stream",
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json" if path.startswith("/actions/") else "application/octet-stream",
             "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "acousticTSbenchmark-dataset"})
         try:
             response = self.opener.open(request, timeout=self.timeout())
@@ -219,7 +220,7 @@ def ensure_release(api):
             raise
     return api.request("POST", "/releases", dict(tag_name=RELEASE_TAG, target_commitish="main",
         name="Consolidated benchmark dataset", make_latest="false",
-        body="Indexed benchmark measurements, numerical references, and source provenance. Downloads are updated from saved workflow artifacts."))
+        body="Benchmark data. Initial import in progress."))
 
 
 def publish_dataset(api, connection, database, catalog, previous_sha, processed, errors, remaining):
@@ -248,15 +249,11 @@ def publish_dataset(api, connection, database, catalog, previous_sha, processed,
     # Publish the pointer only after every immutable asset has uploaded. The
     # prior complete dataset stays downloadable if any earlier step fails.
     write_catalog(api, value, previous_sha)
-    body = (f"Updated {value['updated_at']}. **{summary['measurements']:,} supported measurements** across "
-            f"{len(summary['platforms'])} platforms. {summary['references']:,} numerical references.\n\n"
+    body = (f"Updated {value['updated_at']}. **{summary['measurements']:,} measurements**.\n\n"
             f"[SQLite database (.gz)]({assets['database']['url']}) · "
             f"[Measurements CSV (.gz)]({assets['measurements']['url']}) · "
             f"[Comparisons CSV (.gz)]({assets['comparisons']['url']})\n\n"
-            "The database includes complete version history and indexed case fields in SI units. "
-            "Measurements CSV contains every distinct supported observation. Comparisons CSV joins observations to qualified reference versions. "
-            "Repeated copies from resumed runs are deduplicated.\n\n"
-            f"Artifacts awaiting import: {remaining}. Artifacts with import errors: {len(errors)}.")
+            f"Imports: {summary['artifacts']} complete, {remaining} pending, {len(errors)} errors.")
     api.request("PATCH", f"/releases/{release['id']}", dict(body=body))
     keep = {asset["id"] for group in (assets, value["previous_assets"]) for asset in group.values()}
     # Only this feature's obsolete snapshots on its dedicated release are
