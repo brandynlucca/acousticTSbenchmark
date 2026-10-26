@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "source_ref": "29c225487d549c516eea0bfbe5ad8cc4bd747007",
   "dispatch_ref": "benchmark-series-20261026-repair",
@@ -325,7 +325,7 @@
     "liquid_spheroid:0.1": 40171498995,
     "liquid_spheroid:0.5": 40171501026
   },
-  "updated_at": "2026-10-26T14:11:06.131578+00:00",
+  "updated_at": "2026-10-26T14:11:36.811698+00:00",
   "history": [
     {
       "initial_run_id": 40170086146,
@@ -364,5 +364,6 @@
   "recovery": {
     "run_id": 40265517028,
     "reason": "Repair retained metadata export and restore Rtools GCC14.3 before continuing saved Prol and echo predictions"
-  }
+  },
+  "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
 }
