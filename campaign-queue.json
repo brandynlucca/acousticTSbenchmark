@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "status": "paused",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
-  "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
-  "dispatch_ref": "benchmark-series-20261025",
-  "initial_run_id": 40170086146,
+  "source_ref": "29c225487d549c516eea0bfbe5ad8cc4bd747007",
+  "dispatch_ref": "benchmark-series-20261026-repair",
+  "initial_run_id": 40265517028,
   "requests": [
     {
       "key": "prol_spheroid:0.01",
       "semimajor_m": "0.01",
       "software": "prol_spheroid",
-      "parent": "acousticts:0.01",
+      "parent": "echosms_baseline:0.01",
       "inputs": {
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
@@ -290,32 +290,7 @@
       }
     }
   ],
-  "dispatched": {
-    "prol_spheroid:0.01": {
-      "run_id": 40209471033,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40209471033",
-      "inputs": {
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep",
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
-        "resume_run_id": "40170086146"
-      }
-    },
-    "echosms:0.01": {
-      "run_id": 40265517028,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40265517028",
-      "inputs": {
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep",
-        "mode": "extend",
-        "refresh_software": "echosms",
-        "resume_run_id": "40209471033"
-      }
-    }
-  },
+  "dispatched": {},
   "cancelled_runs": {
     "prol_spheroid:0.01": 40171426279,
     "echosms:0.01": 40171456913,
@@ -337,6 +312,44 @@
     "liquid_spheroid:0.1": 40171498995,
     "liquid_spheroid:0.5": 40171501026
   },
-  "updated_at": "2026-10-26T04:56:12.329853+00:00",
-  "reason": "Repairing benchmark startup failures"
+  "updated_at": "2026-10-26T05:10:39.205882+00:00",
+  "history": [
+    {
+      "initial_run_id": 40170086146,
+      "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
+      "dispatch_ref": "benchmark-series-20261025",
+      "dispatched": {
+        "prol_spheroid:0.01": {
+          "run_id": 40209471033,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40209471033",
+          "inputs": {
+            "timing_budget_minutes": "240",
+            "reference_budget_minutes": "0",
+            "case_order": "Complete each frequency sweep",
+            "mode": "extend",
+            "refresh_software": "prol_spheroid",
+            "resume_run_id": "40170086146"
+          }
+        },
+        "echosms:0.01": {
+          "run_id": 40265517028,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40265517028",
+          "inputs": {
+            "timing_budget_minutes": "240",
+            "reference_budget_minutes": "0",
+            "case_order": "Complete each frequency sweep",
+            "mode": "extend",
+            "refresh_software": "echosms",
+            "resume_run_id": "40209471033"
+          }
+        }
+      },
+      "replaced_at": "2026-10-26T05:10:39.205862+00:00"
+    }
+  ],
+  "initial_key": "echosms_baseline:0.01",
+  "recovery": {
+    "run_id": 40265517028,
+    "reason": "Repair retained metadata export and restore Rtools GCC14.3 before continuing saved Prol and echo predictions"
+  }
 }
