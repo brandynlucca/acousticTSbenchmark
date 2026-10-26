@@ -27,6 +27,13 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 #connection{padding:12px 16px;background:#eaf1f4;border-left:3px solid #0072b2;line-height:1.5}
 #data-run-warning{padding:12px 16px;background:#fff2d7;border-left:4px solid #946000;line-height:1.5}
 [hidden]{display:none!important}#livebar{display:flex;align-items:baseline;gap:20px;flex-wrap:wrap}
+.completion-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}.completion-heading label{margin:0;font-size:14px}
+#benchmark-progress{margin:8px 0 18px}#software-progress{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:16px}
+.progress-item{min-width:0}.progress-title{display:flex;justify-content:space-between;gap:12px;font-size:14px;margin-bottom:6px}.progress-title strong{font-weight:600}
+.progress-track{display:flex;height:10px;background:#e9edef;border-radius:3px;overflow:hidden}.progress-track span{background:var(--software-color);flex-shrink:0}
+.progress-track .progress-other{background:repeating-linear-gradient(135deg,var(--software-color) 0,var(--software-color) 3px,#ffffffc9 3px,#ffffffc9 6px)}
+.progress-counts{font-size:13px;line-height:1.5;margin-top:6px;color:#505962;font-variant-numeric:tabular-nums}.progress-unknown{background:repeating-linear-gradient(135deg,#e9edef 0,#e9edef 5px,#fafaf8 5px,#fafaf8 10px)}
+.coverage .progress-item{min-width:170px}.coverage .progress-track{height:7px}.coverage .progress-counts{font-size:12px}.coverage .progress-title{font-size:13px}
 </style>
 <h1>Spheroid timing progress</h1>
 <div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><span id="run-state"></span></div>
@@ -45,11 +52,12 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
+<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Coverage of the displayed campaign grid. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every 30 seconds. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
-<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th><th>RMSE ΔTS (dB)</th><th>Matched predictions</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Sum of measured solve times (s)</th><th>RMSE ΔTS (dB)</th><th>Matched predictions</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <p class="note" id="rmse-note">RMSE takes the median ΔTS across successful matched repetitions of each physical prediction, then √mean(ΔTS²) across those predictions, with equal weight per prediction. Only finite differences with a matched reference are included. Unavailable means no valid comparisons. The matched count includes each frequency and incidence combination once at the selected aspect ratio.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
@@ -147,6 +155,59 @@ function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]
 function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
 function timedFailure(row){return ['numerical_error','nonconverged','worker_error'].includes(row.status)&&Number.isFinite(row.elapsed_seconds)&&row.elapsed_seconds>0;}
 function formatted(value){return Math.abs(value)>0&&Math.abs(value)<.01?value.toExponential(2):value.toFixed(2);}
+function progressGroups(byAngle){
+ const supplied=byAngle?data.incidence_coverage:data.coverage;
+ if(Array.isArray(supplied))return supplied;
+ if(repository)return null;
+ const groups=new Map();
+ for(const row of rows.filter(matchesSize)){
+  const key=JSON.stringify([row.software,row.aspect_ratio,row.boundary,...(byAngle?[row.incidence_deg]:[])]);
+  if(!groups.has(key))groups.set(key,{software:row.software,aspect_ratio:row.aspect_ratio,boundary:row.boundary,incidence_deg:row.incidence_deg,planned:0,success:0,other_recorded:0});
+  const group=groups.get(key);group.planned++;
+  if(row.status==='ok')group.success++;else if(row.status!=='pending')group.other_recorded++;
+ }
+ return [...groups.values()];
+}
+function benchmarkProgress(selected=false,boundary=null){
+ const byAngle=selected&&incidence.value!=='all',groups=progressGroups(byAngle);
+ const retained=new Set(rows.filter(r=>matchesSize(r)&&r.measurement_role==='retained').map(r=>r.software));
+ const programs=Object.keys(colors).filter(name=>groups?.some(g=>g.software===name)||data.coverage?.some(g=>g.software===name)||rows.some(r=>matchesSize(r)&&r.software===name));
+ const active=programs.filter(name=>!retained.has(name));
+ const key=g=>JSON.stringify([g.aspect_ratio,g.boundary,...(byAngle?[g.incidence_deg]:[])]);
+ const inScope=g=>(!selected||g.aspect_ratio===Number(aspect.value)&&(!byAngle||g.incidence_deg===Number(incidence.value)))&&(!boundary||g.boundary===boundary);
+ const templates=active.map(name=>(groups||[]).filter(g=>g.software===name).map(g=>[key(g),g.planned]).sort((a,b)=>a[0].localeCompare(b[0])));
+ const known=!!groups&&templates.length>0&&templates[0].length>0&&templates.every(t=>JSON.stringify(t)===JSON.stringify(templates[0]));
+ const template=known?new Map(templates[0]):null;
+ const total=known?groups.filter(g=>g.software===active[0]&&inScope(g)).reduce((sum,g)=>sum+g.planned,0):null;
+ return programs.map(software=>{
+  const scoped=(groups||[]).filter(g=>g.software===software&&inScope(g));
+  const observed=rows.filter(r=>matchesSize(r)&&r.software===software&&inScope(r)&&r.status!=='pending');
+  const success=groups?scoped.reduce((sum,g)=>sum+g.success,0):observed.filter(r=>r.status==='ok').length;
+  const other=groups?scoped.reduce((sum,g)=>sum+g.other_recorded,0):observed.filter(r=>r.status!=='ok').length;
+  const compatible=known&&scoped.every(g=>template.has(key(g))&&g.success+g.other_recorded<=template.get(key(g)))&&observed.every(r=>!data.axes?.[r.aspect_ratio]?.frequencies_hz||data.axes[r.aspect_ratio].frequencies_hz.includes(r.frequency_hz));
+  const planned=compatible&&total>0?total:null,recorded=success+other;
+  return {software,retained:retained.has(software),success,other,recorded,planned,pending:planned===null?null:planned-recorded};
+ });
+}
+function progressBar(summary,showName=true){
+ const {software,success,other,recorded,planned,pending}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',colors[software]);
+ const title=document.createElement('div');title.className='progress-title';
+ if(showName){const name=document.createElement('strong');name.textContent=labels[software]+(summary.retained?' (retained)':'');title.append(name);}
+ const percent=planned===null?null:(recorded===planned?100:Math.min(99.99,100*recorded/planned));
+ const number=document.createElement('span');number.textContent=percent===null?'Total unavailable':`${percent.toFixed(2)}%`;title.append(number);node.append(title);
+ const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${labels[software]} recorded cases`);track.setAttribute('aria-valuemin','0');
+ const countText=planned===null?`${recorded.toLocaleString()} recorded · planned total unavailable`:`${recorded.toLocaleString()} / ${planned.toLocaleString()} recorded · ${pending.toLocaleString()} pending`;
+ track.setAttribute('aria-valuetext',countText);
+ if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['other',other]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${100*count/planned}%`;track.append(segment);}}
+ else track.classList.add('progress-unknown');
+ node.append(track);const counts=document.createElement('div');counts.className='progress-counts';counts.textContent=countText;
+ if(showName){const detail=document.createElement('div');detail.textContent=`${success.toLocaleString()} successful · ${other.toLocaleString()} failed or skipped`;counts.append(detail);}node.append(counts);return node;
+}
+function renderProgress(){
+ const selected=document.getElementById('progress-scope').value==='selected',container=document.getElementById('software-progress'),summaries=benchmarkProgress(selected);
+ container.replaceChildren(...summaries.map(summary=>progressBar(summary)));
+ document.getElementById('progress-context').textContent=!summaries.length?'Waiting for the benchmark plan.':`${data.platform?data.platform+' · ':''}a = ${semimajor.value} m · ${selected?'aspect ratio '+aspect.value+' · '+(incidence.value==='all'?'all incidences':incidence.value+'° incidence'):'all aspect ratios and incidences'} · all planned boundaries`;
+}
 function extentFor(values,zero=false){let lo=values.length?values.reduce((a,b)=>Math.min(a,b)):0,hi=values.length?values.reduce((a,b)=>Math.max(a,b)):1;if(zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}if(lo===hi){lo-=.5;hi+=.5;}const padding=(hi-lo)*.08;return [lo-padding,hi+padding];}
 function angleStyle(angle){
  if(angle===0)return {dash:'',shape:'circle'};
@@ -198,6 +259,7 @@ function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=fals
  return {svg,x,y};
 }
 function render(){
+ renderProgress();
  if(layout.value!=='single'&&!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))metric.value='elapsed_seconds';
  axis.disabled=layout.value==='tradeoff';
  try{localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
@@ -298,21 +360,26 @@ function render(){
   }
  }
  const table=document.getElementById('coverage');table.replaceChildren();
+ const completions=Object.fromEntries(Object.keys(boundaryLabels).map(boundary=>[boundary,benchmarkProgress(true,boundary)]));
  for(const software of Object.keys(colors))for(const boundary of Object.keys(boundaryLabels)){
+  const completion=completions[boundary].find(summary=>summary.software===software);
   const coverage=coverageGroups?.find(c=>c.software===software&&c.boundary===boundary);
   const planned=plannedGroups.some(c=>c.software===software&&c.boundary===boundary);
-  const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!planned&&!group.length)continue;
+  const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!planned&&!group.length&&!completion?.planned)continue;
   const good=group.filter(r=>r.status==='ok'),pending=group.filter(r=>r.status==='pending');
   const total=coverage?.elapsed_seconds_sum??good.reduce((sum,r)=>sum+r.elapsed_seconds,0),shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
-  const remaining=coverage?.pending??(repository?'Unknown':pending.length);
+  const remaining=completion?.pending??'Unknown';
   const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
-  const softwareLabel=labels[software]+(group.some(r=>r.measurement_role==='retained')?' (retained)':'');
-  for(const value of [softwareLabel,boundaryLabels[boundary],successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  const softwareLabel=labels[software]+(completion?.retained||group.some(r=>r.measurement_role==='retained')?' (retained)':'');
+  for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
+  const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
+  for(const value of [successful,other,remaining,shownTotal,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
+document.getElementById('progress-scope').addEventListener('change',renderProgress);
 semimajor.addEventListener('change',()=>{preferredSize=semimajor.value;try{localStorage.setItem('benchmark-semimajor',preferredSize);}catch(e){}if(!repository){updateAspects();updateIncidences();render();}});
 if(repository){
  document.querySelector('meta[http-equiv="refresh"]').remove();
