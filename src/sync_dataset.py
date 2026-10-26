@@ -278,12 +278,12 @@ def synchronize(api, directory, maximum=8):
     processed = dict((catalog or {}).get("processed", {}))
     candidates = [item for item in select_artifacts(list_artifacts(api)) if str(item["id"]) not in processed]
     if not candidates:
-        return dict(changed=False, pending_artifacts=0, pending_untried=0, import_errors=[])
+        return dict(changed=False, pending_artifacts=0, pending_untried=0, import_errors=[], batch_errors=[])
     errors_by_id = {item["artifact_id"]: item for item in (catalog or {}).get("import_errors", [])
                     if any(candidate["id"] == item["artifact_id"] for candidate in candidates)}
     candidates.sort(key=lambda item: item["id"] in errors_by_id)
     connection, database = restore_database(api, catalog, directory)
-    imported = 0
+    imported, batch_errors = 0, []
     try:
         for artifact in candidates[:maximum]:
             path = directory / "incoming.zip"
@@ -298,6 +298,7 @@ def synchronize(api, directory, maximum=8):
                 print(json.dumps(result), flush=True)
             except (ValueError, OSError, RuntimeError) as error:
                 errors_by_id[artifact["id"]] = dict(artifact_id=artifact["id"], name=artifact["name"], error=str(error)[:300])
+                batch_errors.append(errors_by_id[artifact["id"]])
                 print(f"Artifact {artifact['id']} was not imported: {type(error).__name__}: {str(error)[:200]}", file=sys.stderr, flush=True)
             finally:
                 path.unlink(missing_ok=True)
@@ -306,10 +307,10 @@ def synchronize(api, directory, maximum=8):
         errors = list(errors_by_id.values())
         if imported or not catalog:
             value = publish_dataset(api, connection, database, catalog, previous_sha, processed, errors, remaining)
-            return dict(changed=True, pending_artifacts=remaining, pending_untried=untried, import_errors=errors, summary=value["summary"],
+            return dict(changed=True, pending_artifacts=remaining, pending_untried=untried, import_errors=errors, batch_errors=batch_errors, summary=value["summary"],
                         release_url=value["release_url"])
         write_catalog(api, dict(catalog, import_errors=errors, pending_artifacts=remaining), previous_sha)
-        return dict(changed=False, pending_artifacts=remaining, pending_untried=untried, import_errors=errors)
+        return dict(changed=False, pending_artifacts=remaining, pending_untried=untried, import_errors=errors, batch_errors=batch_errors)
     finally:
         connection.close()
 
@@ -330,7 +331,7 @@ def main():
             output.write(f"pending={result['pending_artifacts']}\n")
             output.write(f"pending_untried={result['pending_untried']}\n")
             output.write(f"changed={str(result['changed']).lower()}\n")
-    if result["import_errors"]:
+    if result["batch_errors"]:
         raise SystemExit(1)
 
 

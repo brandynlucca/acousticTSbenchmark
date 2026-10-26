@@ -195,6 +195,7 @@ class SyncDatasetTests(unittest.TestCase):
         self.assertEqual(result["pending_untried"], 0)
         self.assertIn("1", publish.call_args.args[5])
         self.assertEqual(result["import_errors"][0]["artifact_id"], 2)
+        self.assertEqual(result["batch_errors"], [])
         connection.close.assert_called_once()
 
     def test_all_failed_imports_persist_errors_without_reuploading_existing_database(self):
@@ -205,6 +206,7 @@ class SyncDatasetTests(unittest.TestCase):
             result = sync.synchronize(self.api, self.root)
         self.assertFalse(result["changed"])
         self.assertEqual(result["pending_untried"], 0)
+        self.assertEqual(len(result["batch_errors"]), 1)
         publish.assert_not_called()
         saved = write.call_args.args[1]
         self.assertEqual(saved["assets"], catalog["assets"])
