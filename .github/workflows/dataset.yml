@@ -30,7 +30,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python src/sync_dataset.py --directory "$RUNNER_TEMP/consolidated-dataset" --max-artifacts 8
       - name: Continue the initial backfill in bounded batches
-        if: always() && steps.sync.outputs.pending_untried != '' && steps.sync.outputs.pending_untried != '0'
+        if: always() && ((steps.sync.outputs.pending_untried != '' && steps.sync.outputs.pending_untried != '0') || (steps.sync.outputs.changed == 'true' && steps.sync.outputs.pending != '0'))
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
