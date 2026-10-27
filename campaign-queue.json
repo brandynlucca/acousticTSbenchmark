@@ -36,8 +36,8 @@
       "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f"
     },
     "echosms:0.01": {
-      "run_id": 40438043022,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40438043022",
+      "run_id": 40460365498,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40460365498",
       "inputs": {
         "mode": "extend",
         "refresh_software": "echosms",
@@ -45,10 +45,10 @@
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
-        "resume_run_id": "40412292681"
+        "resume_run_id": "40438043022"
       },
       "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-      "recorded_before": 5312,
+      "recorded_before": 5993,
       "history": [
         {
           "run_id": 40378011322,
@@ -78,6 +78,21 @@
           },
           "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
           "recorded_before": 5102
+        },
+        {
+          "run_id": 40438043022,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40438043022",
+          "inputs": {
+            "mode": "extend",
+            "refresh_software": "echosms",
+            "continuation_platform": "ubuntu-latest",
+            "timing_budget_minutes": "240",
+            "reference_budget_minutes": "0",
+            "case_order": "Complete each frequency sweep",
+            "resume_run_id": "40412292681"
+          },
+          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
+          "recorded_before": 5312
         }
       ]
     }
@@ -502,21 +517,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-27T06:18:56.820043+00:00",
-  "dispatch_intent": {
-    "key": "echosms:0.01",
-    "inputs": {
-      "mode": "extend",
-      "refresh_software": "echosms",
-      "continuation_platform": "ubuntu-latest",
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "case_order": "Complete each frequency sweep",
-      "resume_run_id": "40438043022"
-    },
-    "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-    "created_at": "2026-10-27T06:18:56.820020+00:00",
-    "continuation_of": 40438043022,
-    "recorded_before": 5993
-  }
+  "updated_at": "2026-10-27T06:19:01.096313+00:00"
 }
