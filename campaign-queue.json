@@ -487,5 +487,21 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-26T22:25:20.553301+00:00"
+  "updated_at": "2026-10-27T02:22:24.446924+00:00",
+  "dispatch_intent": {
+    "key": "echosms:0.01",
+    "inputs": {
+      "mode": "extend",
+      "refresh_software": "echosms",
+      "continuation_platform": "ubuntu-latest",
+      "timing_budget_minutes": "240",
+      "reference_budget_minutes": "0",
+      "case_order": "Complete each frequency sweep",
+      "resume_run_id": "40412292681"
+    },
+    "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
+    "created_at": "2026-10-27T02:22:24.446898+00:00",
+    "continuation_of": 40412292681,
+    "recorded_before": 5312
+  }
 }
