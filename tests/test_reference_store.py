@@ -114,6 +114,20 @@ class StoreTests(unittest.TestCase):
         with patch.object(store, "blob_record", side_effect=AssertionError("must use local cache")):
             self.assertEqual(store.restore_cache(self.api, self.jobs, self.work / "restored")["cached"], 1)
 
+    def test_local_reference_cache_uses_a_separate_branch(self):
+        self.save(0)
+        with patch.object(self.api, "request", wraps=self.api.request) as request:
+            self.assertEqual(store.publish_cache(self.api, self.jobs, self.work / "cache",
+                                                branch="local-reference-data"), 1)
+        paths = [call.args[1] for call in request.call_args_list]
+        self.assertIn("/git/ref/heads/local-reference-data", paths)
+        self.assertNotIn("/git/ref/heads/reference-data", paths)
+        created = next(call for call in request.call_args_list
+                       if call.args[:2] == ("POST", "/git/refs"))
+        self.assertEqual(created.args[2]["ref"], "refs/heads/local-reference-data")
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            store.publish_cache(self.api, self.jobs, self.work / "cache", branch="main")
+
     def test_simultaneous_first_publish_preserves_both_shards(self):
         self.save(0)
         self.save(1, "second")
@@ -319,6 +333,30 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(payload["reference_curves"]), 2)
         with self.assertRaisesRegex(ValueError, "Conflicting"):
             curves.publish_curves(api, 123, [dict(points[0], ts_db=-30)])
+
+    def test_shared_qualified_curves_preserve_existing_cases_across_runs(self):
+        points = curves.curves_from_records(self.jobs, {r["reference_id"]: r for r in self.records})
+        saved = {}
+        def request(method, path, body=None):
+            self.assertTrue(path.startswith("/contents/qualified-reference-curves.json"))
+            if method == "GET":
+                if not saved:
+                    raise APIError(404, "missing")
+                return dict(sha="existing", encoding="base64", content=saved["content"])
+            self.assertEqual(method, "PUT")
+            self.assertEqual(body["branch"], "benchmark-data")
+            saved.update(body)
+            return {}
+        api = Mock()
+        api.request.side_effect = request
+        self.assertEqual(curves.publish_shared_curves(api, points[:1]), 1)
+        self.assertEqual(curves.publish_shared_curves(api, points[1:]), 1)
+        self.assertEqual(curves.publish_shared_curves(api, points), 0)
+        payload = json.loads(base64.b64decode(saved["content"]))
+        self.assertIsNone(payload["run_id"])
+        self.assertEqual(len(payload["reference_curves"]), 2)
+        with self.assertRaisesRegex(ValueError, "Conflicting"):
+            curves.publish_shared_curves(api, [dict(points[0], ts_db=-30)])
 
     def test_live_controller_attaches_new_references_without_remeasuring(self):
         self.save(0)

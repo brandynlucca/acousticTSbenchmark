@@ -21,9 +21,11 @@ BRANCH = "reference-data"
 MAX_RECORD_BYTES = 2 * 1024 * 1024
 
 
-def branch_tree(api):
+def branch_tree(api, branch=BRANCH):
+    if branch not in (BRANCH, "local-reference-data"):
+        raise ValueError("Unsupported numerical reference branch")
     try:
-        head = api.request("GET", f"/git/ref/heads/{BRANCH}")["object"]["sha"]
+        head = api.request("GET", f"/git/ref/heads/{branch}")["object"]["sha"]
     except APIError as error:
         if error.status == 404:
             return None, None, {}
@@ -103,7 +105,7 @@ def restore_cache(api, jobs, cache_dir):
     return dict(planned=len(jobs), cached=restored, missing=len(jobs) - restored)
 
 
-def publish_cache(api, jobs, cache_dir):
+def publish_cache(api, jobs, cache_dir, *, branch=BRANCH):
     """Commit new successful keys atomically, retaining concurrent writers' results."""
     records = {}
     by_id = {job["reference_id"]: job for job in jobs}
@@ -114,7 +116,7 @@ def publish_cache(api, jobs, cache_dir):
     if not records:
         return 0
     for _ in range(5):
-        head, tree_sha, tree = branch_tree(api)
+        head, tree_sha, tree = branch_tree(api, branch)
         changes = []
         for path, record in records.items():
             serialized = json.dumps(record, allow_nan=False, separators=(",", ":"))
@@ -142,10 +144,10 @@ def publish_cache(api, jobs, cache_dir):
             tree=new_tree["sha"], parents=[head] if head else []))
         try:
             if head:
-                api.request("PATCH", f"/git/refs/heads/{BRANCH}",
+                api.request("PATCH", f"/git/refs/heads/{branch}",
                             dict(sha=commit["sha"], force=False))
             else:
-                api.request("POST", "/git/refs", dict(ref=f"refs/heads/{BRANCH}", sha=commit["sha"]))
+                api.request("POST", "/git/refs", dict(ref=f"refs/heads/{branch}", sha=commit["sha"]))
             return len(changes)
         except APIError as error:
             if error.status not in (409, 422):

@@ -56,7 +56,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
-<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. GitHub references also require independent Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
+<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Total solve time (s)</th><th>Average solve time (s)</th><th>RMSE ΔTS (dB)</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <p class="note">Total and average solve time include successful timed predictions only.</p>
@@ -64,7 +64,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
-let externalReferenceCurves=[],localReferenceCurves=[];
+let externalReferenceCurves=[],localReferenceCurves=[],sharedReferenceCurves=[];
 const repository=data.repository;
 if(repository)document.getElementById('dataset-link').href=`https://github.com/${repository}/releases/tag/benchmark-dataset`;
 if(repository)document.getElementById('local-reference-link').href=`https://github.com/${repository}/blob/benchmark-data/local-reference-records.json`;
@@ -79,7 +79,7 @@ const semimajor=document.getElementById('semimajor'),aspect=document.getElementB
 const sizeOptions=[.001,.01,.07,.1,.5];
 function referenceCurves(){
  const unique=new Map();
- for(const row of [...localReferenceCurves,...(data.reference_curves||[]),...externalReferenceCurves]){
+ for(const row of [...localReferenceCurves,...sharedReferenceCurves,...(data.reference_curves||[]),...externalReferenceCurves]){
   if(!row||typeof row.physical_id!=='string'||typeof row.reference_id!=='string'||!Number.isFinite(row.ts_db)||!Number.isFinite(row.semimajor_m)||row.semimajor_m<=0||!Number.isFinite(row.aspect_ratio)||!Number.isFinite(row.incidence_deg)||!Number.isFinite(row.frequency_hz))continue;
   unique.set(row.physical_id,row);
  }
@@ -277,7 +277,7 @@ function render(){
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
  const selected=rows.filter(r=>applicable(r)&&matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
  const selectedReferences=referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
- const localCount=selectedReferences.filter(r=>r.origin==='local_manuscript').length;
+ const localCount=selectedReferences.filter(r=>['local_manuscript','local_qualified'].includes(r.origin)).length;
  const showReferences=layout.value==='single'&&field==='ts_db';
  referenceLegend.hidden=!showReferences||!selectedReferences.length;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
@@ -287,7 +287,7 @@ function render(){
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
- document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions available for this selection (${localCount} from local manuscript runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. Local references retain their saved spatial convergence checks. References are reused across platforms.`;
+ document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions available for this selection (${localCount} from local manuscript runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. Saved convergence checks distinguish the manuscript references from independently qualified references. References are reused across platforms.`;
  const allFreq=[...new Set([...(data.axes?.[aspect.value]?.frequencies_hz||selected.map(r=>r.frequency_hz)),...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
@@ -462,6 +462,10 @@ if(repository){
  async function pollLocalReferences(){
   if(Date.now()-lastLocalReferenceCheck<120000)return;
   lastLocalReferenceCheck=Date.now();
+  try{
+   const shared=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/qualified-reference-curves.json?t=${Date.now()}`);
+   if(shared.ok&&shared.value?.schema_version===1&&Array.isArray(shared.value.reference_curves))sharedReferenceCurves=shared.value.reference_curves.map(row=>({...row,origin:'local_qualified'}));
+  }catch(e){}
   try{
    const response=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/local-reference-curves.json?t=${Date.now()}`);
    if(response.ok&&response.value?.schema_version===1&&Array.isArray(response.value.reference_curves))localReferenceCurves=response.value.reference_curves;

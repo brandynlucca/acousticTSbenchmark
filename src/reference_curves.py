@@ -73,10 +73,20 @@ def publish_curves(api, run_id, curves):
 
     if type(run_id) is not int or run_id <= 0:
         raise ValueError("Reference curves require a positive run ID")
+    return _publish_curves(api, f"reference-curves-{run_id}.json", curves, run_id)
+
+
+def publish_shared_curves(api, curves):
+    """Publish independently qualified references for reuse across timing runs."""
+    return _publish_curves(api, "qualified-reference-curves.json", curves, None)
+
+
+def _publish_curves(api, filename, curves, run_id):
+    from publish_progress import APIError, BRANCH, MAX_SNAPSHOT_BYTES
+
     additions = _validated(curves)
     if not additions:
         return 0
-    filename = f"reference-curves-{run_id}.json"
     for _ in range(4):
         sha, existing = None, {}
         try:
@@ -105,7 +115,7 @@ def publish_curves(api, run_id, curves):
         raw = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
         if len(raw) > MAX_SNAPSHOT_BYTES:
             raise ValueError("Oversized reference curve snapshot")
-        body = dict(message=f"Update qualified TS reference curves for run {run_id}", branch=BRANCH,
+        body = dict(message=f"Update qualified TS reference curves for run {run_id}" if run_id is not None else "Update shared qualified TS reference curves", branch=BRANCH,
                     content=base64.b64encode(raw).decode())
         if sha:
             body["sha"] = sha

@@ -157,7 +157,7 @@ const old={software:'acousticts',aspect_ratio:10,boundary:'gas',planned:151,succ
 const fresh={software:'liquid_spheroid',aspect_ratio:10,boundary:'gas',planned:50,success:2,other_recorded:1};
 let data={coverage:[old,fresh],incidence_coverage:[{...old,incidence_deg:37},{...fresh,incidence_deg:37}]};
 let rows=[{...old,measurement_role:'retained',status:'ok'}];
-let localReferenceCurves=[];
+let localReferenceCurves=[],sharedReferenceCurves=[];
 let externalReferenceCurves=[{physical_id:'exact',reference_id:'qualified',ts_db:-30,semimajor_m:.01,aspect_ratio:10,incidence_deg:37,frequency_hz:1000,uncertainty_db:.001}];
 """ + helpers + r"""
 assert.deepEqual(benchmarkProgress().map(r=>[r.software,r.recorded,r.planned,r.pending]),[['acousticts',151,151,0],['liquid_spheroid',3,50,47]]);

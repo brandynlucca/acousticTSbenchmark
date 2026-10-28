@@ -204,17 +204,18 @@ def _stop(process, job):
     process.wait(timeout=10)
 
 
-def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, progress):
+def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, progress, *, attempts_dir=None):
     """Keep one Julia process warm while enforcing a deadline for each reference."""
+    attempts_dir = Path(attempts_dir) if attempts_dir is not None else work / "reference-attempts"
     request = work / "reference-batch.json"
     marker = work / "reference-active.json"
     marker.unlink(missing_ok=True)
     for item in jobs:
-        (work / "reference-attempts" / (item["reference_id"] + ".json")).unlink(missing_ok=True)
+        (attempts_dir / (item["reference_id"] + ".json")).unlink(missing_ok=True)
     started = time.time()
     atomic_json(request, dict(cases=jobs, threads=threads, deadline_epoch=deadline, started_epoch=started,
                              case_timeout_seconds=case_timeout, work_directory=str(work),
-                             active_path=str(marker)))
+                             active_path=str(marker), attempts_directory=str(attempts_dir)))
     prefix = list(runtime["executables"]["acousticscattering"])
     # Prepared runtime prefixes contain --threads=1 for timing workers.
     prefix = [part for part in prefix if not part.startswith("--threads=")]
@@ -240,7 +241,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
         while next_result < len(jobs):
             item = jobs[next_result]
             identity = item["reference_id"]
-            path = work / "reference-attempts" / (identity + ".json")
+            path = attempts_dir / (identity + ".json")
             if not path.exists():
                 break
             accept(item, read_json(path))
@@ -274,7 +275,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
                         item = next((j for j in jobs if j["reference_id"] == identity), jobs[0])
                         evidence = dict(status="timeout", message="Reference deadline reached",
                                         phase=active.get("phase"), elapsed_seconds=time.time() - active["started_epoch"])
-                        atomic_json(work / "reference-attempts" / (item["reference_id"] + ".json"), evidence)
+                        atomic_json(attempts_dir / (item["reference_id"] + ".json"), evidence)
                         accept(item, evidence)
                         collected.add(item["reference_id"])
                     break
@@ -285,7 +286,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
                 item = next((j for j in jobs if j["reference_id"] == identity), jobs[0])
                 evidence = dict(status="worker_error", message=f"Julia reference worker exited {process.returncode}",
                                 phase=active.get("phase"))
-                atomic_json(work / "reference-attempts" / (item["reference_id"] + ".json"), evidence)
+                atomic_json(attempts_dir / (item["reference_id"] + ".json"), evidence)
                 accept(item, evidence)
                 collected.add(item["reference_id"])
     finally:

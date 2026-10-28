@@ -36,6 +36,7 @@ function reference_batch(batch)
     isempty(cases) && return
     active_path = batch["active_path"]
     work = batch["work_directory"]
+    attempts = get(batch, "attempts_directory", joinpath(work, "reference-attempts"))
     started = get(batch, "started_epoch", time())
     active = Dict("reference_id" => first(cases)["reference_id"], "started_epoch" => started,
                   "phase" => "importing")
@@ -84,7 +85,7 @@ function reference_batch(batch)
         evidence["package_metadata"] = metadata
         evidence["julia_threads"] = Threads.nthreads()
         evidence["blas_threads"] = BLAS.get_num_threads()
-        reference_save(joinpath(work, "reference-attempts", identity * ".json"), evidence)
+        reference_save(joinpath(attempts, identity * ".json"), evidence)
         progress("recorded")
     end
 end
