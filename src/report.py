@@ -60,7 +60,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Total solve time (s)</th><th>Average solve time (s)</th><th>RMSE ΔTS (dB)</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <p class="note">Total and average solve time include successful timed predictions only.</p>
-<p class="note" id="rmse-note">RMSE uses the median ΔTS across successful repetitions of each prediction, then √mean(ΔTS²) across predictions with valid comparisons. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. Unavailable means no valid comparisons.</p>
+<p class="note" id="rmse-note">RMSE uses the median ΔTS across successful repetitions of each prediction, then √mean(ΔTS²) across predictions with valid comparisons. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. No matched reference means successful predictions exist but their exact reference cases are missing. No successful prediction means there is no completed successful result in this selection.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
@@ -388,7 +388,7 @@ function render(){
   const shownAverage=average===null?'Unavailable':average>0&&average<.01?average.toExponential(2):average.toFixed(2);
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
   const remaining=completion?.pending??'Unknown';
-  const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):'Unavailable';
+  const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):(successful?'No matched reference':'No successful prediction');
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
   const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
