@@ -38,7 +38,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 .coverage .progress-item{min-width:170px}.coverage .progress-track{height:7px}.coverage .progress-counts{font-size:12px}.coverage .progress-title{font-size:13px}
 </style>
 <h1>Spheroid timing progress</h1>
-<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><a id="dataset-link" target="_blank" rel="noopener">Consolidated dataset</a><span id="run-state"></span></div>
+<div id="livebar" hidden><label>Platform <select id="platform"><option>ubuntu-latest</option><option>windows-latest</option><option>macos-latest</option></select></label><a id="run-link" target="_blank" rel="noopener">Browse benchmark runs</a><a id="dataset-link" target="_blank" rel="noopener">Consolidated dataset</a><a id="local-reference-link" target="_blank" rel="noopener">Local BEM / FEM-BEM results</a><span id="run-state"></span></div>
 <p id="setup-status" class="note" hidden></p>
 <p id="connection" role="status" hidden></p>
 <p id="data-run-warning" role="status" hidden></p>
@@ -56,7 +56,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
-<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS is available only for explicitly qualified, matched references. Reference uncertainty remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
+<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. GitHub references also require independent Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Total solve time (s)</th><th>Average solve time (s)</th><th>RMSE ΔTS (dB)</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <p class="note">Total and average solve time include successful timed predictions only.</p>
@@ -67,6 +67,7 @@ let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows
 let externalReferenceCurves=[],localReferenceCurves=[];
 const repository=data.repository;
 if(repository)document.getElementById('dataset-link').href=`https://github.com/${repository}/releases/tag/benchmark-dataset`;
+if(repository)document.getElementById('local-reference-link').href=`https://github.com/${repository}/blob/benchmark-data/local-reference-records.json`;
 const capabilities=data.capabilities;
 function supportsBoundary(software,boundary){return !capabilities?.[software]||capabilities[software].includes(boundary);}
 function applicable(row){return supportsBoundary(row.software,row.boundary);}
@@ -294,7 +295,7 @@ function render(){
  document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Only boundaries supported by each software are included.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No qualified references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
  if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
  if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
@@ -368,7 +369,7 @@ function render(){
    }
    if(referenceLayer.childElementCount)svg.append(referenceLayer);
    const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
-   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for qualified reference comparisons'):'Waiting for measurements'));
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched reference comparisons'):'Waiting for measurements'));
   }
  }
  const table=document.getElementById('coverage');table.replaceChildren();
