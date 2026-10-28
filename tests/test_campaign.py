@@ -1091,5 +1091,148 @@ class ExtendTests(unittest.TestCase):
                             for record in seeds.values() for key in record))
 
 
+class ContinuationFrequencyTests(unittest.TestCase):
+    api = CampaignTests.api
+    archive_files = staticmethod(RefreshTests.archive_files)
+    setUp = ExtendTests.setUp
+
+    def completed_campaign(self, configuration, programs, retained=None, run=123):
+        def populate(files):
+            manifest = files["manifest.json"]
+            manifest["configuration"] = copy.deepcopy(configuration)
+            cases = benchmark.build_cases(configuration, "pilot", programs, 1)
+            manifest["cases"] = [case["case_id"] for case in cases]
+            manifest["adapter_hashes"] = benchmark.adapter_hashes()
+            seeds = retained.get("reused_records", {}) if retained else {}
+            records = {case["case_id"]: copy.deepcopy(seeds.get(case["case_id"],
+                dict(case_id=case["case_id"], status="ok", elapsed_seconds=.2 + case["frequency_hz"] / 1e6,
+                     ts_db=-40 + case["frequency_hz"] / 1e6, source_sha="a" * 40,
+                     invocation_id="preserved"))) for case in cases}
+            if retained:
+                files["retained-results.json"] = copy.deepcopy(retained)
+                manifest["retained_fingerprint"] = benchmark.fingerprint(retained)
+            manifest["fingerprint"] = benchmark.fingerprint(campaign.manifest_identity(manifest))
+            files["results.json"] = benchmark.summarize(cases, records, {})
+            files["status.json"] = dict(state="complete", recorded=len(cases), planned=len(cases))
+            files.update({f"records/{identity}.json": record for identity, record in records.items()})
+            files["environments/preserved.json"] = dict(platform="Linux", architecture="x86_64",
+                threads=1, runtime=self.runtime, started_at="2026-10-28T00:00:00Z")
+            files["benchmark-source.json"].update(run_id=run, resumed_from_run_id=None)
+        return checkpoint(programs=programs, repeats=1, count=0, source_ref="a" * 40,
+                          alter=populate)[0]
+
+    def original_campaign(self, programs=None, stop_hz=300000):
+        programs = programs or ["acousticts", "prol_spheroid", "echosms"]
+        config = configuration()
+        config.update(software=programs, repetitions=1, case_order="boundary_major",
+            frequency=dict(start_hz=2000, stop_hz=stop_hz, step_hz=2000, include_stop=True))
+        return self.completed_campaign(config, programs)
+
+    def resolve(self, content, inputs=None, run=123):
+        api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+        selection = dict(mode="extend", resume_run_id=str(run), refresh_software="liquid_spheroid",
+            continuation_frequency="Use frequency inputs above", frequency_start_khz="2",
+            frequency_end_khz="100", frequency_interval_khz="2")
+        selection.update(inputs or {})
+        with patch.dict(os.environ, GITHUB_RUN_ID=str(run + 1)):
+            return refresh.resolve_refresh(selection, "owner/repo", "e" * 40, api, sources=self.lock)
+
+    def test_selected_software_frequency_grid_preserves_all_comparison_measurements(self):
+        content = self.original_campaign()
+        original = campaign.read_checkpoint(content)[0]["results.json"]
+        for mode in ("extend", "refresh"):
+            with self.subTest(mode=mode):
+                result = self.resolve(content, dict(mode=mode))
+                cases = benchmark.build_cases(result["configuration"], result["profile"],
+                                              ["liquid_spheroid"], result["repetitions"])
+                self.assertEqual([case["frequency_hz"] for case in cases], list(range(2000, 100001, 2000)))
+                self.assertEqual(result["planned_cases"], 50)
+                self.assertEqual(result["software"], "liquid_spheroid")
+                self.assertEqual(result["recorded_by_platform"], {"ubuntu-latest": 0})
+                retained = result["_retained_payloads"]["ubuntu-latest"]["rows"]
+                self.assertEqual(retained, [dict(row, measurement_role="retained", retained_from_run_id=123)
+                                            for row in original])
+                self.assertEqual({row["software"] for row in retained},
+                                 {"acousticts", "prol_spheroid", "echosms"})
+                self.assertTrue(any(row["frequency_hz"] > 100000 for row in retained))
+                self.assertEqual(result["configuration"]["geometry"], configuration()["geometry"])
+                self.assertEqual(result["configuration"]["controls"], configuration()["controls"])
+
+    def test_default_continuation_frequency_keeps_saved_grid(self):
+        content = self.original_campaign()
+        for mode in ("extend", "refresh"):
+            for explicit in (False, True):
+                with self.subTest(mode=mode, explicit=explicit):
+                    inputs = dict(mode=mode, resume_run_id="123", refresh_software="liquid_spheroid",
+                        frequency_start_khz="2", frequency_end_khz="100", frequency_interval_khz="2")
+                    if explicit:
+                        inputs["continuation_frequency"] = "Keep saved frequency grid"
+                    api, _ = self.api([dict(id=1, name="results-ubuntu-latest")], {1: content})
+                    result = refresh.resolve_refresh(inputs, "owner/repo", "e" * 40, api, sources=self.lock)
+                    self.assertEqual(result["configuration"]["frequency"],
+                        dict(start_hz=2000, stop_hz=300000, step_hz=2000, include_stop=True))
+                    self.assertEqual(result["planned_cases"], 150)
+
+    def test_nested_frequency_expansions_reuse_original_measurements(self):
+        result = self.resolve(self.original_campaign())
+        comparisons = copy.deepcopy(result["_retained_payloads"]["ubuntu-latest"]["rows"])
+        origin_records = {}
+        for run, stop_khz in ((124, 200), (125, 300)):
+            content = self.completed_campaign(result["configuration"], ["liquid_spheroid"],
+                result["_retained_payloads"]["ubuntu-latest"], run=run)
+            saved = campaign.read_checkpoint(content)[0]["results.json"]
+            if not origin_records:
+                origin_records = {row["case_id"]: row for row in saved}
+            result = self.resolve(content, dict(frequency_end_khz=str(stop_khz)), run=run)
+            sidecar = result["_retained_payloads"]["ubuntu-latest"]
+            seeds = sidecar["reused_records"]
+            self.assertEqual(len(seeds), (stop_khz - 100) // 2)
+            self.assertEqual(result["planned_cases"], stop_khz // 2)
+            self.assertEqual(sidecar["rows"], comparisons)
+            for row in saved:
+                expected = {key: value for key, value in row.items()
+                            if not key.startswith("reference_") and key != "delta_ts_db"}
+                expected.setdefault("measurement_origin_run_id", run)
+                self.assertEqual(seeds[row["case_id"]], expected)
+            for identity, original in origin_records.items():
+                self.assertEqual(seeds[identity]["elapsed_seconds"], original["elapsed_seconds"])
+                self.assertEqual(seeds[identity]["ts_db"], original["ts_db"])
+                self.assertEqual(seeds[identity]["measurement_origin_run_id"], 124)
+
+    def test_continuation_frequency_rejects_omitted_selected_measurements(self):
+        content = self.original_campaign(["liquid_spheroid"], stop_hz=100000)
+        with self.assertRaisesRegex(ValueError, "include every saved selected-software case"):
+            self.resolve(content, dict(frequency_end_khz="98"))
+
+    def test_invalid_continuation_grid_is_rejected_before_case_allocation(self):
+        content = self.original_campaign()
+        invalid = [dict(frequency_start_khz="0"), dict(frequency_interval_khz="0"),
+                   dict(frequency_interval_khz="0.0001"), dict(frequency_end_khz="nan"),
+                   dict(frequency_start_khz="101"),
+                   dict(frequency_end_khz="1000000000", frequency_interval_khz="0.001")]
+        build_cases = refresh.build_cases
+        for inputs in invalid:
+            with self.subTest(inputs=inputs), patch.object(refresh, "build_cases", wraps=build_cases) as allocate:
+                with self.assertRaises(ValueError):
+                    self.resolve(content, inputs)
+                for call in allocate.call_args_list:
+                    self.assertEqual(call.args[0]["frequency"],
+                        dict(start_hz=2000, stop_hz=300000, step_hz=2000, include_stop=True))
+
+    def test_continuation_frequency_rejects_unsupported_modes_and_unknown_choice(self):
+        for mode in ("new", "resume", "prepare"):
+            api = Mock()
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "require extend or refresh"):
+                campaign.resolve(dict(mode=mode, continuation_frequency="Use frequency inputs above"),
+                                 configuration(), "owner/repo", "e" * 40, api)
+            api.request.assert_not_called()
+        for mode in ("extend", "refresh"):
+            api = Mock()
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "Unknown continuation_frequency"):
+                refresh.resolve_refresh(dict(mode=mode, resume_run_id="123", continuation_frequency="unknown"),
+                                        "owner/repo", "e" * 40, api, sources=self.lock)
+            api.request.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -302,6 +302,12 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
                 ranges[field] = [min(values), max(values)]
         ranges["frequencies_hz"] = sorted({row["frequency_hz"] for row in selected
                                             if finite_number(row.get("frequency_hz"))})
+        software_frequencies = {
+            software: sorted({row["frequency_hz"] for row in selected
+                              if row.get("software") == software and finite_number(row.get("frequency_hz"))})
+            for software in sorted({row["software"] for row in selected if row.get("software")})}
+        if software_frequencies:
+            ranges["software_frequencies_hz"] = software_frequencies
         axes[format(aspect, ".15g")] = ranges
     coverage, incidence_coverage = {}, {}
     for row in rows:

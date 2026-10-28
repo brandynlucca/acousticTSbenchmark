@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import sys
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -102,6 +104,46 @@ class GitAPI:
 
 
 class ProgressTests(unittest.TestCase):
+    def test_per_software_frequency_plan_keeps_pending_points(self):
+        rows = [dict(software=software, frequency_hz=frequency, aspect_ratio=10,
+                     incidence_deg=90, boundary="gas", status=status, ts_db=-30)
+                for software, frequency, status in [
+                    ("acousticts", 1000, "ok"), ("acousticts", 3000, "ok"),
+                    ("liquid_spheroid", 2000, "ok"), ("liquid_spheroid", 4000, "pending"),
+                    ("liquid_spheroid", 6000, "nonconverged")]]
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, rows)
+        self.assertEqual(payload["axes"]["10"]["software_frequencies_hz"],
+                         {"acousticts": [1000, 3000], "liquid_spheroid": [2000, 4000, 6000]})
+        self.assertEqual(payload["axes"]["10"]["frequencies_hz"], [1000, 2000, 3000, 4000, 6000])
+        self.assertEqual(len(payload["rows"]), 4)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise the plotted segments")
+    def test_interleaved_frequency_curves_keep_real_missing_point_gaps(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        start = source.index("   for(const software of Object.keys(colors))for(const angle of selectedAngles){")
+        end = source.index("   for(const row of timedFailures", start)
+        loop = source[start:end]
+        harness = r"""
+const colors={acousticts:'black',liquid_spheroid:'blue'}, labels=colors;
+const selectedAngles=[90], aspect={value:'10'}, boundary='gas', measure='ts_db';
+const allFreq=[1000,2000,3000,4000,5000,6000];
+const data={axes:{'10':{software_frequencies_hz:{acousticts:[1000,3000,5000],liquid_spheroid:[2000,4000,6000]}}}};
+const grouped=new Map(), axisValues=new Map(allFreq.map(f=>[f,f]));
+for(const [software,frequencies] of [['acousticts',[1000,3000,5000]],['liquid_spheroid',[2000,6000]]])
+ for(const frequency of frequencies)grouped.set(JSON.stringify([boundary,software,90,frequency]),[{ts_db:1}]);
+const segments=[],svg={append:n=>segments.push(n.attrs)},svgElement=(tag,attrs)=>({tag,attrs});
+const validValue=(r,m)=>Number.isFinite(r[m]),valueFor=(r,m)=>r[m],median=v=>v[0];
+const x=v=>v,y=v=>v,transform=v=>v,formatted=v=>String(v),point=()=>{},angleStyle=()=>({dash:''});
+let count=0;
+""" + loop + "console.log(JSON.stringify({segments,count}));"
+        result = subprocess.run([shutil.which("node"), "-e", harness], check=True,
+                                capture_output=True, text=True)
+        result = json.loads(result.stdout)
+        self.assertEqual(result["count"], 5)
+        self.assertEqual([segment["d"] for segment in result["segments"]],
+                         ["M 1000 1 L 3000 1", "M 3000 1 L 5000 1"])
+        self.assertEqual({segment["stroke"] for segment in result["segments"]}, {"black"})
+
     def setUp(self):
         progress._SNAPSHOT_GUARDS.clear()
         scratch = progress.ROOT / ".scratch/codex/dense-benchmark/tests"

@@ -226,12 +226,14 @@ def _environments(content):
 
 def resolve_refresh(inputs, repository, revision, api, sources=None):
     from campaign import (CAPABILITIES, ORDER_CHOICES, artifact_platform, checkpoint_settings,
-                          continuation_platform, csv_values, read_checkpoint, select_resume_artifacts,
-                          setup_only_checkpoint, timing_or_restore_started)
+                          continuation_frequency, continuation_platform, csv_values, read_checkpoint,
+                          select_resume_artifacts, setup_only_checkpoint, timing_or_restore_started,
+                          validate_plan_size)
     requested = str(inputs.get("resume_run_id", "")).strip()
     selected_platform = continuation_platform(inputs)
     mode = inputs.get("mode", "refresh")
     extend = mode == "extend"
+    frequency = continuation_frequency(inputs, mode)
     if mode not in ("refresh", "extend"):
         raise ValueError("Selected software continuation must use refresh or extend mode")
     if not requested.isdecimal() or int(requested) < 1:
@@ -347,11 +349,18 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         raise ValueError("No saved timing configuration is available to refresh")
     configuration = copy.deepcopy(anchor["configuration"])
     configuration.update(software=programs, repetitions=anchor["repetitions"], case_order=ORDER_CHOICES[order])
+    if frequency is not None:
+        configuration["frequency"] = frequency
+    validate_plan_size(configuration, anchor["profile"], programs, anchor["repetitions"])
     cases = build_cases(configuration, anchor["profile"], programs, anchor["repetitions"])
+    case_ids = {case["case_id"] for case in cases}
     for platform in platforms:
         found.setdefault(platform, dict(schema_version=1, rows=[], provenance=[]))
         retained_comparison_rows(found[platform], cases)
         if extend:
+            if frequency is not None and set(found[platform].get("reused_records", {})) - case_ids:
+                raise ValueError("The continuation frequency grid must include every saved selected-software case. "
+                                 "Widen the grid to preserve existing measurements")
             validate_reused_records(found[platform], cases,
                 read_json(ROOT / "sources.lock.json") if sources is None else sources,
                 platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])

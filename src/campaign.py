@@ -62,6 +62,24 @@ def frequency_hz(value, name):
     return int(result)
 
 
+def continuation_frequency(inputs, mode):
+    choice = inputs.get("continuation_frequency", "Keep saved frequency grid")
+    if choice not in ("Keep saved frequency grid", "Use frequency inputs above"):
+        raise ValueError("Unknown continuation_frequency selection")
+    if choice == "Keep saved frequency grid":
+        return None
+    if mode not in ("extend", "refresh"):
+        raise ValueError("continuation_frequency overrides require extend or refresh mode")
+    frequency = dict(
+        start_hz=frequency_hz(inputs.get("frequency_start_khz", 1), "frequency_start_khz"),
+        stop_hz=frequency_hz(inputs.get("frequency_end_khz", 300), "frequency_end_khz"),
+        step_hz=frequency_hz(inputs.get("frequency_interval_khz", 2), "frequency_interval_khz"),
+        include_stop=True)
+    if frequency["start_hz"] > frequency["stop_hz"]:
+        raise ValueError("frequency_start_khz must not exceed frequency_end_khz")
+    return frequency
+
+
 def csv_values(value, name, convert=str):
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a comma-separated list")
@@ -525,6 +543,7 @@ def resolve(inputs, configuration, repository, revision, api=None):
     mode = inputs.get("mode", "new")
     if mode not in ("new", "resume", "extend", "refresh", "prepare"):
         raise ValueError("mode must be new, resume, extend, refresh, or prepare")
+    continuation_frequency(inputs, mode)
     if mode in ("refresh", "extend"):
         from refresh import resolve_refresh
         if api is None:

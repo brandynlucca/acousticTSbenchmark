@@ -346,7 +346,8 @@ function render(){
    }
    for(const software of Object.keys(colors))for(const angle of selectedAngles){
     let path='';
-    for(const frequency of allFreq){
+    const softwareFreq=data.axes?.[aspect.value]?.software_frequencies_hz?.[software]||allFreq;
+    for(const frequency of softwareFreq){
      const observations=(grouped.get(JSON.stringify([boundary,software,angle,frequency]))||[]).filter(r=>validValue(r,measure));
      if(!observations.length){path='';continue;}
      const value=median(observations.map(r=>valueFor(r,measure))),xx=x(axisValues.get(frequency)),yy=y(transform(value));
