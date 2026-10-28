@@ -64,7 +64,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
-let externalReferenceCurves=[];
+let externalReferenceCurves=[],localReferenceCurves=[];
 const repository=data.repository;
 if(repository)document.getElementById('dataset-link').href=`https://github.com/${repository}/releases/tag/benchmark-dataset`;
 const capabilities=data.capabilities;
@@ -78,11 +78,22 @@ const semimajor=document.getElementById('semimajor'),aspect=document.getElementB
 const sizeOptions=[.001,.01,.07,.1,.5];
 function referenceCurves(){
  const unique=new Map();
- for(const row of [...(data.reference_curves||[]),...externalReferenceCurves]){
+ for(const row of [...localReferenceCurves,...(data.reference_curves||[]),...externalReferenceCurves]){
   if(!row||typeof row.physical_id!=='string'||typeof row.reference_id!=='string'||!Number.isFinite(row.ts_db)||!Number.isFinite(row.semimajor_m)||row.semimajor_m<=0||!Number.isFinite(row.aspect_ratio)||!Number.isFinite(row.incidence_deg)||!Number.isFinite(row.frequency_hz))continue;
-  unique.set(`${row.physical_id}:${row.reference_id}`,row);
+  unique.set(row.physical_id,row);
  }
  return [...unique.values()];
+}
+function matchedReferenceRows(input){
+ const references=new Map(referenceCurves().map(reference=>[reference.physical_id,reference]));
+ return input.map(row=>{
+  if(row.reference_id&&Number.isFinite(row.reference_ts_db)&&Number.isFinite(row.delta_ts_db))return row;
+  const reference=references.get(row.physical_id);
+  if(!reference)return row;
+  return {...row,reference_id:reference.reference_id,reference_ts_db:reference.ts_db,
+   reference_uncertainty_db:reference.uncertainty_db,
+   delta_ts_db:row.status==='ok'&&Number.isFinite(row.ts_db)?row.ts_db-reference.ts_db:null};
+ });
 }
 let preferredSize='';
 try{const saved=Number(localStorage.getItem('benchmark-semimajor'));if(Number.isFinite(saved)&&saved>0)preferredSize=String(saved);}catch(e){}
@@ -174,21 +185,16 @@ function benchmarkProgress(selected=false,boundary=null){
  const byAngle=selected&&incidence.value!=='all',groups=progressGroups(byAngle);
  const retained=new Set(rows.filter(r=>matchesSize(r)&&r.measurement_role==='retained').map(r=>r.software));
  const programs=Object.keys(colors).filter(name=>groups?.some(g=>g.software===name)||data.coverage?.some(g=>g.software===name)||rows.some(r=>matchesSize(r)&&r.software===name));
- const active=programs.filter(name=>!retained.has(name));
- const key=g=>JSON.stringify([g.aspect_ratio,g.boundary,...(byAngle?[g.incidence_deg]:[])]);
  const inScope=g=>(!selected||g.aspect_ratio===Number(aspect.value)&&(!byAngle||g.incidence_deg===Number(incidence.value)))&&(!boundary||g.boundary===boundary);
- const templates=active.map(name=>(groups||[]).filter(g=>g.software===name).map(g=>[key(g),g.planned]).sort((a,b)=>a[0].localeCompare(b[0])));
- const known=!!groups&&templates.length>0&&templates[0].length>0&&templates.every(t=>JSON.stringify(t)===JSON.stringify(templates[0]));
- const template=known?new Map(templates[0]):null;
  return programs.map(software=>{
   const supported=g=>supportsBoundary(software,g.boundary);
-  const total=known?groups.filter(g=>g.software===active[0]&&inScope(g)&&supported(g)).reduce((sum,g)=>sum+g.planned,0):null;
   const scoped=(groups||[]).filter(g=>g.software===software&&inScope(g)&&supported(g));
   const observed=rows.filter(r=>matchesSize(r)&&r.software===software&&inScope(r)&&supported(r)&&r.status!=='pending');
   const success=groups?scoped.reduce((sum,g)=>sum+g.success,0):observed.filter(r=>r.status==='ok').length;
   const other=groups?scoped.reduce((sum,g)=>sum+g.other_recorded,0):observed.filter(r=>r.status!=='ok').length;
-  const compatible=known&&scoped.every(g=>template.has(key(g))&&g.success+g.other_recorded<=template.get(key(g)))&&observed.every(r=>!data.axes?.[r.aspect_ratio]?.frequencies_hz||data.axes[r.aspect_ratio].frequencies_hz.includes(r.frequency_hz));
-  const planned=compatible?total:null,recorded=success+other;
+  const recorded=success+other;
+  const total=groups&&scoped.every(g=>Number.isFinite(g.planned)&&g.planned>=g.success+g.other_recorded)?scoped.reduce((sum,g)=>sum+g.planned,0):null;
+  const planned=total!==null&&total>=recorded?total:null;
   return {software,retained:retained.has(software),success,other,recorded,planned,pending:planned===null?null:planned-recorded};
  }).filter(summary=>!boundary||supportsBoundary(summary.software,boundary));
 }
@@ -262,6 +268,7 @@ function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=fals
  return {svg,x,y};
 }
 function render(){
+ rows=matchedReferenceRows(data.rows||rows);
  renderProgress();
  if(layout.value!=='single'&&!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))metric.value='elapsed_seconds';
  axis.disabled=layout.value==='tradeoff';
@@ -269,6 +276,7 @@ function render(){
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
  const selected=rows.filter(r=>applicable(r)&&matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
  const selectedReferences=referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
+ const localCount=selectedReferences.filter(r=>r.origin==='local_manuscript').length;
  const showReferences=layout.value==='single'&&field==='ts_db';
  referenceLegend.hidden=!showReferences||!selectedReferences.length;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
@@ -278,7 +286,7 @@ function render(){
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
- document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} qualified predictions available for this selection. ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. References run separately and are reused across platforms.`;
+ document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions available for this selection (${localCount} from local manuscript runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. Local references retain their saved spatial convergence checks. References are reused across platforms.`;
  const allFreq=[...new Set([...(data.axes?.[aspect.value]?.frequencies_hz||selected.map(r=>r.frequency_hz)),...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
@@ -304,7 +312,7 @@ function render(){
   if(showReferences){
    const available=selectedReferences.filter(r=>r.boundary===boundary),qualified=new Set(available.map(r=>`${r.incidence_deg}:${r.frequency_hz}`)).size,planned=allFreq.length*selectedAngles.length;
    const note=document.createElement('p');note.className='note reference-coverage';note.dataset.boundary=boundary;
-   note.textContent=`Qualified references: ${qualified} / ${planned} predictions · ${available.length?'highest available frequency '+formatted(Math.max(...available.map(r=>r.frequency_hz))/1000)+' kHz':'no qualified frequencies yet'} · ${Math.max(0,planned-qualified)} pending or unavailable. Missing frequencies remain gaps.`;
+   note.textContent=`Verified references: ${qualified} / ${planned} predictions · ${available.length?'highest available frequency '+formatted(Math.max(...available.map(r=>r.frequency_hz))/1000)+' kHz':'no verified frequencies yet'} · ${Math.max(0,planned-qualified)} pending or unavailable. Missing frequencies remain gaps.`;
    section.append(note);
   }
   const charts=document.createElement('div');charts.className='charts';section.append(charts);panels.append(section);
@@ -403,7 +411,7 @@ if(repository){
  try{platform.value=localStorage.getItem('benchmark-platform')||'ubuntu-latest';}catch(e){}
  if(!platform.value)platform.value='ubuntu-latest';
  let newestRun=null,newestSetup=null,lastRunCheck=0,lastContentsCheck=0,busy=false,revision='',generation=0;
- let lastReferenceCheck=0,referenceRun=null;
+ let lastReferenceCheck=0,referenceRun=null,lastLocalReferenceCheck=0;
  let legacySizes=null,lastLegacyCheck=0;
  function runOrder(a,b){return (Number(a.run_id??a.id)-Number(b.run_id??b.id))||(Number(a.run_attempt||1)-Number(b.run_attempt||1));}
  function showRun(){
@@ -450,6 +458,14 @@ if(repository){
   return decoded;
  }
  function clearReferenceOverlay(){externalReferenceCurves=[];lastReferenceCheck=0;referenceRun=null;}
+ async function pollLocalReferences(){
+  if(Date.now()-lastLocalReferenceCheck<120000)return;
+  lastLocalReferenceCheck=Date.now();
+  try{
+   const response=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/local-reference-curves.json?t=${Date.now()}`);
+   if(response.ok&&response.value?.schema_version===1&&Array.isArray(response.value.reference_curves))localReferenceCurves=response.value.reference_curves;
+  }catch(e){}
+ }
  async function pollReferences(requestGeneration){
   const runId=data.run_id;if(!runId)return;
   if(referenceRun!==String(runId)){clearReferenceOverlay();referenceRun=String(runId);}
@@ -466,6 +482,7 @@ if(repository){
  async function poll(){
   if(busy)return;busy=true;const chosen=platform.value,requestGeneration=generation;
   try{
+   await pollLocalReferences();
    if(Date.now()-lastRunCheck>300000){
     lastRunCheck=Date.now();
     try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
@@ -511,7 +528,7 @@ if(repository){
     if(sized.ok||latestSize!==Number(preferredSize)){filename=sizedFilename;response=sized;}
    }
    if(requestGeneration!==generation)return;
-   if(response.status===404){connection.textContent=`No results have been published for ${chosen} at a = ${semimajor.value} m yet. Run a benchmark at this size to populate it.`;showRun();return;}
+   if(response.status===404){connection.textContent=`No timing results have been published for ${chosen} at a = ${semimajor.value} m yet. Saved local references are available in the TS view.`;updateSizes();updateAspects();updateIncidences();render();showRun();return;}
    if(!response.ok)throw new Error(`Progress request returned ${response.status}`);
    const incoming=response.value;
    if(snapshotSize(incoming)!==Number(semimajor.value)){connection.textContent='The size of this older snapshot has not been recovered from its artifact yet.';showRun();return;}

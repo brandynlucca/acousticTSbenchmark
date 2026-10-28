@@ -144,6 +144,36 @@ let count=0;
                          ["M 1000 1 L 3000 1", "M 3000 1 L 5000 1"])
         self.assertEqual({segment["stroke"] for segment in result["segments"]}, {"black"})
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise dashboard calculations")
+    def test_dashboard_totals_follow_each_grid_and_references_match_exact_cases(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        helpers = source[source.index("function referenceCurves(){"):source.index("let preferredSize=")]
+        helpers += source[source.index("function progressGroups(byAngle){"):source.index("function progressBar(")]
+        harness = r"""
+const assert=require('node:assert/strict');
+const repository='owner/repo',colors={acousticts:'blue',liquid_spheroid:'brown'};
+const aspect={value:'10'},incidence={value:'all'},matchesSize=()=>true,supportsBoundary=()=>true;
+const old={software:'acousticts',aspect_ratio:10,boundary:'gas',planned:151,success:151,other_recorded:0};
+const fresh={software:'liquid_spheroid',aspect_ratio:10,boundary:'gas',planned:50,success:2,other_recorded:1};
+let data={coverage:[old,fresh],incidence_coverage:[{...old,incidence_deg:37},{...fresh,incidence_deg:37}]};
+let rows=[{...old,measurement_role:'retained',status:'ok'}];
+let localReferenceCurves=[];
+let externalReferenceCurves=[{physical_id:'exact',reference_id:'qualified',ts_db:-30,semimajor_m:.01,aspect_ratio:10,incidence_deg:37,frequency_hz:1000,uncertainty_db:.001}];
+""" + helpers + r"""
+assert.deepEqual(benchmarkProgress().map(r=>[r.software,r.recorded,r.planned,r.pending]),[['acousticts',151,151,0],['liquid_spheroid',3,50,47]]);
+incidence.value='37';assert.equal(benchmarkProgress(true,'gas')[1].pending,47);
+incidence.value='90';assert.equal(benchmarkProgress(true,'gas')[0].planned,0);
+const original=[{physical_id:'exact',status:'ok',ts_db:-29.5},{physical_id:'missing',status:'ok',ts_db:-20},{physical_id:'exact',status:'pending',ts_db:null},{physical_id:'exact',status:'ok',ts_db:-29,reference_id:'saved',reference_ts_db:-30,delta_ts_db:1}];
+localReferenceCurves=[{...externalReferenceCurves[0],ts_db:-40,origin:'local_manuscript'},{...externalReferenceCurves[0],physical_id:'local-only',reference_id:'local',origin:'local_manuscript'}];
+assert.equal(referenceCurves().length,2);assert.equal(referenceCurves().find(r=>r.physical_id==='exact').ts_db,-30);
+assert.equal(matchedReferenceRows([{physical_id:'local-only',status:'ok',ts_db:-29}])[0].delta_ts_db,1);
+const joined=matchedReferenceRows(original);
+assert.equal(joined[0].delta_ts_db,.5);assert.equal(joined[0].reference_id,'qualified');
+assert.equal(joined[1].reference_id,undefined);assert.equal(joined[2].delta_ts_db,null);
+assert.equal(joined[3],original[3]);assert.equal(original[0].reference_id,undefined);
+"""
+        subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
+
     def setUp(self):
         progress._SNAPSHOT_GUARDS.clear()
         scratch = progress.ROOT / ".scratch/codex/dense-benchmark/tests"
@@ -260,6 +290,27 @@ let count=0;
         self.assertEqual(len(next_payload["rows"]), 3)
         self.assertTrue(progress.should_publish(payload, next_payload))
         self.assertEqual(path.read_bytes(), before)
+
+    def test_reference_subset_keeps_qualified_comparisons_from_the_saved_grid(self):
+        import benchmark
+        active, sidecar = self.retained_fixture()
+        for index, row in enumerate(sidecar["rows"]):
+            row.update(reference_id=str(index + 1) * 64, reference_ts_db=-31,
+                       reference_uncertainty_db=.001, reference_qualification="fixture",
+                       reference_source_sha="c" * 40, delta_ts_db=row["ts_db"] + 31)
+        original = copy.deepcopy(sidecar)
+        self.assertEqual(progress.retained_comparison_rows(sidecar, active, {}), sidecar["rows"])
+        first = sidecar["rows"][0]
+        reference = dict({key: first[key] for key in benchmark.PHYSICAL_FIELDS},
+                         reference_id="d" * 64, source_sha="c" * 40, qualified=True,
+                         qualification="fixture", software="acousticscattering", controls={},
+                         ts_db=-32, uncertainty_db=.001)
+        references = benchmark.references_from_value(dict(references=[reference]))
+        joined = progress.retained_comparison_rows(sidecar, active, references)
+        self.assertEqual(joined[0]["delta_ts_db"], first["ts_db"] + 32)
+        self.assertEqual(joined[0]["reference_id"], "d" * 64)
+        self.assertEqual(joined[1], sidecar["rows"][1])
+        self.assertEqual(sidecar, original)
 
     def test_retained_measurements_reject_pending_duplicates_and_active_software(self):
         active, original = self.retained_fixture()

@@ -226,9 +226,14 @@ def retained_comparison_rows(sidecar, active_rows, references=None):
         retained.append(dict(row))
     json.dumps(retained, allow_nan=False)
     if references is not None:
-        cases = [{key: value for key, value in row.items()
-                  if not key.startswith("reference_") and key != "delta_ts_db"} for row in retained]
-        retained = summarize(cases, {}, references)
+        updated = []
+        for row in retained:
+            if row.get("physical_id") in references or not curves_from_rows([row]):
+                case = {key: value for key, value in row.items()
+                        if not key.startswith("reference_") and key != "delta_ts_db"}
+                row = summarize([case], {}, references)[0]
+            updated.append(row)
+        retained = updated
     return retained
 
 
