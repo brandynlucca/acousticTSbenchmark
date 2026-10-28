@@ -174,6 +174,34 @@ assert.equal(joined[3],original[3]);assert.equal(original[0].reference_id,undefi
 """
         subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise spectral limits")
+    def test_reference_display_follows_benchmark_range_and_future_extension(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        helper = source[source.index("function benchmarkFrequencyWindow("):source.index("function render(){")]
+        harness = r"""
+const assert=require('node:assert/strict');
+""" + helper + r"""
+const saved=[500,1000,2000,300000,400000,1000000].map(frequency_hz=>({frequency_hz,ts_db:frequency_hz>300000?999:-30}));
+const before=JSON.stringify(saved), rows=[{frequency_hz:1000,status:'ok'}];
+let axes={frequencies_hz:[1000,3000,300000],frequency_hz:[1000,300000]};
+let view=benchmarkFrequencyWindow(rows,saved,axes);
+assert.deepEqual(view.bounds,[1000,300000]);
+assert.deepEqual(view.frequencies,[1000,3000,300000]);
+assert.deepEqual(view.references.map(r=>r.frequency_hz),[1000,2000,300000]);
+assert.equal(Math.max(...view.references.map(r=>r.ts_db)),-30);
+assert.deepEqual(benchmarkFrequencyWindow([],saved,axes).bounds,[1000,300000]);
+axes={frequencies_hz:[1000,3000,300000,400000],frequency_hz:[1000,400000]};
+view=benchmarkFrequencyWindow(rows,saved,axes);
+assert.deepEqual(view.bounds,[1000,400000]);
+assert.equal(view.references.at(-1).frequency_hz,400000);
+assert.equal(JSON.stringify(saved),before);
+assert.deepEqual(benchmarkFrequencyWindow([],saved).references,[]);
+assert.equal(benchmarkFrequencyWindow([],saved).bounds,null);
+assert.deepEqual(benchmarkFrequencyWindow([{frequency_hz:1000,status:'ok'},{frequency_hz:300000,status:'pending'}],saved).bounds,[1000,300000]);
+assert.deepEqual(benchmarkFrequencyWindow([],saved,{frequency_hz:[1000,300000]}).bounds,[1000,300000]);
+"""
+        subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
+
     def setUp(self):
         progress._SNAPSHOT_GUARDS.clear()
         scratch = progress.ROOT / ".scratch/codex/dense-benchmark/tests"

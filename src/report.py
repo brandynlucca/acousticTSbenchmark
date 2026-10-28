@@ -268,6 +268,12 @@ function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=fals
  svg.append(svgElement('text',{x:295,y:295,'text-anchor':'middle'},xlabel));
  return {svg,x,y};
 }
+function benchmarkFrequencyWindow(selected,references,axes={}){
+ const frequencies=[...new Set([...(axes.frequencies_hz||[]),...selected.map(r=>r.frequency_hz)])].filter(Number.isFinite).sort((a,b)=>a-b);
+ const endpoints=[...frequencies,...(axes.frequency_hz||[])].filter(Number.isFinite);
+ const bounds=endpoints.length?[Math.min(...endpoints),Math.max(...endpoints)]:null;
+ return {frequencies,bounds,references:bounds?references.filter(r=>r.frequency_hz>=bounds[0]&&r.frequency_hz<=bounds[1]):[]};
+}
 function render(){
  rows=matchedReferenceRows(data.rows||rows);
  renderProgress();
@@ -276,7 +282,9 @@ function render(){
  try{localStorage.setItem('benchmark-metric',metric.value);localStorage.setItem('benchmark-axis',axis.value);localStorage.setItem('benchmark-layout',layout.value);}catch(e){}
  const matchesAngle=r=>incidence.value==='all'||r.incidence_deg===Number(incidence.value);
  const selected=rows.filter(r=>applicable(r)&&matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)), field=metric.value;
- const selectedReferences=referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
+ const benchmarkAxes=snapshotSize(data)===Number(semimajor.value)?(data.axes?.[aspect.value]||{}):{};
+ const spectrum=benchmarkFrequencyWindow(selected,referenceCurves().filter(r=>matchesSize(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r)),benchmarkAxes);
+ const selectedReferences=spectrum.references,benchmarkFrequencies=new Set(spectrum.frequencies);
  const localCount=selectedReferences.filter(r=>['local_manuscript','local_qualified'].includes(r.origin)).length;
  const showReferences=layout.value==='single'&&field==='ts_db';
  referenceLegend.hidden=!showReferences||!selectedReferences.length;
@@ -287,21 +295,22 @@ function render(){
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
- document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions available for this selection (${localCount} from local manuscript runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear in the TS view, including where benchmark measurements are still pending. Saved convergence checks distinguish the manuscript references from independently qualified references. References are reused across platforms.`;
- const allFreq=[...new Set([...(data.axes?.[aspect.value]?.frequencies_hz||selected.map(r=>r.frequency_hz)),...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
+ document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions within the benchmark frequency range (${localCount} from local runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear within that range in the TS view, including pending benchmark cases. Stored references beyond the range become visible when the benchmark is extended. Saved convergence checks distinguish the manuscript references from independently qualified references. References are reused across platforms.`;
+ const allFreq=[...new Set([...spectrum.frequencies,...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
  const selectedAngles=incidence.value==='all'?availableIncidences:[Number(incidence.value)];
  renderAngles(selectedAngles);
  document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Only boundaries supported by each software are included.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?`No results are available for a = ${semimajor.value} m in this view yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ plotStatus.textContent=!allFreq.length?`No benchmark frequency range is available for this selection yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
  if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
  if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
- const axisValues=new Map([...selected,...selectedReferences].map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
- const coordinates=[...axisValues.values()].filter(Number.isFinite),extent=data.axes?.[aspect.value]?.[axis.value];
+ const axisValues=new Map([...selectedReferences,...selected].map(r=>[r.frequency_hz,axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]]));
+ const coordinates=selected.map(r=>axis.value==='frequency_hz'?r.frequency_hz/1000:r[axis.value]).filter(Number.isFinite);
+ const extent=axis.value==='frequency_hz'?spectrum.bounds:benchmarkAxes[axis.value];
  if(extent)coordinates.push(...extent.map(value=>axis.value==='frequency_hz'?value/1000:value));
  let low=coordinates.length?Math.min(...coordinates):0,high=coordinates.length?Math.max(...coordinates):1;
  if(low===high){const margin=Math.abs(low)*.1||.5;low-=margin;high+=margin;}
@@ -311,9 +320,9 @@ function render(){
  for(const boundary of Object.keys(boundaryLabels).filter(b=>visibleBoundaries.has(b))){
   const section=document.createElement('section'),title=document.createElement('h2');title.textContent=boundaryLabels[boundary];section.append(title);
   if(showReferences){
-   const available=selectedReferences.filter(r=>r.boundary===boundary),qualified=new Set(available.map(r=>`${r.incidence_deg}:${r.frequency_hz}`)).size,planned=allFreq.length*selectedAngles.length;
+   const available=selectedReferences.filter(r=>r.boundary===boundary),qualified=new Set(available.filter(r=>benchmarkFrequencies.has(r.frequency_hz)).map(r=>`${r.incidence_deg}:${r.frequency_hz}`)).size,planned=spectrum.frequencies.length*selectedAngles.length;
    const note=document.createElement('p');note.className='note reference-coverage';note.dataset.boundary=boundary;
-   note.textContent=`Verified references: ${qualified} / ${planned} predictions · ${available.length?'highest available frequency '+formatted(Math.max(...available.map(r=>r.frequency_hz))/1000)+' kHz':'no verified frequencies yet'} · ${Math.max(0,planned-qualified)} pending or unavailable. Missing frequencies remain gaps.`;
+   note.textContent=`Matching benchmark references: ${qualified} / ${planned} predictions · ${available.length?'highest displayed reference frequency '+formatted(Math.max(...available.map(r=>r.frequency_hz))/1000)+' kHz':'no verified frequencies yet'} · ${Math.max(0,planned-qualified)} pending or unavailable. Missing frequencies remain gaps.`;
    section.append(note);
   }
   const charts=document.createElement('div');charts.className='charts';section.append(charts);panels.append(section);
@@ -533,7 +542,7 @@ if(repository){
     if(sized.ok||latestSize!==Number(preferredSize)){filename=sizedFilename;response=sized;}
    }
    if(requestGeneration!==generation)return;
-   if(response.status===404){connection.textContent=`No timing results have been published for ${chosen} at a = ${semimajor.value} m yet. Saved local references are available in the TS view.`;updateSizes();updateAspects();updateIncidences();render();showRun();return;}
+   if(response.status===404){connection.textContent=`No timing results have been published for ${chosen} at a = ${semimajor.value} m yet. Saved references will appear when a benchmark frequency range is available.`;updateSizes();updateAspects();updateIncidences();render();showRun();return;}
    if(!response.ok)throw new Error(`Progress request returned ${response.status}`);
    const incoming=response.value;
    if(snapshotSize(incoming)!==Number(semimajor.value)){connection.textContent='The size of this older snapshot has not been recovered from its artifact yet.';showRun();return;}
