@@ -157,8 +157,8 @@
       ]
     },
     "liquid_spheroid:0.01": {
-      "run_id": 40936766673,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40936766673",
+      "run_id": 40969803445,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40969803445",
       "inputs": {
         "mode": "extend",
         "refresh_software": "liquid_spheroid",
@@ -167,10 +167,10 @@
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
-        "resume_run_id": "40899038860"
+        "resume_run_id": "40936766673"
       },
       "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-      "recorded_before": 1638,
+      "recorded_before": 1921,
       "history": [
         {
           "run_id": 40779225012,
@@ -252,6 +252,22 @@
           },
           "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
           "recorded_before": 1095
+        },
+        {
+          "run_id": 40936766673,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40936766673",
+          "inputs": {
+            "mode": "extend",
+            "refresh_software": "liquid_spheroid",
+            "continuation_platform": "ubuntu-latest",
+            "continuation_frequency": "Keep saved frequency grid",
+            "timing_budget_minutes": "240",
+            "reference_budget_minutes": "0",
+            "case_order": "Complete each frequency sweep",
+            "resume_run_id": "40899038860"
+          },
+          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
+          "recorded_before": 1638
         }
       ]
     }
@@ -692,22 +708,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-29T22:58:16.063245+00:00",
-  "dispatch_intent": {
-    "key": "liquid_spheroid:0.01",
-    "inputs": {
-      "mode": "extend",
-      "refresh_software": "liquid_spheroid",
-      "continuation_platform": "ubuntu-latest",
-      "continuation_frequency": "Keep saved frequency grid",
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "case_order": "Complete each frequency sweep",
-      "resume_run_id": "40936766673"
-    },
-    "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-    "created_at": "2026-10-29T22:58:16.063222+00:00",
-    "continuation_of": 40936766673,
-    "recorded_before": 1921
-  }
+  "updated_at": "2026-10-29T22:58:20.598111+00:00"
 }
