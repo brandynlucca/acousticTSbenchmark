@@ -157,21 +157,39 @@
       ]
     },
     "liquid_spheroid:0.01": {
-      "run_id": 40779225012,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40779225012",
+      "run_id": 40812603293,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40812603293",
       "inputs": {
-        "mode": "resume",
-        "resume_run_id": "40737192500",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid",
         "continuation_platform": "ubuntu-latest",
         "continuation_frequency": "Keep saved frequency grid",
-        "resume_artifact": "results-ubuntu-latest",
-        "resume_case_order": "Keep saved order",
+        "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
-        "timing_budget_minutes": "240"
+        "case_order": "Complete each frequency sweep",
+        "resume_run_id": "40779225012"
       },
-      "source_ref": "1fd03830269b9f6188774fd88007adfd73c46990",
-      "recorded_before": 96,
-      "adoption_reason": "Existing liquid continuation restored and verified before queue activation"
+      "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
+      "recorded_before": 333,
+      "history": [
+        {
+          "run_id": 40779225012,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40779225012",
+          "inputs": {
+            "mode": "resume",
+            "resume_run_id": "40737192500",
+            "continuation_platform": "ubuntu-latest",
+            "continuation_frequency": "Keep saved frequency grid",
+            "resume_artifact": "results-ubuntu-latest",
+            "resume_case_order": "Keep saved order",
+            "reference_budget_minutes": "0",
+            "timing_budget_minutes": "240"
+          },
+          "source_ref": "1fd03830269b9f6188774fd88007adfd73c46990",
+          "recorded_before": 96,
+          "adoption_reason": "Existing liquid continuation restored and verified before queue activation"
+        }
+      ]
     }
   },
   "recovery": {
@@ -610,22 +628,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-29T03:30:52.415567+00:00",
-  "dispatch_intent": {
-    "key": "liquid_spheroid:0.01",
-    "inputs": {
-      "mode": "extend",
-      "refresh_software": "liquid_spheroid",
-      "continuation_platform": "ubuntu-latest",
-      "continuation_frequency": "Keep saved frequency grid",
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "case_order": "Complete each frequency sweep",
-      "resume_run_id": "40779225012"
-    },
-    "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-    "created_at": "2026-10-29T03:30:52.415537+00:00",
-    "continuation_of": 40779225012,
-    "recorded_before": 333
-  }
+  "updated_at": "2026-10-29T03:30:56.161114+00:00"
 }
