@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "complete",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
@@ -788,5 +788,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-30T18:23:58.111975+00:00"
+  "updated_at": "2026-10-30T20:59:53.926613+00:00"
 }
