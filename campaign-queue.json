@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "complete",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
@@ -417,6 +417,75 @@
         "case_order": "Complete each frequency sweep"
       },
       "finish_before_next": true
+    },
+    {
+      "key": "acousticts:0.001",
+      "software": "acousticts",
+      "semimajor_m": "0.001",
+      "parent": null,
+      "inputs": {
+        "mode": "new",
+        "platform": "ubuntu-latest",
+        "software": "acousticts",
+        "semimajor_m": "0.001",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "case_order": "Complete each frequency sweep",
+        "repetitions": "1",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "30"
+      },
+      "finish_before_next": true
+    },
+    {
+      "key": "acousticts:0.07",
+      "software": "acousticts",
+      "semimajor_m": "0.07",
+      "parent": null,
+      "inputs": {
+        "mode": "new",
+        "platform": "ubuntu-latest",
+        "software": "acousticts",
+        "semimajor_m": "0.07",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "case_order": "Complete each frequency sweep",
+        "repetitions": "1",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "30"
+      },
+      "finish_before_next": true
+    },
+    {
+      "key": "acousticts:0.1",
+      "software": "acousticts",
+      "semimajor_m": "0.1",
+      "parent": null,
+      "inputs": {
+        "mode": "new",
+        "platform": "ubuntu-latest",
+        "software": "acousticts",
+        "semimajor_m": "0.1",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "case_order": "Complete each frequency sweep",
+        "repetitions": "1",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "30"
+      },
+      "finish_before_next": true
     }
   ],
   "deferred_series": {
@@ -788,5 +857,5 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-30T20:59:53.926613+00:00"
+  "updated_at": "2026-10-30T22:29:15.970187+00:00"
 }
