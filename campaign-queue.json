@@ -857,5 +857,26 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-30T22:29:15.970187+00:00"
+  "updated_at": "2026-10-30T22:29:29.475473+00:00",
+  "dispatch_intent": {
+    "key": "acousticts:0.001",
+    "inputs": {
+      "mode": "new",
+      "platform": "ubuntu-latest",
+      "software": "acousticts",
+      "semimajor_m": "0.001",
+      "aspect_ratios": "1.001,1.01,5,10,50,100",
+      "incidences_deg": "0,37,90",
+      "boundaries": "rigid,pressure_release,liquid,gas",
+      "frequency_start_khz": "1",
+      "frequency_end_khz": "300",
+      "frequency_interval_khz": "2",
+      "case_order": "Complete each frequency sweep",
+      "repetitions": "1",
+      "timing_budget_minutes": "240",
+      "reference_budget_minutes": "30"
+    },
+    "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
+    "created_at": "2026-10-30T22:29:29.475460+00:00"
+  }
 }
