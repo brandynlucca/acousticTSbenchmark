@@ -5,7 +5,7 @@
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
   "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-  "dispatch_ref": "benchmark-prol-83d573f8",
+  "dispatch_ref": "main",
   "dispatched": {
     "acousticts:0.01": {
       "run_id": 40340271674,
@@ -1073,7 +1073,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-10-31T19:19:49.591376+00:00",
+  "updated_at": "2026-10-31T15:45:16.988653+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
