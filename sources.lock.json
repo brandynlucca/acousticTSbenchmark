@@ -2,7 +2,7 @@
   "schema_version": 1,
   "resolved_at": "2026-10-24",
   "sources": {
-    "acousticts": {"repository": "brandynlucca/acousticTS", "ref": "performance_enhancements", "sha": "52a660b157e9b9a17f34997d63d6b0ee623ea25f"},
+    "acousticts": {"repository": "brandynlucca/acousticTS", "ref": "performance_enhancements", "sha": "380de0c091d93c7ee57e6f6ffb1f837a69f19a3c"},
     "acousticscattering": {"repository": "brandynlucca/AcousticScattering.jl", "ref": "performance_upgrades", "sha": "d19a39a4e670c1174df2cb4cbdb3d255aa206797"},
     "prol_spheroid": {"repository": "CRIMAC-WP4-Machine-learning/Prol_Spheroid", "ref": "vectorized", "sha": "995929a0144f9d82f926895157e8e2e558070d3d"},
     "echosms": {"repository": "ices-tools-dev/echoSMs", "ref": "main", "sha": "ee56a9d2a5c2bb371d4cfb1114e33e5e23172a58"},
