@@ -978,7 +978,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-10-31T07:10:22.825334+00:00",
+  "updated_at": "2026-10-31T07:10:24.532839+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1032,5 +1032,26 @@
       "reason": "Rerun with validated bounded coefficient and Neumann reuse",
       "archived_at": "2026-10-31T05:36:41.111978+00:00"
     }
-  ]
+  ],
+  "dispatch_intent": {
+    "key": "prol_spheroid:0.001",
+    "inputs": {
+      "mode": "new",
+      "platform": "ubuntu-latest",
+      "software": "prol_spheroid",
+      "semimajor_m": "0.001",
+      "aspect_ratios": "1.001,1.01,5,10,50,100",
+      "incidences_deg": "0,37,90",
+      "boundaries": "liquid,gas",
+      "frequency_start_khz": "1",
+      "frequency_end_khz": "300",
+      "frequency_interval_khz": "2",
+      "case_order": "Complete each frequency sweep",
+      "repetitions": "1",
+      "timing_budget_minutes": "240",
+      "reference_budget_minutes": "30"
+    },
+    "source_ref": "3ae548deadb6607213a40a7057f23a5f398b57d5",
+    "created_at": "2026-10-31T07:10:24.532824+00:00"
+  }
 }
