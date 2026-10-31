@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
@@ -1023,7 +1023,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-10-31T07:25:29.156132+00:00",
+  "updated_at": "2026-10-31T07:30:20.444384+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1105,5 +1105,6 @@
       "preserved_cases": 88,
       "artifacts_receipt": "prol_append_preserved_artifacts_receipt.json"
     }
-  ]
+  ],
+  "reason": "Explicit user instruction: Cancel and restart with liquid/gas only. Preserve all retained acousticTS measurements."
 }
