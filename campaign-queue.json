@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "status": "paused",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
-  "source_ref": "24df2867f7e733caa6219db4809561ae39a3ff0c",
+  "source_ref": "771ca74de2d8cdff53a7d7cb655f44988a7c59ee",
   "dispatch_ref": "main",
   "dispatched": {
     "acousticts:0.01": {
@@ -371,27 +371,6 @@
         "reference_budget_minutes": "30"
       },
       "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b"
-    },
-    "acousticts:0.07": {
-      "run_id": 41168210900,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41168210900",
-      "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "acousticts",
-        "semimajor_m": "0.07",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "30"
-      },
-      "source_ref": "24df2867f7e733caa6219db4809561ae39a3ff0c"
     }
   },
   "recovery": {
@@ -899,7 +878,7 @@
     },
     "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs"
   },
-  "updated_at": "2026-10-31T05:35:09.094973+00:00",
+  "updated_at": "2026-10-31T05:36:41.112000+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -926,7 +905,32 @@
       },
       "reason": "Rerun from the validated optimized backend",
       "archived_at": "2026-10-31T04:20:53.784922+00:00"
+    },
+    {
+      "key": "acousticts:0.07",
+      "receipt": {
+        "run_id": 41168210900,
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41168210900",
+        "inputs": {
+          "mode": "new",
+          "platform": "ubuntu-latest",
+          "software": "acousticts",
+          "semimajor_m": "0.07",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "case_order": "Complete each frequency sweep",
+          "repetitions": "1",
+          "timing_budget_minutes": "240",
+          "reference_budget_minutes": "30"
+        },
+        "source_ref": "24df2867f7e733caa6219db4809561ae39a3ff0c"
+      },
+      "reason": "Rerun with validated bounded coefficient and Neumann reuse",
+      "archived_at": "2026-10-31T05:36:41.111978+00:00"
     }
-  ],
-  "reason": "Starting the validated additional backend optimization at a=0.07 m"
+  ]
 }
