@@ -349,6 +349,16 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         raise ValueError("No saved timing configuration is available to refresh")
     configuration = copy.deepcopy(anchor["configuration"])
     configuration.update(software=programs, repetitions=anchor["repetitions"], case_order=ORDER_CHOICES[order])
+    # Selected software inherits only boundaries that it can evaluate.
+    supported = set().union(*(CAPABILITIES[program] for program in programs))
+    configuration["boundaries"] = [boundary for boundary in configuration["boundaries"]
+                                   if boundary in supported]
+    selection = configuration["profiles"][anchor["profile"]]
+    if "boundaries" in selection:
+        selection["boundaries"] = [boundary for boundary in selection["boundaries"]
+                                   if boundary in supported]
+    if not selection.get("boundaries", configuration["boundaries"]):
+        raise ValueError("Selected software supports none of the saved boundaries")
     if frequency is not None:
         configuration["frequency"] = frequency
     validate_plan_size(configuration, anchor["profile"], programs, anchor["repetitions"])
@@ -358,6 +368,14 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         found.setdefault(platform, dict(schema_version=1, rows=[], provenance=[]))
         retained_comparison_rows(found[platform], cases)
         if extend:
+            # Legacy unsupported entries contain no solver measurement to reuse.
+            seeds = found[platform].get("reused_records", {})
+            found[platform]["reused_records"] = {
+                identity: record for identity, record in seeds.items()
+                if not (identity not in case_ids and record.get("status") == "unsupported"
+                        and record.get("boundary") not in CAPABILITIES[record["software"]]
+                        and record.get("ts_db") is None
+                        and record.get("elapsed_seconds") is None)}
             if frequency is not None and set(found[platform].get("reused_records", {})) - case_ids:
                 raise ValueError("The continuation frequency grid must include every saved selected-software case. "
                                  "Widen the grid to preserve existing measurements")
@@ -411,3 +429,4 @@ def write_baselines(result, directory, repository, run_id, sources=None):
             run_id=int(run_id), platform=platform, resumed_from_run_id=int(result["resume_run_id"]),
             settings=settings, sources=sources, retained_fingerprint=fingerprint(retained),
             reused_count=len(seeds)))
+
