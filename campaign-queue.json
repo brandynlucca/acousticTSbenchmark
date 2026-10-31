@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
@@ -999,7 +999,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-10-31T07:10:28.061428+00:00",
+  "updated_at": "2026-10-31T07:15:28.179360+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1053,5 +1053,6 @@
       "reason": "Rerun with validated bounded coefficient and Neumann reuse",
       "archived_at": "2026-10-31T05:36:41.111978+00:00"
     }
-  ]
+  ],
+  "reason": "User requires appending Prol_Spheroid to existing acousticTS campaigns. Preserve and restore display before extending"
 }
