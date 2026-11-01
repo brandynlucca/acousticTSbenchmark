@@ -518,16 +518,17 @@ if(repository){
  }
  function clearReferenceOverlay(){externalReferenceCurves=[];lastReferenceCheck=0;referenceRun=null;}
  async function pollLocalReferences(){
-  if(Date.now()-lastLocalReferenceCheck<120000)return;
-  lastLocalReferenceCheck=Date.now();
+  if(Date.now()-lastLocalReferenceCheck<120000)return false;
+  lastLocalReferenceCheck=Date.now();let changed=false;
   try{
    const shared=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/qualified-reference-curves.json?t=${Date.now()}`);
-   if(shared.ok&&shared.value?.schema_version===1&&Array.isArray(shared.value.reference_curves))sharedReferenceCurves=shared.value.reference_curves.map(row=>({...row,origin:'local_qualified'}));
+   if(shared.ok&&shared.value?.schema_version===1&&Array.isArray(shared.value.reference_curves)){sharedReferenceCurves=shared.value.reference_curves.map(row=>({...row,origin:'local_qualified'}));changed=true;}
   }catch(e){}
   try{
    const response=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/local-reference-curves.json?t=${Date.now()}`);
-   if(response.ok&&response.value?.schema_version===1&&Array.isArray(response.value.reference_curves))localReferenceCurves=response.value.reference_curves;
+   if(response.ok&&response.value?.schema_version===1&&Array.isArray(response.value.reference_curves)){localReferenceCurves=response.value.reference_curves;changed=true;}
   }catch(e){}
+  return changed;
  }
  async function pollReferences(requestGeneration){
   const runId=data.run_id;if(!runId)return;
@@ -545,7 +546,8 @@ if(repository){
  async function poll(){
   if(busy)return;busy=true;const chosen=platform.value,requestGeneration=generation;
   try{
-   await pollLocalReferences();
+   const referencesChanged=await pollLocalReferences();
+   if(referencesChanged&&requestGeneration===generation){updateSizes();updateAspects();updateIncidences();render();}
    if(Date.now()-lastRunCheck>300000){
     lastRunCheck=Date.now();
     try{const response=await fetchJSON(`https://api.github.com/repos/${repository}/actions/workflows/benchmark.yml/runs?event=workflow_dispatch&per_page=30`);if(response.ok){const runs=response.value.workflow_runs||[];newestRun=runs.find(run=>!run.display_title?.startsWith('Prepare environments'))||null;newestSetup=runs.find(run=>run.display_title?.startsWith('Prepare environments'))||null;}}catch(e){}
