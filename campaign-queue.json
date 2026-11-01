@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "status": "paused",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
   "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-  "dispatch_ref": "main",
+  "dispatch_ref": "benchmark-prol-83d573f8-20261101",
   "dispatched": {
     "acousticts:0.01": {
       "run_id": 40340271674,
@@ -1105,7 +1105,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-11-01T03:32:29.365098+00:00",
+  "updated_at": "2026-11-01T06:08:00.617038+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1204,5 +1204,17 @@
       "local_reference_generation_unchanged": true
     }
   ],
-  "reason": "Dispatch ref no longer matches the saved benchmark commit"
+  "dispatch_ref_recoveries": [
+    {
+      "previous_dispatch_ref": "main",
+      "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+      "new_dispatch_ref": "benchmark-prol-83d573f8-20261101",
+      "main_ref_verified": "14226bc77ad38c0beed2ca27f12ca3be0463b7b4",
+      "changed_source_paths": [
+        "src/report.py"
+      ],
+      "reason": "Resume existing saved Prol continuation after report-only main changes",
+      "recovered_at": "2026-11-01T06:08:00.617056+00:00"
+    }
+  ]
 }
