@@ -30,7 +30,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 #data-run-warning{padding:12px 16px;background:#fff2d7;border-left:4px solid #946000;line-height:1.5}
 [hidden]{display:none!important}#livebar{display:flex;align-items:baseline;gap:20px;flex-wrap:wrap}
 .completion-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}.completion-heading label{margin:0;font-size:14px}
-#benchmark-progress{margin:8px 0 18px}#software-progress{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:16px}
+#benchmark-progress,#reference-progress{margin:8px 0 18px}#software-progress,#reference-bars{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:16px}
 .progress-item{min-width:0}.progress-title{display:flex;justify-content:space-between;gap:12px;font-size:14px;margin-bottom:6px}.progress-title strong{font-weight:600}
 .progress-track{display:flex;height:10px;background:#e9edef;border-radius:3px;overflow:hidden}.progress-track span{background:var(--software-color);flex-shrink:0}
 .progress-track .progress-other{background:repeating-linear-gradient(135deg,var(--software-color) 0,var(--software-color) 3px,#ffffffc9 3px,#ffffffc9 6px)}
@@ -54,6 +54,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
+<section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
@@ -200,22 +201,70 @@ function benchmarkProgress(selected=false,boundary=null){
  }).filter(summary=>!boundary||supportsBoundary(summary.software,boundary));
 }
 function progressBar(summary,showName=true){
- const {software,success,other,recorded,planned,pending}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',colors[software]);
+ const {software,success,other,recorded,planned,pending}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',summary.color||colors[software]);
+ const reference=summary.kind==='reference',label=summary.label||labels[software];
  const title=document.createElement('div');title.className='progress-title';
- if(showName){const name=document.createElement('strong');name.textContent=labels[software];title.append(name);}
+ if(showName){const name=document.createElement('strong');name.textContent=label;title.append(name);}
  const percent=planned===null?null:(recorded===planned?100:Math.min(99.99,100*recorded/planned));
  const number=document.createElement('span');number.textContent=percent===null?'Total unavailable':`${percent.toFixed(2)}%`;title.append(number);node.append(title);
- const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${labels[software]} recorded cases`);track.setAttribute('aria-valuemin','0');
- const countText=planned===null?`${recorded.toLocaleString()} recorded · planned total unavailable`:`${recorded.toLocaleString()} / ${planned.toLocaleString()} recorded · ${pending.toLocaleString()} pending`;
+ const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${label} ${reference?'qualified references':'recorded cases'}`);track.setAttribute('aria-valuemin','0');
+ const countText=planned===null?`${recorded.toLocaleString()} ${reference?'qualified':'recorded'} · planned total unavailable`:`${recorded.toLocaleString()} / ${planned.toLocaleString()} ${reference?'qualified':'recorded'} · ${pending.toLocaleString()} ${reference?'missing':'pending'}`;
  track.setAttribute('aria-valuetext',countText);
  if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['other',other]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${100*count/planned}%`;track.append(segment);}}
  else track.classList.add('progress-unknown');
  node.append(track);const counts=document.createElement('div');counts.className='progress-counts';counts.textContent=countText;
- if(showName){const detail=document.createElement('div');detail.textContent=`${success.toLocaleString()} successful · ${other.toLocaleString()} failed or skipped`;counts.append(detail);}node.append(counts);return node;
+ if(showName){const detail=document.createElement('div');detail.textContent=summary.detail||`${success.toLocaleString()} successful · ${other.toLocaleString()} failed or skipped`;counts.append(detail);}node.append(counts);return node;
 }
+
+function referenceProgress(selected=false){
+ const points=new Map(),knownSize=snapshotSize(data)===Number(semimajor.value);
+ const inScope=r=>matchesSize(r)&&(!selected||r.aspect_ratio===Number(aspect.value)&&(incidence.value==='all'||r.incidence_deg===Number(incidence.value)));
+ const key=r=>JSON.stringify([Number(semimajor.value),r.aspect_ratio,r.boundary,r.incidence_deg,r.frequency_hz]);
+ const add=(row,observed=false)=>{
+  if(!inScope(row)||!Object.hasOwn(boundaryLabels,row.boundary)||![row.aspect_ratio,row.incidence_deg,row.frequency_hz].every(Number.isFinite))return;
+  const identity=key(row);
+  if(!points.has(identity))points.set(identity,{...row,physicalIds:new Set()});
+  if(observed&&row.physical_id)points.get(identity).physicalIds.add(row.physical_id);
+ };
+ for(const row of rows.filter(applicable))add(row,true);
+ if(knownSize){
+  const groups=data.incidence_coverage||data.coverage||[];
+  for(const group of groups){
+   if(!supportsBoundary(group.software,group.boundary))continue;
+   const axes=data.axes?.[String(group.aspect_ratio)]||{};
+   const frequencies=axes.software_frequencies_hz?.[group.software]||axes.frequencies_hz||[];
+   const angles=Number.isFinite(group.incidence_deg)?[group.incidence_deg]:(data.incidences_deg||[]);
+   for(const angle of angles)for(const frequency of frequencies)add({...group,semimajor_m:Number(semimajor.value),incidence_deg:angle,frequency_hz:frequency});
+  }
+ }
+ const found=new Set();
+ for(const reference of referenceCurves()){
+  if(!inScope(reference))continue;
+  const identity=key(reference),point=points.get(identity);
+  if(point&&(!point.physicalIds.size||point.physicalIds.has(reference.physical_id)))found.add(identity);
+ }
+ const known=points.size>0;
+ return [{software:'bem',label:'BEM',color:'#228B22',boundaries:['rigid','pressure_release']},
+         {software:'fem_bem',label:'Coupled FEM-BEM',color:'#4b6f44',boundaries:['liquid','gas']}].map(method=>{
+  const scoped=[...points].filter(([,point])=>method.boundaries.includes(point.boundary));
+  const planned=known?scoped.length:null,success=scoped.filter(([identity])=>found.has(identity)).length;
+  const detail=method.boundaries.map(boundary=>{
+   const group=scoped.filter(([,point])=>point.boundary===boundary);
+   return `${boundaryLabels[boundary]}: ${group.filter(([identity])=>found.has(identity)).length.toLocaleString()} / ${known?group.length.toLocaleString():'unavailable'}`;
+  }).join(' · ');
+  return {...method,kind:'reference',success,recorded:success,other:0,planned,pending:planned===null?null:planned-success,detail};
+ });
+}
+function renderReferenceProgress(selected){
+ const summaries=referenceProgress(selected).filter(summary=>summary.planned!==0);
+ document.getElementById('reference-bars').replaceChildren(...summaries.map(summary=>progressBar(summary)));
+ document.getElementById('reference-progress-context').textContent=`a = ${semimajor.value} m · ${selected?'aspect ratio '+aspect.value+' · '+(incidence.value==='all'?'all incidences':incidence.value+'° incidence'):'all aspect ratios and incidences'} · benchmark frequency grid · shared across platforms`;
+}
+
 function renderProgress(){
  const selected=document.getElementById('progress-scope').value==='selected',container=document.getElementById('software-progress'),all=benchmarkProgress(selected),summaries=all.filter(summary=>summary.planned!==0);
  container.replaceChildren(...summaries.map(summary=>progressBar(summary)));
+ renderReferenceProgress(selected);
  document.getElementById('progress-context').textContent=!summaries.length?(all.length?'No supported cases in this selection.':'Waiting for the benchmark plan.'):`${data.platform?data.platform+' · ':''}a = ${semimajor.value} m · ${selected?'aspect ratio '+aspect.value+' · '+(incidence.value==='all'?'all incidences':incidence.value+'° incidence'):'all aspect ratios and incidences'} · supported boundaries only`;
 }
 function extentFor(values,zero=false){let lo=values.length?values.reduce((a,b)=>Math.min(a,b)):0,hi=values.length?values.reduce((a,b)=>Math.max(a,b)):1;if(zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}if(lo===hi){lo-=.5;hi+=.5;}const padding=(hi-lo)*.08;return [lo-padding,hi+padding];}
