@@ -198,7 +198,7 @@ jobs:
   benchmark:
     name: ${{ inputs.mode == 'prepare' && 'prepare' || 'benchmark' }} (${{ matrix.os }})
     needs: matrix
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     permissions:
       contents: write
       actions: write
