@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "status": "paused",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
-  "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-  "dispatch_ref": "benchmark-prol-83d573f8-20261101",
+  "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
+  "dispatch_ref": "benchmark-prol-ubuntu24-20261101",
   "dispatched": {
     "acousticts:0.01": {
       "run_id": 40340271674,
@@ -394,8 +394,8 @@
       "source_ref": "771ca74de2d8cdff53a7d7cb655f44988a7c59ee"
     },
     "prol_spheroid:0.07": {
-      "run_id": 41279583065,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41279583065",
+      "run_id": 41253354114,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41253354114",
       "inputs": {
         "mode": "extend",
         "refresh_software": "prol_spheroid",
@@ -404,10 +404,10 @@
         "case_order": "Complete each frequency sweep",
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
-        "resume_run_id": "41253354114"
+        "resume_run_id": "41235381642"
       },
       "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-      "recorded_before": 5060,
+      "recorded_before": 4622,
       "history": [
         {
           "run_id": 41180546815,
@@ -487,22 +487,6 @@
           },
           "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
           "recorded_before": 4197
-        },
-        {
-          "run_id": 41253354114,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41253354114",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "resume_run_id": "41235381642"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 4622
         }
       ]
     }
@@ -1121,7 +1105,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-11-01T06:10:37.418691+00:00",
+  "updated_at": "2026-11-01T06:14:54.130837+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1233,5 +1217,124 @@
       "recovered_at": "2026-11-01T06:08:00.617056+00:00"
     }
   ],
-  "reason": "Benchmark 41279583065 ended with failure. Repair it before advancing"
+  "setup_failure_recoveries": [
+    {
+      "failed_receipt": {
+        "run_id": 41279583065,
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41279583065",
+        "inputs": {
+          "mode": "extend",
+          "refresh_software": "prol_spheroid",
+          "continuation_platform": "ubuntu-latest",
+          "continuation_frequency": "Keep saved frequency grid",
+          "case_order": "Complete each frequency sweep",
+          "timing_budget_minutes": "240",
+          "reference_budget_minutes": "0",
+          "resume_run_id": "41253354114"
+        },
+        "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+        "recorded_before": 5060,
+        "history": [
+          {
+            "run_id": 41180546815,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41180546815",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "30",
+              "resume_run_id": "41173301619"
+            },
+            "source_ref": "3ae548deadb6607213a40a7057f23a5f398b57d5"
+          },
+          {
+            "run_id": 41181227159,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41181227159",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "30",
+              "resume_run_id": "41180546815"
+            },
+            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+            "recorded_before": 76
+          },
+          {
+            "run_id": 41196956469,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41196956469",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "30",
+              "resume_run_id": "41181227159"
+            },
+            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+            "recorded_before": 3652
+          },
+          {
+            "run_id": 41216348274,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41216348274",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "0",
+              "resume_run_id": "41196956469"
+            },
+            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+            "recorded_before": 4132
+          },
+          {
+            "run_id": 41235381642,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41235381642",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "0",
+              "resume_run_id": "41216348274"
+            },
+            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+            "recorded_before": 4197
+          },
+          {
+            "run_id": 41253354114,
+            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41253354114",
+            "inputs": {
+              "mode": "extend",
+              "refresh_software": "prol_spheroid",
+              "continuation_platform": "ubuntu-latest",
+              "continuation_frequency": "Keep saved frequency grid",
+              "case_order": "Complete each frequency sweep",
+              "timing_budget_minutes": "240",
+              "reference_budget_minutes": "0",
+              "resume_run_id": "41235381642"
+            },
+            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
+            "recorded_before": 4622
+          }
+        ]
+      },
+      "reason": "Ubuntu latest changed from Ubuntu24/GCC14.2 to Ubuntu26/GCC14.3. No new measurements were produced. Restore last successful cursor with all 5060 Prol and 3543 acousticTS measurements.",
+      "recovered_at": "2026-11-01T06:14:54.130863+00:00",
+      "repair_source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
+    }
+  ]
 }
