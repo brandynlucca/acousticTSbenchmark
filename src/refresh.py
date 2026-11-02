@@ -225,7 +225,7 @@ def _environments(content):
 
 
 def resolve_refresh(inputs, repository, revision, api, sources=None):
-    from campaign import (CAPABILITIES, ORDER_CHOICES, artifact_platform, checkpoint_settings,
+    from campaign import (BOUNDARIES, CAPABILITIES, ORDER_CHOICES, artifact_platform, checkpoint_settings,
                           continuation_frequency, continuation_platform, csv_values, read_checkpoint,
                           select_resume_artifacts, setup_only_checkpoint, timing_or_restore_started,
                           validate_plan_size)
@@ -243,10 +243,16 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
     programs = csv_values(inputs.get("refresh_software", "acousticts"), "refresh_software", str.lower)
     if set(programs) - (CAPABILITIES.keys() - {"acousticscattering"}):
         raise ValueError("Refresh software must contain supported timing software")
+    boundary_input = inputs.get("continuation_boundaries", "")
+    if not isinstance(boundary_input, str):
+        raise ValueError("Continuation boundaries must be an empty string or boundary CSV")
+    boundaries = csv_values(boundary_input, "continuation_boundaries") if boundary_input.strip() else None
+    if boundaries is not None and set(boundaries) - set(BOUNDARIES):
+        raise ValueError("Unknown continuation boundary. Use rigid, pressure_release, liquid, gas")
     order = inputs.get("case_order", "Complete each frequency sweep")
     if order not in ORDER_CHOICES:
         raise ValueError("Unknown refresh case order")
-    found, visited, anchor, platforms = {}, set(), None, None
+    found, saved_rows, visited, anchor, platforms = {}, {}, set(), None, None
     current = int(requested)
     for _ in range(9):
         if current in visited:
@@ -311,23 +317,8 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
                 # Its newer rows are already retained, but this older artifact
                 # can be the only evidence linking to a queued platform's data.
                 continue
-            retained_rows = [dict(row, measurement_role="retained",
-                                 retained_from_run_id=row.get("retained_from_run_id", current))
-                             for row in rows if row["software"] not in programs]
-            found[platform] = dict(schema_version=1, rows=retained_rows, provenance=provenance)
-            if extend:
-                seeds = {}
-                for row in rows:
-                    if row["software"] not in programs:
-                        continue
-                    record = {key: value for key, value in row.items() if not key.startswith("reference_")
-                              and key not in ("delta_ts_db", "measurement_role", "retained_from_run_id")}
-                    record["measurement_origin_run_id"] = row.get("measurement_origin_run_id",
-                        row.get("retained_from_run_id", current))
-                    if record["case_id"] in seeds:
-                        raise ValueError("Duplicate selected measurements cannot be extended")
-                    seeds[record["case_id"]] = record
-                found[platform]["reused_records"] = seeds
+            found[platform] = dict(schema_version=1, rows=[], provenance=provenance)
+            saved_rows[platform] = (rows, current)
         missing = platforms - found.keys()
         if not missing:
             break
@@ -349,11 +340,14 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
         raise ValueError("No saved timing configuration is available to refresh")
     configuration = copy.deepcopy(anchor["configuration"])
     configuration.update(software=programs, repetitions=anchor["repetitions"], case_order=ORDER_CHOICES[order])
+    selection = configuration["profiles"][anchor["profile"]]
+    if boundaries is not None:
+        configuration["boundaries"] = list(boundaries)
+        selection["boundaries"] = list(boundaries)
     # Selected software inherits only boundaries that it can evaluate.
     supported = set().union(*(CAPABILITIES[program] for program in programs))
     configuration["boundaries"] = [boundary for boundary in configuration["boundaries"]
                                    if boundary in supported]
-    selection = configuration["profiles"][anchor["profile"]]
     if "boundaries" in selection:
         selection["boundaries"] = [boundary for boundary in selection["boundaries"]
                                    if boundary in supported]
@@ -364,21 +358,37 @@ def resolve_refresh(inputs, repository, revision, api, sources=None):
     validate_plan_size(configuration, anchor["profile"], programs, anchor["repetitions"])
     cases = build_cases(configuration, anchor["profile"], programs, anchor["repetitions"])
     case_ids = {case["case_id"] for case in cases}
+    active_physical = {(case["software"], case["physical_id"]) for case in cases}
     for platform in platforms:
         found.setdefault(platform, dict(schema_version=1, rows=[], provenance=[]))
+        rows, origin = saved_rows.get(platform, ([], current))
+        retained, seeds, seen = [], {}, set()
+        for row in rows:
+            program = row["software"]
+            # Historical rows outside declared solver capabilities are not valid measurements.
+            if (program in {"prol_spheroid", "liquid_spheroid"} and
+                    row.get("boundary") not in CAPABILITIES[program]):
+                continue
+            identity = row["case_id"]
+            if identity in seen:
+                raise ValueError("Duplicate saved measurements cannot be continued")
+            seen.add(identity)
+            if program not in programs or (program, row.get("physical_id")) not in active_physical:
+                retained.append(dict(row, measurement_role="retained",
+                                     retained_from_run_id=row.get("retained_from_run_id", origin)))
+                continue
+            if identity not in case_ids:
+                raise ValueError("Saved selected measurements use different inputs for an active physical case")
+            if extend:
+                record = {key: value for key, value in row.items() if not key.startswith("reference_")
+                          and key not in ("delta_ts_db", "measurement_role", "retained_from_run_id")}
+                record["measurement_origin_run_id"] = row.get("measurement_origin_run_id",
+                    row.get("retained_from_run_id", origin))
+                seeds[identity] = record
+        found[platform]["rows"] = retained
         retained_comparison_rows(found[platform], cases)
         if extend:
-            # Legacy unsupported entries contain no solver measurement to reuse.
-            seeds = found[platform].get("reused_records", {})
-            found[platform]["reused_records"] = {
-                identity: record for identity, record in seeds.items()
-                if not (identity not in case_ids and record.get("status") == "unsupported"
-                        and record.get("boundary") not in CAPABILITIES[record["software"]]
-                        and record.get("ts_db") is None
-                        and record.get("elapsed_seconds") is None)}
-            if frequency is not None and set(found[platform].get("reused_records", {})) - case_ids:
-                raise ValueError("The continuation frequency grid must include every saved selected-software case. "
-                                 "Widen the grid to preserve existing measurements")
+            found[platform]["reused_records"] = seeds
             validate_reused_records(found[platform], cases,
                 read_json(ROOT / "sources.lock.json") if sources is None else sources,
                 platform={"ubuntu-latest": "Linux", "windows-latest": "Windows", "macos-latest": "Darwin"}[platform])
@@ -429,4 +439,5 @@ def write_baselines(result, directory, repository, run_id, sources=None):
             run_id=int(run_id), platform=platform, resumed_from_run_id=int(result["resume_run_id"]),
             settings=settings, sources=sources, retained_fingerprint=fingerprint(retained),
             reused_count=len(seeds)))
+
 

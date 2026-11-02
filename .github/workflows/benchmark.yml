@@ -74,6 +74,10 @@ on:
         description: Selected software CSV for extend or refresh (other results are retained)
         type: string
         default: acousticts
+      continuation_boundaries:
+        description: Optional boundaries CSV for extend or refresh (blank keeps saved boundaries)
+        type: string
+        default: ''
       resume_artifact:
         description: Optional checkpoint artifact name instead of the final platform artifact
         type: string
@@ -976,3 +980,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed
+

@@ -210,12 +210,16 @@ def retained_comparison_rows(sidecar, active_rows, references=None):
         raise ValueError("Invalid retained measurement metadata")
     programs = {row.get("software") for row in active_rows}
     identifiers = {row.get("case_id") for row in active_rows}
+    active_physical = {(row.get("software"), row.get("physical_id")) for row in active_rows}
     retained = []
     for row in sidecar["rows"]:
         if (not isinstance(row, dict) or row.get("measurement_role") != "retained" or
                 row.get("status") not in STATUSES or
                 row.get("software") not in CAPABILITIES or row["software"] == "acousticscattering" or
-                row["software"] in programs or
+                row["software"] in programs and
+                (not isinstance(row.get("physical_id"), str) or
+                 not re.fullmatch(r"[a-f0-9]{64}", row["physical_id"]) or
+                 (row["software"], row["physical_id"]) in active_physical) or
                 not isinstance(row.get("case_id"), str) or
                 not re.fullmatch(r"[a-f0-9]{64}", row["case_id"]) or row["case_id"] in identifiers or
                 not isinstance(row.get("source_sha"), str) or
@@ -735,3 +739,4 @@ if __name__ == "__main__":
     except (ValueError, RuntimeError, OSError, zipfile.BadZipFile) as error:
         print(f"Progress publication failed: {safe_error_summary(error)}", file=sys.stderr)
         raise SystemExit(1)
+

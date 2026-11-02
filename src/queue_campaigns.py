@@ -27,7 +27,7 @@ def utc_now():
 
 def request_platform(request):
     inputs = request["inputs"]
-    platform = inputs.get("continuation_platform") if inputs.get("mode") == "extend" else inputs.get("platform")
+    platform = inputs.get("continuation_platform") if inputs.get("mode") in {"extend", "refresh"} else inputs.get("platform")
     if platform not in PLATFORMS:
         raise ValueError("Finishing a queued software request requires one explicit runner platform")
     return platform
@@ -72,15 +72,20 @@ def validate_state(state, repository):
             raise ValueError("Invalid benchmark queue request or parent ordering")
         inputs = request["inputs"]
         parent = request.get("parent")
+        baseline = request.get("baseline_run_id")
+        if ("baseline_run_id" in request and
+                (parent is not None or type(baseline) is not int or baseline < 1)):
+            raise ValueError("A saved refresh baseline requires a positive run ID and no queue parent")
+        mode = "extend" if parent else "refresh" if baseline is not None else "new"
         if (parent is not None and parent.split(":")[1] != request["semimajor_m"] or
-                inputs.get("mode") != ("extend" if parent else "new") or
-                inputs.get("refresh_software" if parent else "software") != request["software"] or
-                not parent and inputs.get("semimajor_m") != request["semimajor_m"] or
+                inputs.get("mode") != mode or
+                inputs.get("software" if mode == "new" else "refresh_software") != request["software"] or
+                mode == "new" and inputs.get("semimajor_m") != request["semimajor_m"] or
                 "resume_run_id" in inputs):
             raise ValueError("Queue inputs do not match the saved software and size")
         if type(request.get("finish_before_next", False)) is not bool:
             raise ValueError("finish_before_next must be a boolean")
-        if request.get("finish_before_next"):
+        if request.get("finish_before_next") or baseline is not None:
             request_platform(request)
         receipt = state["dispatched"].get(request["key"])
         if receipt is None:
@@ -129,6 +134,8 @@ def validate_state(state, repository):
                     inputs.get("resume_run_id") != str(receipt["run_id"]) or
                     inputs.get("continuation_platform") != request_platform(request)):
                 raise ValueError("Invalid pending software completion intent")
+        elif intent["inputs"] != resolved_inputs(state, state["requests"][index]):
+            raise ValueError("Pending dispatch inputs do not match the saved request")
         datetime.fromisoformat(intent["created_at"])
 
 
@@ -186,8 +193,8 @@ def has_saved_baseline(api, run_id):
     raise ValueError("Too many artifacts to establish the predecessor baseline")
 
 
-def completion_progress(api, run, request, source_ref):
-    """Count immutable saved predictions for the exact requested software and size."""
+def saved_checkpoint_settings(api, run, platform):
+    """Read the exact requested platform before using a saved timing baseline."""
     artifacts = []
     for page in range(1, 11):
         entries = api.request("GET", f"/actions/runs/{run['id']}/artifacts?per_page=100&page={page}")["artifacts"]
@@ -196,9 +203,17 @@ def completion_progress(api, run, request, source_ref):
             break
     else:
         raise ValueError("Too many artifacts to verify completed predictions")
-    platform = request_platform(request)
     selected = select_resume_artifacts(artifacts, platform=platform)[platform]
-    settings = checkpoint_settings(api.archive(selected["id"]), api.repository, run.get("head_sha", ""), platform)
+    content = api.archive(selected["id"])
+    from refresh import baseline_settings
+    baseline = baseline_settings(content, api.repository, run["id"], platform)
+    return (baseline if baseline is not None else
+            checkpoint_settings(content, api.repository, run.get("head_sha", ""), platform))
+
+
+def completion_progress(api, run, request, source_ref):
+    """Count immutable saved predictions for the exact requested software and size."""
+    settings = saved_checkpoint_settings(api, run, request_platform(request))
     if (settings["software"] != request["software"] or
             settings["configuration"]["geometry"]["semimajor_m"] != float(request["semimajor_m"]) or
             settings["source_ref"] != source_ref):
@@ -212,10 +227,14 @@ def resolved_inputs(state, request):
         identities = {state.get("initial_key", "acousticts:0.01"): state["initial_run_id"],
                       **{key: value["run_id"] for key, value in state["dispatched"].items()}}
         inputs["resume_run_id"] = str(identities[request["parent"]])
+    elif request.get("baseline_run_id") is not None:
+        inputs["resume_run_id"] = str(request["baseline_run_id"])
     return inputs
 
 
 def expected_title(inputs):
+    if inputs["mode"] == "refresh":
+        return f"Refresh {inputs['refresh_software']} from benchmark {inputs['resume_run_id']}"
     if inputs["mode"] == "extend":
         return f"Continue {inputs['refresh_software']} after benchmark {inputs['resume_run_id']}"
     return f"New {inputs['software']} benchmark (a={inputs['semimajor_m']} m, {inputs.get('platform', 'ubuntu-latest')})"
@@ -326,7 +345,7 @@ def advance(api):
     if request is None:
         request = state["requests"][index]
         inputs = resolved_inputs(state, request)
-    if request.get("parent"):
+    if request.get("parent") or request.get("baseline_run_id") is not None:
         parent_id = int(inputs["resume_run_id"])
         parent = checked_run(api, parent_id)
         recover_parent = recovering and parent_id == previous
@@ -334,6 +353,13 @@ def advance(api):
                 parent.get("conclusion") != "success" and not recover_parent or
                 not has_saved_baseline(api, parent_id)):
             return pause(api, state, sha, f"Required same-size parent {parent_id} is not available for continuation")
+        if inputs["mode"] == "refresh":
+            try:
+                saved = saved_checkpoint_settings(api, parent, request_platform(request))
+                if saved["configuration"]["geometry"]["semimajor_m"] != float(request["semimajor_m"]):
+                    raise ValueError("Saved baseline has a different semimajor axis")
+            except (ValueError, KeyError) as error:
+                return pause(api, state, sha, f"Cannot verify refresh baseline {parent_id}: {error}")
     ref = state.get("dispatch_ref", "main")
     scope = "heads" if ref == "main" else "tags"
     actual = api.request("GET", f"/git/ref/{scope}/{quote(ref, safe='')}")

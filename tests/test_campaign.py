@@ -1199,10 +1199,12 @@ class ContinuationFrequencyTests(unittest.TestCase):
                 self.assertEqual(seeds[identity]["ts_db"], original["ts_db"])
                 self.assertEqual(seeds[identity]["measurement_origin_run_id"], 124)
 
-    def test_continuation_frequency_rejects_omitted_selected_measurements(self):
+    def test_continuation_frequency_retains_omitted_selected_measurements(self):
         content = self.original_campaign(["liquid_spheroid"], stop_hz=100000)
-        with self.assertRaisesRegex(ValueError, "include every saved selected-software case"):
-            self.resolve(content, dict(frequency_end_khz="98"))
+        result = self.resolve(content, dict(frequency_end_khz="98"))
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        self.assertEqual(len(sidecar["reused_records"]), 49)
+        self.assertEqual([row["frequency_hz"] for row in sidecar["rows"]], [100000])
 
     def test_invalid_continuation_grid_is_rejected_before_case_allocation(self):
         content = self.original_campaign()
@@ -1232,6 +1234,111 @@ class ContinuationFrequencyTests(unittest.TestCase):
                 refresh.resolve_refresh(dict(mode=mode, resume_run_id="123", continuation_frequency="unknown"),
                                         "owner/repo", "e" * 40, api, sources=self.lock)
             api.request.assert_not_called()
+
+
+class ScopedContinuationTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = ContinuationFrequencyTests()
+        self.fixture.setUp()
+
+    def resolve(self, programs=None, **inputs):
+        content = self.fixture.original_campaign(programs)
+        return self.fixture.resolve(content, inputs), content
+
+    def test_explicit_boundaries_expand_profile_and_preserve_other_software(self):
+        result, content = self.resolve(["prol_spheroid", "acousticts", "echosms", "liquid_spheroid"],
+            mode="refresh", refresh_software="acousticts", continuation_frequency="Keep saved frequency grid",
+            continuation_boundaries="rigid,pressure_release,liquid,gas")
+        config = result["configuration"]
+        self.assertEqual(config["boundaries"], list(benchmark.BOUNDARIES))
+        self.assertEqual(config["profiles"][result["profile"]]["boundaries"], list(benchmark.BOUNDARIES))
+        self.assertEqual(result["planned_cases"], 600)
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        old = campaign.read_checkpoint(content)[0]["results.json"]
+        expected = [dict(row, measurement_role="retained", retained_from_run_id=123)
+                    for row in old if row["software"] != "acousticts"]
+        self.assertEqual(sidecar["rows"], expected)
+        self.assertFalse(sidecar.get("reused_records"))
+
+    def test_empty_boundary_override_keeps_the_saved_profile(self):
+        result, _ = self.resolve(["prol_spheroid"], refresh_software="acousticts",
+            continuation_frequency="Keep saved frequency grid", continuation_boundaries="")
+        self.assertEqual(result["configuration"]["profiles"][result["profile"]]["boundaries"], ["gas"])
+        self.assertEqual(result["planned_cases"], 150)
+
+    def test_explicit_boundaries_respect_live_software_capabilities(self):
+        for program in ("prol_spheroid", "liquid_spheroid", "echosms", "acousticts"):
+            with self.subTest(program=program):
+                result, _ = self.resolve(["acousticts"], refresh_software=program,
+                    continuation_boundaries="rigid,pressure_release,liquid,gas")
+                self.assertEqual(set(result["configuration"]["boundaries"]), set(benchmark.CAPABILITIES[program]))
+
+    def test_narrow_extend_retains_outside_rows_and_seeds_only_inside(self):
+        result, content = self.resolve(["liquid_spheroid", "acousticts", "echosms", "prol_spheroid"],
+            frequency_end_khz="98")
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        original = campaign.read_checkpoint(content)[0]["results.json"]
+        expected = [dict(row, measurement_role="retained", retained_from_run_id=123) for row in original
+                    if row["software"] != "liquid_spheroid" or row["frequency_hz"] > 98000]
+        self.assertEqual(sidecar["rows"], expected)
+        self.assertEqual(len(sidecar["reused_records"]), 49)
+        self.assertTrue(all(row["frequency_hz"] <= 98000 for row in sidecar["reused_records"].values()))
+        self.assertEqual(result["recorded_by_platform"]["ubuntu-latest"], 49)
+        cases = benchmark.build_cases(result["configuration"], result["profile"], ["liquid_spheroid"], 1)
+        self.assertEqual(progress.retained_comparison_rows(sidecar, cases), expected)
+        self.assertEqual(refresh.validate_reused_records(sidecar, cases, self.fixture.lock, "Linux"),
+                         sidecar["reused_records"])
+
+    def test_narrow_refresh_replaces_only_selected_in_scope_rows(self):
+        result, _ = self.resolve(["acousticts", "echosms"], mode="refresh", refresh_software="acousticts",
+                                frequency_end_khz="98")
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        selected = [row for row in sidecar["rows"] if row["software"] == "acousticts"]
+        self.assertEqual(len(selected), 101)
+        self.assertTrue(all(row["frequency_hz"] > 98000 for row in selected))
+        self.assertEqual(result["recorded_by_platform"]["ubuntu-latest"], 0)
+
+    def test_original_reference_fields_survive_outside_scope_retention(self):
+        content = self.fixture.original_campaign(["liquid_spheroid", "acousticts"])
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            values = {name: json.loads(archive.read(name)) for name in archive.namelist()}
+        row = next(row for row in values["results.json"] if row["software"] == "liquid_spheroid" and row["frequency_hz"] == 100000)
+        row.update(reference_ts_db=-41.0, reference_method="fem_bem", reference_id="b" * 64, delta_ts_db=.01)
+        result = self.fixture.resolve(self.fixture.archive_files(values), dict(frequency_end_khz="98"))
+        retained = next(item for item in result["_retained_payloads"]["ubuntu-latest"]["rows"] if item["case_id"] == row["case_id"])
+        self.assertEqual(retained, dict(row, measurement_role="retained", retained_from_run_id=123))
+
+    def test_unsupported_historical_ok_rows_are_removed_for_other_programs(self):
+        config = configuration()
+        config["profiles"]["pilot"]["boundaries"] = list(benchmark.BOUNDARIES)
+        config["frequency"] = dict(start_hz=1000, stop_hz=1000, step_hz=1000)
+        programs = ["acousticts", "prol_spheroid", "liquid_spheroid"]
+        content = self.fixture.completed_campaign(config, programs)
+        result = self.fixture.resolve(content, dict(mode="refresh", refresh_software="acousticts",
+            continuation_frequency="Keep saved frequency grid", continuation_boundaries="rigid,pressure_release,liquid,gas"))
+        rows = result["_retained_payloads"]["ubuntu-latest"]["rows"]
+        self.assertEqual({row["boundary"] for row in rows if row["software"] == "prol_spheroid"}, {"liquid", "gas"})
+        self.assertEqual({row["boundary"] for row in rows if row["software"] == "liquid_spheroid"},
+                         set(benchmark.CAPABILITIES["liquid_spheroid"]))
+
+    def test_selected_retained_rows_cannot_overlap_an_active_physical_case(self):
+        result, _ = self.resolve(["liquid_spheroid"], frequency_end_khz="98")
+        sidecar = result["_retained_payloads"]["ubuntu-latest"]
+        cases = benchmark.build_cases(result["configuration"], result["profile"], ["liquid_spheroid"], 1)
+        for changes in (dict(case_id=cases[0]["case_id"]), dict(physical_id=cases[0]["physical_id"]),
+                        dict(physical_id=None)):
+            altered = copy.deepcopy(sidecar)
+            altered["rows"][0].update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "retained measurement"):
+                progress.retained_comparison_rows(altered, cases)
+
+    def test_bad_boundary_override_is_rejected(self):
+        for value in ("bad", None, 2, "rigid,,gas"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.resolve(continuation_boundaries=value)
+        with self.assertRaisesRegex(ValueError, "supports none"):
+            self.resolve(refresh_software="prol_spheroid", continuation_boundaries="rigid")
+
 
 
 if __name__ == "__main__":

@@ -530,5 +530,144 @@ class QueueTests(unittest.TestCase):
                 advance.assert_called_once_with(client.return_value, wait_seconds)
 
 
+class SavedRefreshQueueTests(unittest.TestCase):
+    def refresh_api(self):
+        saved = state()
+        saved.update(initial_key="prol_spheroid:0.1", requests=[])
+        sizes = ["0.001", "0.01", "0.07", "0.1"]
+        for index, size in enumerate(sizes):
+            saved["requests"].append(dict(key=f"acousticts:{size}", software="acousticts",
+                semimajor_m=size, parent=None, baseline_run_id=200 + index, finish_before_next=True,
+                inputs=dict(mode="refresh", refresh_software="acousticts",
+                    continuation_platform="ubuntu-latest", timing_budget_minutes="240",
+                    reference_budget_minutes="0", boundaries="rigid,pressure_release,liquid,gas")))
+        for software, parent in (("echosms", "acousticts"), ("liquid_spheroid", "echosms")):
+            for size in sizes:
+                item = request(software, size, f"{parent}:{size}")
+                item.update(finish_before_next=True)
+                item["inputs"]["continuation_platform"] = "ubuntu-latest"
+                if software == "liquid_spheroid":
+                    item["inputs"].update(continuation_frequency="Use frequency inputs above",
+                        frequency_start_khz="1", frequency_end_khz="100", frequency_interval_khz="2")
+                saved["requests"].append(item)
+        api = FakeAPI(saved)
+        for index, size in enumerate(sizes):
+            identity = 200 + index
+            api.runs[identity] = api.run(identity)
+            api.finish_predictions(identity, 3, software="prol_spheroid", semimajor=float(size))
+        return api
+
+    def test_twelve_requests_refresh_four_sizes_then_extend_each_software(self):
+        api = self.refresh_api()
+        queue.validate_state(api.state, api.repository)
+        keys = [item["key"] for item in api.state["requests"]]
+        for index, item in enumerate(api.state["requests"]):
+            result = queue.advance(api)
+            self.assertEqual((result["status"], result["key"]), ("dispatched", keys[index]))
+            dispatched = api.dispatches()[-1]["inputs"]
+            if index < 4:
+                self.assertEqual(dispatched["mode"], "refresh")
+                self.assertEqual(dispatched["resume_run_id"], str(200 + index))
+                self.assertNotIn("baseline_run_id", dispatched)
+            else:
+                expected = api.state["dispatched"][item["parent"]]["run_id"]
+                self.assertEqual(dispatched["resume_run_id"], str(expected))
+                self.assertEqual(dispatched["mode"], "extend")
+            self.assertEqual(queue.advance(api)["status"], "waiting")
+            api.finish_predictions(result["run_id"], 3, software=item["software"],
+                                   semimajor=float(item["semimajor_m"]))
+        self.assertEqual(queue.advance(api)["status"], "complete")
+        self.assertTrue(api.disabled)
+        self.assertEqual(len(api.dispatches()), 12)
+
+    def test_first_refresh_continues_as_extend_before_next_axis(self):
+        api = self.refresh_api()
+        first = queue.advance(api)["run_id"]
+        api.finish_predictions(first, 1, software="acousticts", semimajor=.001)
+        second = queue.advance(api)
+        self.assertEqual(second["key"], "acousticts:0.001")
+        self.assertEqual(api.dispatches()[-1]["inputs"]["mode"], "extend")
+        self.assertEqual(api.dispatches()[-1]["inputs"]["resume_run_id"], str(first))
+        self.assertEqual(api.dispatches()[-1]["inputs"]["boundaries"], "rigid,pressure_release,liquid,gas")
+        api.finish_predictions(second["run_id"], 3, software="acousticts", semimajor=.001)
+        self.assertEqual(queue.advance(api)["key"], "acousticts:0.01")
+        self.assertEqual(api.dispatches()[-1]["inputs"]["resume_run_id"], "201")
+        receipt = api.state["dispatched"]["acousticts:0.001"]
+        self.assertEqual(receipt["history"][0]["inputs"]["mode"], "refresh")
+        self.assertEqual(receipt["inputs"]["mode"], "extend")
+
+    def test_refresh_baseline_metadata_is_strict(self):
+        changes = [dict(baseline_run_id=value) for value in (None, 0, -1, True, 1.5, "200")]
+        changes += [dict(parent="prol_spheroid:0.1"), dict(baseline_run_id=200, parent="prol_spheroid:0.1")]
+        for change in changes:
+            with self.subTest(change=change):
+                api = self.refresh_api()
+                api.state["requests"][0].update(change)
+                with self.assertRaises(ValueError):
+                    queue.validate_state(api.state, api.repository)
+        for change in (dict(mode="new"), dict(mode="extend"), dict(refresh_software="echosms"),
+                       dict(resume_run_id="200"), dict(continuation_platform="Keep saved platforms")):
+            with self.subTest(inputs=change):
+                api = self.refresh_api()
+                api.state["requests"][0]["inputs"].update(change)
+                with self.assertRaises(ValueError):
+                    queue.validate_state(api.state, api.repository)
+
+    def test_refresh_requires_finished_available_same_size_baseline(self):
+        for mutation in ("running", "failed", "missing", "expired", "wrong_size", "wrong_repository"):
+            with self.subTest(mutation=mutation):
+                api = self.refresh_api()
+                if mutation == "running":
+                    api.runs[200]["status"] = "in_progress"
+                elif mutation == "failed":
+                    api.runs[200]["conclusion"] = "failure"
+                elif mutation == "missing":
+                    api.artifacts[200] = []
+                elif mutation == "expired":
+                    api.artifacts[200][0]["expired"] = True
+                elif mutation == "wrong_size":
+                    api.finish_predictions(200, 3, semimajor=.07)
+                else:
+                    api.runs[200]["head_repository"]["full_name"] = "other/repo"
+                if mutation == "wrong_repository":
+                    with self.assertRaises(ValueError):
+                        queue.advance(api)
+                else:
+                    self.assertEqual(queue.advance(api)["status"], "paused")
+                self.assertFalse(api.dispatches())
+
+    def test_refresh_dispatch_timeout_is_reconciled_without_reposting(self):
+        api = self.refresh_api()
+        api.dispatch_error = TimeoutError("Accepted dispatch response lost")
+        api.accept_before_error = True
+        with self.assertRaises(TimeoutError):
+            queue.advance(api)
+        self.assertEqual(api.state["dispatch_intent"]["inputs"]["mode"], "refresh")
+        self.assertEqual(api.state["dispatch_intent"]["inputs"]["resume_run_id"], "200")
+        self.assertEqual(queue.advance(api)["run_id"], 101)
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_refresh_intent_cannot_change_its_baseline_or_selected_software(self):
+        for change in (dict(resume_run_id="201"), dict(refresh_software="echosms"), dict(mode="extend")):
+            with self.subTest(change=change):
+                api = self.refresh_api()
+                api.dispatch_error = TimeoutError("No response")
+                with self.assertRaises(TimeoutError):
+                    queue.advance(api)
+                api.state["dispatch_intent"]["inputs"].update(change)
+                with self.assertRaisesRegex(ValueError, "Pending dispatch inputs"):
+                    queue.validate_state(api.state, api.repository)
+
+    def test_refresh_never_advances_while_the_previous_request_runs(self):
+        api = self.refresh_api()
+        result = queue.advance(api)
+        self.assertEqual(queue.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+        api.finish_predictions(result["run_id"], 3, software="acousticts", semimajor=.001)
+        api.ref_sha = "b" * 40
+        self.assertEqual(queue.advance(api)["status"], "paused")
+        self.assertEqual(len(api.dispatches()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
