@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "complete",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 40265517028,
   "initial_key": "saved:0.01",
@@ -1284,7 +1284,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-11-02T05:57:05.814033+00:00",
+  "updated_at": "2026-11-02T07:50:11.477286+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
