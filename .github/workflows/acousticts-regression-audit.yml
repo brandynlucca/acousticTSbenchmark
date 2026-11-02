@@ -1,0 +1,180 @@
+name: Isolated acousticTS regression audit
+
+on:
+  push:
+    branches: [diagnostic/acousticts-regression-20261102]
+
+permissions:
+  contents: read
+
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      MAKEFLAGS: '-j1'
+      OLD_SHA: a61d188a8021a1582f9e685dfaa5dcf3f05285ec
+      NEW_SHA: 3b238a837d0ee5e98e2c9142961ab56b47d48a75
+    steps:
+      - name: Read the pinned package history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: brandynlucca/acousticTS
+          ref: 3b238a837d0ee5e98e2c9142961ab56b47d48a75
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare isolated artifacts and compiler settings
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/regression-audit"
+          echo "AUDIT_DIR=$RUNNER_TEMP/regression-audit" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14 gfortran-14
+          printf '%s\n' 'CC=gcc-14' 'CXX=g++-14' 'CXX17=g++-14' 'FC=gfortran-14' 'F77=gfortran-14' > "$RUNNER_TEMP/regression-audit/Makevars"
+          echo "R_MAKEVARS_USER=$RUNNER_TEMP/regression-audit/Makevars" >> "$GITHUB_ENV"
+          lscpu > "$RUNNER_TEMP/regression-audit/lscpu.txt"
+          cat /proc/cpuinfo > "$RUNNER_TEMP/regression-audit/cpuinfo.txt"
+          uname -a > "$RUNNER_TEMP/regression-audit/kernel.txt"
+          gcc-14 --version > "$RUNNER_TEMP/regression-audit/compiler.txt"
+          gfortran-14 --version >> "$RUNNER_TEMP/regression-audit/compiler.txt"
+
+      - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
+        with:
+          r-version: '4.5.2'
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            deps::.
+            any::jsonlite
+
+      - name: Build both pinned revisions in separate temporary libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for revision in old new; do
+            if [ "$revision" = old ]; then sha="$OLD_SHA"; else sha="$NEW_SHA"; fi
+            mkdir -p "$AUDIT_DIR/$revision-source" "$AUDIT_DIR/$revision-library"
+            git archive "$sha" | tar -x -C "$AUDIT_DIR/$revision-source"
+            R CMD INSTALL --no-multiarch --no-docs --no-help --no-demo --no-html \
+              --library="$AUDIT_DIR/$revision-library" "$AUDIT_DIR/$revision-source" \
+              > "$AUDIT_DIR/$revision-build.log" 2>&1
+            sha256sum "$AUDIT_DIR/$revision-library/acousticTS/libs/acousticTS.so" \
+              > "$AUDIT_DIR/$revision-library.sha256"
+          done
+          Rscript -e 'writeLines(capture.output(sessionInfo()), file.path(Sys.getenv("AUDIT_DIR"), "R-session.txt"))'
+
+      - name: Compare matched public scalar calls on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$AUDIT_DIR/worker.R" <<'RSCRIPT'
+          args <- commandArgs(trailingOnly=TRUE)
+          .libPaths(c(args[[1]], .libPaths()))
+          library(acousticTS)
+          stopifnot(normalizePath(find.package("acousticTS")) == normalizePath(file.path(args[[1]], "acousticTS")))
+          request <- jsonlite::fromJSON(args[[2]])
+          calculation <- function(request) {
+            fluid <- request$boundary %in% c("liquid", "gas")
+            shape <- acousticTS::prolate_spheroid(semimajor_length=request$a,
+              semiminor_length=request$a/request$ratio, length_units="m")
+            target <- acousticTS::fls_generate(shape=shape,
+              density_body=if(fluid) {if(request$boundary=="gas") 1.24 else 1028.9} else 1026.8,
+              sound_speed_body=if(fluid) {if(request$boundary=="gas") 345 else 1480.3} else 1477.3,
+              theta_body=request$angle*pi/180,theta_units="radians")
+            result <- acousticTS::target_strength(target,frequency=request$f,model="psms",
+              boundary=switch(request$boundary,rigid="fixed_rigid",pressure_release="pressure_release",
+                liquid="liquid_filled",gas="gas_filled"),phi_body=pi,density_sw=1026.8,
+              sound_speed_sw=1477.3,precision="quad",adaptive=TRUE,simplify_Amn=FALSE)
+            model <- acousticTS::extract(result,"model")$PSMS
+            amplitude <- -2i/(2*pi*request$f/1477.3)*model$f_bs[[1]]
+            list(ts_db=model$TS[[1]],real_m=Re(amplitude),imaginary_m=Im(amplitude))
+          }
+          warm <- request
+          warm$a <- .001
+          warm$ratio <- 2
+          warm$f <- 1000
+          warm_start <- proc.time()
+          invisible(calculation(warm))
+          warm_used <- proc.time()-warm_start
+          gc(verbose=FALSE)
+          started <- proc.time()
+          answer <- tryCatch(calculation(request),error=function(e) list(error=conditionMessage(e)))
+          used <- proc.time()-started
+          answer$cpu_s <- unname(sum(used[c("user.self","sys.self")]))
+          answer$elapsed_s <- unname(used[["elapsed"]])
+          answer$warmup_s <- unname(warm_used[["elapsed"]])
+          answer$status <- if(is.null(answer$error)) "ok" else "error"
+          jsonlite::write_json(answer,args[[3]],auto_unbox=TRUE,digits=NA)
+          RSCRIPT
+          cat > "$AUDIT_DIR/paired.py" <<'PYTHON'
+          import csv, hashlib, itertools, json, os, pathlib, statistics, subprocess
+          work=pathlib.Path(os.environ['AUDIT_DIR'])
+          groups=[(1.001,'liquid'),(1.001,'gas'),(1.01,'liquid'),(1.01,'gas'),
+                  (5.,'pressure_release'),(10.,'pressure_release'),
+                  (50.,'pressure_release'),(100.,'pressure_release'),(1.01,'rigid')]
+          records=[]
+          cases=[dict(a=a,ratio=ratio,boundary=boundary,angle=angle,f=f)
+                 for a,(ratio,boundary),angle,f in itertools.product(
+                     [.001,.01],groups,[0,37,90],[1000,51000,151000,299000])]
+          for index,case in enumerate(cases):
+              for repetition in range(3):
+                  sequence=['old','new'] if (index+repetition)%2==0 else ['new','old']
+                  for revision in sequence:
+                      print('CASE_START',index+1,len(cases),repetition,revision,json.dumps(case),flush=True)
+                      output=work/'one-result.json'
+                      completed=subprocess.run(['Rscript',str(work/'worker.R'),str(work/(revision+'-library')),
+                          json.dumps(case),str(output)],capture_output=True,text=True,timeout=120)
+                      if completed.returncode:
+                          raise RuntimeError(completed.stderr)
+                      record=json.loads(output.read_text())
+                      record.update(case=case,repetition=repetition,revision=revision)
+                      records.append(record)
+                      with (work/'measurements.jsonl').open('a') as stream:
+                          stream.write(json.dumps(record)+'\n')
+                      print('CASE_DONE',index+1,repetition,revision,record['status'],record['cpu_s'],record['elapsed_s'],flush=True)
+          summary=[]
+          for case in cases:
+              pair=[r for r in records if r['case']==case]
+              old=[r for r in pair if r['revision']=='old' and r['status']=='ok']
+              new=[r for r in pair if r['revision']=='new' and r['status']=='ok']
+              if len(old)!=3 or len(new)!=3:
+                  summary.append(dict(case=case,status='incomplete'))
+                  continue
+              before=statistics.median(r['cpu_s'] for r in old)
+              after=statistics.median(r['cpu_s'] for r in new)
+              summary.append(dict(case=case,status='ok',old_cpu_s=before,new_cpu_s=after,
+                  old_elapsed_s=statistics.median(r['elapsed_s'] for r in old),
+                  new_elapsed_s=statistics.median(r['elapsed_s'] for r in new),
+                  cpu_ratio_before_after=before/after if after else None,
+                  delta_ts_db=new[0]['ts_db']-old[0]['ts_db'],
+                  absolute_amplitude_difference_m=abs(complex(new[0]['real_m'],new[0]['imaginary_m'])-
+                                                     complex(old[0]['real_m'],old[0]['imaginary_m']))))
+          (work/'summary.json').write_text(json.dumps(summary,indent=2))
+          (work/'provenance.json').write_text(json.dumps(dict(old_sha=os.environ['OLD_SHA'],new_sha=os.environ['NEW_SHA'],
+              github_run_id=os.environ['GITHUB_RUN_ID'],runner_name=os.environ['RUNNER_NAME'],threads=1,
+              measurements=len(records),cases=len(cases),precision='quad',adaptive=True,
+              description='Three alternating fresh-process pairs per case on one Ubuntu runner. No production publication.'),indent=2))
+          PYTHON
+          python "$AUDIT_DIR/paired.py"
+
+      - name: Retain diagnostic evidence only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: isolated-acousticts-regression-audit
+          path: |
+            ${{ runner.temp }}/regression-audit/*.json
+            ${{ runner.temp }}/regression-audit/*.jsonl
+            ${{ runner.temp }}/regression-audit/*.txt
+            ${{ runner.temp }}/regression-audit/*.log
+            ${{ runner.temp }}/regression-audit/*.sha256
+            ${{ runner.temp }}/regression-audit/*.R
+            ${{ runner.temp }}/regression-audit/*.py
+          retention-days: 30
