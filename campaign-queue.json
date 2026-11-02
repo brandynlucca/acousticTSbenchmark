@@ -292,5 +292,24 @@
       }
     }
   ],
-  "updated_at": "2026-11-02T19:01:02.564133+00:00"
+  "updated_at": "2026-11-02T21:58:08.315452+00:00",
+  "dispatch_intent": {
+    "key": "acousticts:0.07",
+    "inputs": {
+      "mode": "refresh",
+      "refresh_software": "acousticts",
+      "continuation_platform": "ubuntu-latest",
+      "timing_budget_minutes": "240",
+      "reference_budget_minutes": "0",
+      "case_order": "Complete each frequency sweep",
+      "continuation_frequency": "Use frequency inputs above",
+      "frequency_start_khz": "1",
+      "frequency_end_khz": "300",
+      "frequency_interval_khz": "2",
+      "continuation_boundaries": "rigid,pressure_release,liquid,gas",
+      "resume_run_id": "41280058918"
+    },
+    "source_ref": "df48778195ae94a8da68cfcc820c79abaddda5f0",
+    "created_at": "2026-11-02T21:58:08.315429+00:00"
+  }
 }
