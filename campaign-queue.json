@@ -522,8 +522,8 @@
       "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
     },
     "prol_spheroid:0.1": {
-      "run_id": 41355885173,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41355885173",
+      "run_id": 41375651051,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41375651051",
       "inputs": {
         "mode": "extend",
         "platform": "ubuntu-latest",
@@ -540,11 +540,11 @@
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "refresh_software": "prol_spheroid",
-        "resume_run_id": "41336008865",
+        "resume_run_id": "41355885173",
         "continuation_platform": "ubuntu-latest"
       },
       "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-      "recorded_before": 4126,
+      "recorded_before": 4529,
       "history": [
         {
           "run_id": 41298049645,
@@ -616,6 +616,31 @@
           },
           "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
           "recorded_before": 3673
+        },
+        {
+          "run_id": 41355885173,
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41355885173",
+          "inputs": {
+            "mode": "extend",
+            "platform": "ubuntu-latest",
+            "software": "prol_spheroid",
+            "semimajor_m": "0.1",
+            "aspect_ratios": "1.001,1.01,5,10,50,100",
+            "incidences_deg": "0,37,90",
+            "boundaries": "liquid,gas",
+            "frequency_start_khz": "1",
+            "frequency_end_khz": "300",
+            "frequency_interval_khz": "2",
+            "case_order": "Complete each frequency sweep",
+            "repetitions": "1",
+            "timing_budget_minutes": "240",
+            "reference_budget_minutes": "0",
+            "refresh_software": "prol_spheroid",
+            "resume_run_id": "41336008865",
+            "continuation_platform": "ubuntu-latest"
+          },
+          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
+          "recorded_before": 4126
         }
       ]
     }
@@ -1234,7 +1259,7 @@
       "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
     }
   },
-  "updated_at": "2026-11-02T02:03:28.380095+00:00",
+  "updated_at": "2026-11-02T02:03:32.017282+00:00",
   "superseded_measurement_runs": [
     {
       "key": "acousticts:0.07",
@@ -1465,31 +1490,5 @@
       "recovered_at": "2026-11-01T06:14:54.130863+00:00",
       "repair_source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
     }
-  ],
-  "dispatch_intent": {
-    "key": "prol_spheroid:0.1",
-    "inputs": {
-      "mode": "extend",
-      "platform": "ubuntu-latest",
-      "software": "prol_spheroid",
-      "semimajor_m": "0.1",
-      "aspect_ratios": "1.001,1.01,5,10,50,100",
-      "incidences_deg": "0,37,90",
-      "boundaries": "liquid,gas",
-      "frequency_start_khz": "1",
-      "frequency_end_khz": "300",
-      "frequency_interval_khz": "2",
-      "case_order": "Complete each frequency sweep",
-      "repetitions": "1",
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "refresh_software": "prol_spheroid",
-      "resume_run_id": "41355885173",
-      "continuation_platform": "ubuntu-latest"
-    },
-    "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-    "created_at": "2026-11-02T02:03:28.380072+00:00",
-    "continuation_of": 41355885173,
-    "recorded_before": 4529
-  }
+  ]
 }
