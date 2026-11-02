@@ -34,14 +34,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/regression-audit"
           echo "AUDIT_DIR=$RUNNER_TEMP/regression-audit" >> "$GITHUB_ENV"
           sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14 gfortran-14
-          printf '%s\n' 'CC=gcc-14' 'CXX=g++-14' 'CXX17=g++-14' 'FC=gfortran-14' 'F77=gfortran-14' > "$RUNNER_TEMP/regression-audit/Makevars"
+          sudo apt-get install -y gcc-13 g++-13 gfortran-13
+          printf '%s\n' 'CC=gcc-13' 'CXX=g++-13' 'CXX17=g++-13' 'FC=gfortran-13' 'F77=gfortran-13' > "$RUNNER_TEMP/regression-audit/Makevars"
           echo "R_MAKEVARS_USER=$RUNNER_TEMP/regression-audit/Makevars" >> "$GITHUB_ENV"
           lscpu > "$RUNNER_TEMP/regression-audit/lscpu.txt"
           cat /proc/cpuinfo > "$RUNNER_TEMP/regression-audit/cpuinfo.txt"
           uname -a > "$RUNNER_TEMP/regression-audit/kernel.txt"
-          gcc-14 --version > "$RUNNER_TEMP/regression-audit/compiler.txt"
-          gfortran-14 --version >> "$RUNNER_TEMP/regression-audit/compiler.txt"
+          gcc-13 --version > "$RUNNER_TEMP/regression-audit/compiler.txt"
+          gfortran-13 --version >> "$RUNNER_TEMP/regression-audit/compiler.txt"
 
       - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
         with:
@@ -74,71 +74,64 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$AUDIT_DIR/worker.R" <<'RSCRIPT'
-          args <- commandArgs(trailingOnly=TRUE)
-          .libPaths(c(args[[1]], .libPaths()))
-          library(acousticTS)
-          stopifnot(normalizePath(find.package("acousticTS")) == normalizePath(file.path(args[[1]], "acousticTS")))
-          request <- jsonlite::fromJSON(args[[2]])
-          calculation <- function(request) {
-            fluid <- request$boundary %in% c("liquid", "gas")
-            shape <- acousticTS::prolate_spheroid(semimajor_length=request$a,
-              semiminor_length=request$a/request$ratio, length_units="m")
-            target <- acousticTS::fls_generate(shape=shape,
-              density_body=if(fluid) {if(request$boundary=="gas") 1.24 else 1028.9} else 1026.8,
-              sound_speed_body=if(fluid) {if(request$boundary=="gas") 345 else 1480.3} else 1477.3,
-              theta_body=request$angle*pi/180,theta_units="radians")
-            result <- acousticTS::target_strength(target,frequency=request$f,model="psms",
-              boundary=switch(request$boundary,rigid="fixed_rigid",pressure_release="pressure_release",
-                liquid="liquid_filled",gas="gas_filled"),phi_body=pi,density_sw=1026.8,
-              sound_speed_sw=1477.3,precision="quad",adaptive=TRUE,simplify_Amn=FALSE)
-            model <- acousticTS::extract(result,"model")$PSMS
-            amplitude <- -2i/(2*pi*request$f/1477.3)*model$f_bs[[1]]
-            list(ts_db=model$TS[[1]],real_m=Re(amplitude),imaginary_m=Im(amplitude))
-          }
-          warm <- request
-          warm$a <- .001
-          warm$ratio <- 2
-          warm$f <- 1000
-          warm_start <- proc.time()
-          invisible(calculation(warm))
-          warm_used <- proc.time()-warm_start
-          gc(verbose=FALSE)
-          started <- proc.time()
-          answer <- tryCatch(calculation(request),error=function(e) list(error=conditionMessage(e)))
-          used <- proc.time()-started
-          answer$cpu_s <- unname(sum(used[c("user.self","sys.self")]))
-          answer$elapsed_s <- unname(used[["elapsed"]])
-          answer$warmup_s <- unname(warm_used[["elapsed"]])
-          answer$status <- if(is.null(answer$error)) "ok" else "error"
-          jsonlite::write_json(answer,args[[3]],auto_unbox=TRUE,digits=NA)
-          RSCRIPT
+          python -m pip install psutil==7.2.2
           cat > "$AUDIT_DIR/paired.py" <<'PYTHON'
-          import csv, hashlib, itertools, json, os, pathlib, statistics, subprocess
+          import hashlib, itertools, json, os, pathlib, statistics, sys, urllib.request
           work=pathlib.Path(os.environ['AUDIT_DIR'])
+          fixture=work/'production-worker'
+          source=fixture/'src'
+          source.mkdir(parents=True,exist_ok=True)
+          ref='df48778195ae94a8da68cfcc820c79abaddda5f0'
+          expected={'benchmark.py': 'b1715631c2df1424e815c4cde6e17959261ad437f0c7db9932e0147d276ca6a1', 'process_control.py': '8a15fa80dfef273f0afb4d5cb79e4f3a742e101510b14b4dd4a357d6f599c40e', 'worker_acousticts.R': 'f35ae2b509d4a3510b3b4d4f600a02ca64cddc4affe458ec432ac1e4e46cce51'}
+          for name,digest in expected.items():
+              with urllib.request.urlopen('https://raw.githubusercontent.com/brandynlucca/acousticTSbenchmark/'+ref+'/src/'+name,timeout=30) as response:
+                  value=response.read()
+              assert hashlib.sha256(value).hexdigest()==digest,(name,'source hash mismatch')
+              (source/name).write_bytes(value)
+          worker=source/'worker_acousticts.R'
+          value=worker.read_text()
+          before='    started <- proc.time()[["elapsed"]]'
+          after='    cpu_started <- proc.time()\n'+before
+          assert value.count(before)==1
+          value=value.replace(before,after)
+          before='    answer$elapsed_seconds <- proc.time()[["elapsed"]] - started'
+          after=before+'\n    answer$cpu_seconds <- unname(sum((proc.time()-cpu_started)[c("user.self","sys.self")]))'
+          assert value.count(before)==1
+          worker.write_text(value.replace(before,after))
+          sys.path.insert(0,str(source))
+          import benchmark
           groups=[(1.001,'liquid'),(1.001,'gas'),(1.01,'liquid'),(1.01,'gas'),
                   (5.,'pressure_release'),(10.,'pressure_release'),
                   (50.,'pressure_release'),(100.,'pressure_release'),(1.01,'rigid')]
-          records=[]
           cases=[dict(a=a,ratio=ratio,boundary=boundary,angle=angle,f=f)
                  for a,(ratio,boundary),angle,f in itertools.product(
                      [.001,.01],groups,[0,37,90],[1000,51000,151000,299000])]
+          records=[]
           for index,case in enumerate(cases):
               for repetition in range(3):
                   sequence=['old','new'] if (index+repetition)%2==0 else ['new','old']
                   for revision in sequence:
                       print('CASE_START',index+1,len(cases),repetition,revision,json.dumps(case),flush=True)
-                      output=work/'one-result.json'
-                      completed=subprocess.run(['Rscript',str(work/'worker.R'),str(work/(revision+'-library')),
-                          json.dumps(case),str(output)],capture_output=True,text=True,timeout=120)
-                      if completed.returncode:
-                          raise RuntimeError(completed.stderr)
-                      record=json.loads(output.read_text())
-                      record.update(case=case,repetition=repetition,revision=revision)
+                      request=dict(software='acousticts',boundary=case['boundary'],frequency_hz=case['f'],
+                          incidence_deg=case['angle'],semimajor_m=case['a'],semiminor_m=case['a']/case['ratio'],
+                          medium_density_kg_m3=1026.8,medium_sound_speed_m_s=1477.3,
+                          target_density_kg_m3=1.24 if case['boundary']=='gas' else 1028.9,
+                          target_sound_speed_m_s=345 if case['boundary']=='gas' else 1480.3,
+                          controls=dict(precision='quad',adaptive=True,simplify_Amn=False),warmup=True)
+                      runtime=dict(env=dict(R_LIBS_USER=str(work/(revision+'-library'))),
+                          executables=dict(acousticts=['Rscript','--vanilla']))
+                      result=benchmark.measure(request,runtime,work/'one-case',120)
+                      record=dict(result,case=case,repetition=repetition,revision=revision,
+                          cpu_s=result.get('cpu_seconds'),elapsed_s=result.get('elapsed_seconds'),
+                          warmup_s=result.get('warmup_seconds'),real_m=result.get('amplitude_real_m'),
+                          imaginary_m=result.get('amplitude_imag_m'))
+                      expected_path=str(work/(revision+'-library')/'acousticTS')
+                      assert result.get('diagnostics',{}).get('package_path')==expected_path,result
                       records.append(record)
                       with (work/'measurements.jsonl').open('a') as stream:
                           stream.write(json.dumps(record)+'\n')
-                      print('CASE_DONE',index+1,repetition,revision,record['status'],record['cpu_s'],record['elapsed_s'],flush=True)
+                      print('CASE_DONE',index+1,repetition,revision,record['status'],record['cpu_s'],record['elapsed_s'],
+                          'memory='+str(result.get('memory_status')),flush=True)
           summary=[]
           for case in cases:
               pair=[r for r in records if r['case']==case]
@@ -160,7 +153,8 @@ jobs:
           (work/'provenance.json').write_text(json.dumps(dict(old_sha=os.environ['OLD_SHA'],new_sha=os.environ['NEW_SHA'],
               github_run_id=os.environ['GITHUB_RUN_ID'],runner_name=os.environ['RUNNER_NAME'],threads=1,
               measurements=len(records),cases=len(cases),precision='quad',adaptive=True,
-              description='Three alternating fresh-process pairs per case on one Ubuntu runner. No production publication.'),indent=2))
+              production_ref=ref,production_sources=expected,worker_instrumented_sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),
+              description='Actual production worker and memory sampler, with CPU timing instrumentation outside the existing elapsed interval. GCC/GFortran 13 matches the saved production build log. Three alternating fresh-process pairs per case. No production publication.'),indent=2))
           PYTHON
           python "$AUDIT_DIR/paired.py"
 
@@ -177,4 +171,7 @@ jobs:
             ${{ runner.temp }}/regression-audit/*.sha256
             ${{ runner.temp }}/regression-audit/*.R
             ${{ runner.temp }}/regression-audit/*.py
+            ${{ runner.temp }}/regression-audit/one-case/*.log
+            ${{ runner.temp }}/regression-audit/one-case/*.json
+            ${{ runner.temp }}/regression-audit/production-worker/src/*
           retention-days: 30
