@@ -118,7 +118,7 @@ jobs:
                           target_density_kg_m3=1.24 if case['boundary']=='gas' else 1028.9,
                           target_sound_speed_m_s=345 if case['boundary']=='gas' else 1480.3,
                           controls=dict(precision='quad',adaptive=True,simplify_Amn=False),warmup=True)
-                      runtime=dict(env=dict(R_LIBS_USER=str(work/(revision+'-library'))),
+                      runtime=dict(env=dict(R_LIBS_USER=str(work/(revision+'-library'))+os.pathsep+os.environ['R_LIBS_USER']),
                           executables=dict(acousticts=['Rscript','--vanilla']))
                       result=benchmark.measure(request,runtime,work/'one-case',120)
                       record=dict(result,case=case,repetition=repetition,revision=revision,
