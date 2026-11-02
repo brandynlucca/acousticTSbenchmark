@@ -1,43 +1,103 @@
 {
   "schema_version": 1,
-  "status": "complete",
+  "status": "active",
   "repository": "brandynlucca/acousticTSbenchmark",
-  "initial_run_id": 40265517028,
-  "initial_key": "saved:0.01",
-  "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-  "dispatch_ref": "benchmark-prol-ubuntu24-20261101",
-  "dispatched": {
-    "acousticts:0.01": {
-      "run_id": 40340271674,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40340271674",
+  "initial_run_id": 41396956656,
+  "initial_key": "prol_spheroid:0.1",
+  "source_ref": "df48778195ae94a8da68cfcc820c79abaddda5f0",
+  "dispatch_ref": "benchmark-refresh-20261102",
+  "dispatched": {},
+  "requests": [
+    {
+      "key": "acousticts:0.001",
+      "software": "acousticts",
+      "semimajor_m": "0.001",
+      "parent": null,
+      "finish_before_next": true,
       "inputs": {
-        "mode": "extend",
+        "mode": "refresh",
         "refresh_software": "acousticts",
         "continuation_platform": "ubuntu-latest",
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
-        "resume_run_id": "40265517028"
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
       },
-      "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f"
+      "baseline_run_id": 41287239152
     },
-    "prol_spheroid:0.01": {
-      "run_id": 40348321189,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40348321189",
+    {
+      "key": "acousticts:0.01",
+      "software": "acousticts",
+      "semimajor_m": "0.01",
+      "parent": null,
+      "finish_before_next": true,
       "inputs": {
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
+        "mode": "refresh",
+        "refresh_software": "acousticts",
         "continuation_platform": "ubuntu-latest",
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
-        "resume_run_id": "40340271674"
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
       },
-      "source_ref": "9b9309d1c98d70d9c7bdcdb4c86991a14dc4d52f"
+      "baseline_run_id": 41106590478
     },
-    "echosms:0.01": {
-      "run_id": 40624444505,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40624444505",
+    {
+      "key": "acousticts:0.07",
+      "software": "acousticts",
+      "semimajor_m": "0.07",
+      "parent": null,
+      "finish_before_next": true,
+      "inputs": {
+        "mode": "refresh",
+        "refresh_software": "acousticts",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      },
+      "baseline_run_id": 41280058918
+    },
+    {
+      "key": "acousticts:0.1",
+      "software": "acousticts",
+      "semimajor_m": "0.1",
+      "parent": null,
+      "finish_before_next": true,
+      "inputs": {
+        "mode": "refresh",
+        "refresh_software": "acousticts",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      },
+      "baseline_run_id": 41396956656
+    },
+    {
+      "key": "echosms:0.001",
+      "software": "echosms",
+      "semimajor_m": "0.001",
+      "parent": "acousticts:0.001",
+      "finish_before_next": true,
       "inputs": {
         "mode": "extend",
         "refresh_software": "echosms",
@@ -45,1475 +105,152 @@
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
         "case_order": "Complete each frequency sweep",
-        "resume_run_id": "40599768905"
-      },
-      "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-      "recorded_before": 9270,
-      "history": [
-        {
-          "run_id": 40378011322,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40378011322",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40348321189"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40"
-        },
-        {
-          "run_id": 40412292681,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40412292681",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40378011322"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 5102
-        },
-        {
-          "run_id": 40438043022,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40438043022",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40412292681"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 5312
-        },
-        {
-          "run_id": 40460365498,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40460365498",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40438043022"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 5993
-        },
-        {
-          "run_id": 40487126870,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40487126870",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40460365498"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 7939
-        },
-        {
-          "run_id": 40536688787,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40536688787",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40487126870"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 8106
-        },
-        {
-          "run_id": 40599768905,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40599768905",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "echosms",
-            "continuation_platform": "ubuntu-latest",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40536688787"
-          },
-          "source_ref": "50b76f5bb9415082fe5a9686c4281f637e691a40",
-          "recorded_before": 8332
-        }
-      ]
-    },
-    "liquid_spheroid:0.01": {
-      "run_id": 41106590478,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41106590478",
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "liquid_spheroid",
-        "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep",
-        "resume_run_id": "41072160718"
-      },
-      "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-      "recorded_before": 3283,
-      "history": [
-        {
-          "run_id": 40779225012,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40779225012",
-          "inputs": {
-            "mode": "resume",
-            "resume_run_id": "40737192500",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "resume_artifact": "results-ubuntu-latest",
-            "resume_case_order": "Keep saved order",
-            "reference_budget_minutes": "0",
-            "timing_budget_minutes": "240"
-          },
-          "source_ref": "1fd03830269b9f6188774fd88007adfd73c46990",
-          "recorded_before": 96,
-          "adoption_reason": "Existing liquid continuation restored and verified before queue activation"
-        },
-        {
-          "run_id": 40812603293,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40812603293",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40779225012"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 333
-        },
-        {
-          "run_id": 40835269661,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40835269661",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40812603293"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 590
-        },
-        {
-          "run_id": 40864337526,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40864337526",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40835269661"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 760
-        },
-        {
-          "run_id": 40899038860,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40899038860",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40864337526"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 1095
-        },
-        {
-          "run_id": 40936766673,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40936766673",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40899038860"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 1638
-        },
-        {
-          "run_id": 40969803445,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40969803445",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40936766673"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 1921
-        },
-        {
-          "run_id": 40994082532,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40994082532",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40969803445"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 2123
-        },
-        {
-          "run_id": 41015821806,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41015821806",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "40994082532"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 2384
-        },
-        {
-          "run_id": 41042100042,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41042100042",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "41015821806"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 2553
-        },
-        {
-          "run_id": 41072160718,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41072160718",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "liquid_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "case_order": "Complete each frequency sweep",
-            "resume_run_id": "41042100042"
-          },
-          "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b",
-          "recorded_before": 2731
-        }
-      ]
-    },
-    "acousticts:0.001": {
-      "run_id": 41138463129,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41138463129",
-      "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "acousticts",
-        "semimajor_m": "0.001",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
+        "continuation_frequency": "Use frequency inputs above",
         "frequency_start_khz": "1",
         "frequency_end_khz": "300",
         "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "30"
-      },
-      "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b"
-    },
-    "acousticts:0.07": {
-      "run_id": 41173301619,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41173301619",
-      "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "acousticts",
-        "semimajor_m": "0.07",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "30"
-      },
-      "source_ref": "771ca74de2d8cdff53a7d7cb655f44988a7c59ee"
-    },
-    "prol_spheroid:0.07": {
-      "run_id": 41280058918,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41280058918",
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
-        "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
-        "case_order": "Complete each frequency sweep",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "resume_run_id": "41253354114"
-      },
-      "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-      "recorded_before": 5060,
-      "history": [
-        {
-          "run_id": 41180546815,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41180546815",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30",
-            "resume_run_id": "41173301619"
-          },
-          "source_ref": "3ae548deadb6607213a40a7057f23a5f398b57d5"
-        },
-        {
-          "run_id": 41181227159,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41181227159",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30",
-            "resume_run_id": "41180546815"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 76
-        },
-        {
-          "run_id": 41196956469,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41196956469",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30",
-            "resume_run_id": "41181227159"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 3652
-        },
-        {
-          "run_id": 41216348274,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41216348274",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "resume_run_id": "41196956469"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 4132
-        },
-        {
-          "run_id": 41235381642,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41235381642",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "resume_run_id": "41216348274"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 4197
-        },
-        {
-          "run_id": 41253354114,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41253354114",
-          "inputs": {
-            "mode": "extend",
-            "refresh_software": "prol_spheroid",
-            "continuation_platform": "ubuntu-latest",
-            "continuation_frequency": "Keep saved frequency grid",
-            "case_order": "Complete each frequency sweep",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "resume_run_id": "41235381642"
-          },
-          "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-          "recorded_before": 4622
-        }
-      ]
-    },
-    "prol_spheroid:0.001": {
-      "run_id": 41287239152,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41287239152",
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
-        "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
-        "case_order": "Complete each frequency sweep",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "resume_run_id": "41138463129"
-      },
-      "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
-    },
-    "prol_spheroid:0.1": {
-      "run_id": 41396956656,
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41396956656",
-      "inputs": {
-        "mode": "extend",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_m": "0.1",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "refresh_software": "prol_spheroid",
-        "resume_run_id": "41375651051",
-        "continuation_platform": "ubuntu-latest"
-      },
-      "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-      "recorded_before": 5028,
-      "history": [
-        {
-          "run_id": 41298049645,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41298049645",
-          "inputs": {
-            "mode": "new",
-            "platform": "ubuntu-latest",
-            "software": "prol_spheroid",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0"
-          },
-          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
-        },
-        {
-          "run_id": 41316172072,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41316172072",
-          "inputs": {
-            "mode": "extend",
-            "platform": "ubuntu-latest",
-            "software": "prol_spheroid",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "refresh_software": "prol_spheroid",
-            "resume_run_id": "41298049645",
-            "continuation_platform": "ubuntu-latest"
-          },
-          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-          "recorded_before": 1946
-        },
-        {
-          "run_id": 41336008865,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41336008865",
-          "inputs": {
-            "mode": "extend",
-            "platform": "ubuntu-latest",
-            "software": "prol_spheroid",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "refresh_software": "prol_spheroid",
-            "resume_run_id": "41316172072",
-            "continuation_platform": "ubuntu-latest"
-          },
-          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-          "recorded_before": 3673
-        },
-        {
-          "run_id": 41355885173,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41355885173",
-          "inputs": {
-            "mode": "extend",
-            "platform": "ubuntu-latest",
-            "software": "prol_spheroid",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "refresh_software": "prol_spheroid",
-            "resume_run_id": "41336008865",
-            "continuation_platform": "ubuntu-latest"
-          },
-          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-          "recorded_before": 4126
-        },
-        {
-          "run_id": 41375651051,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41375651051",
-          "inputs": {
-            "mode": "extend",
-            "platform": "ubuntu-latest",
-            "software": "prol_spheroid",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "0",
-            "refresh_software": "prol_spheroid",
-            "resume_run_id": "41355885173",
-            "continuation_platform": "ubuntu-latest"
-          },
-          "source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95",
-          "recorded_before": 4529
-        }
-      ]
-    }
-  },
-  "recovery": {
-    "run_id": 40265517028,
-    "reason": "Use preserved completed Ubuntu measurements after known export failure"
-  },
-  "requests": [
-    {
-      "key": "acousticts:0.01",
-      "software": "acousticts",
-      "semimajor_m": "0.01",
-      "parent": "saved:0.01",
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "acousticts",
-        "continuation_platform": "ubuntu-latest",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep"
-      },
-      "finish_before_next": true
-    },
-    {
-      "key": "prol_spheroid:0.01",
-      "software": "prol_spheroid",
-      "semimajor_m": "0.01",
-      "parent": "acousticts:0.01",
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
-        "continuation_platform": "ubuntu-latest",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep"
-      },
-      "finish_before_next": true
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      }
     },
     {
       "key": "echosms:0.01",
       "software": "echosms",
       "semimajor_m": "0.01",
-      "parent": "prol_spheroid:0.01",
+      "parent": "acousticts:0.01",
+      "finish_before_next": true,
       "inputs": {
         "mode": "extend",
         "refresh_software": "echosms",
         "continuation_platform": "ubuntu-latest",
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep"
-      },
-      "finish_before_next": true
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      }
+    },
+    {
+      "key": "echosms:0.07",
+      "software": "echosms",
+      "semimajor_m": "0.07",
+      "parent": "acousticts:0.07",
+      "finish_before_next": true,
+      "inputs": {
+        "mode": "extend",
+        "refresh_software": "echosms",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      }
+    },
+    {
+      "key": "echosms:0.1",
+      "software": "echosms",
+      "semimajor_m": "0.1",
+      "parent": "acousticts:0.1",
+      "finish_before_next": true,
+      "inputs": {
+        "mode": "extend",
+        "refresh_software": "echosms",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      }
+    },
+    {
+      "key": "liquid_spheroid:0.001",
+      "software": "liquid_spheroid",
+      "semimajor_m": "0.001",
+      "parent": "echosms:0.001",
+      "finish_before_next": true,
+      "inputs": {
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "100",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
+      }
     },
     {
       "key": "liquid_spheroid:0.01",
       "software": "liquid_spheroid",
       "semimajor_m": "0.01",
       "parent": "echosms:0.01",
+      "finish_before_next": true,
       "inputs": {
         "mode": "extend",
         "refresh_software": "liquid_spheroid",
         "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
         "timing_budget_minutes": "240",
         "reference_budget_minutes": "0",
-        "case_order": "Complete each frequency sweep"
-      },
-      "finish_before_next": true
-    },
-    {
-      "key": "acousticts:0.001",
-      "software": "acousticts",
-      "semimajor_m": "0.001",
-      "parent": null,
-      "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "acousticts",
-        "semimajor_m": "0.001",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
         "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
+        "frequency_end_khz": "100",
         "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "30"
-      },
-      "finish_before_next": false
-    },
-    {
-      "key": "acousticts:0.07",
-      "software": "acousticts",
-      "semimajor_m": "0.07",
-      "parent": null,
-      "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "acousticts",
-        "semimajor_m": "0.07",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "30"
-      },
-      "finish_before_next": false
-    },
-    {
-      "key": "prol_spheroid:0.07",
-      "software": "prol_spheroid",
-      "semimajor_m": "0.07",
-      "parent": "acousticts:0.07",
-      "finish_before_next": true,
-      "inputs": {
-        "mode": "extend",
-        "refresh_software": "prol_spheroid",
-        "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
-        "case_order": "Complete each frequency sweep",
-        "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0"
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
       }
     },
     {
-      "key": "prol_spheroid:0.001",
-      "software": "prol_spheroid",
-      "semimajor_m": "0.001",
-      "parent": "acousticts:0.001",
+      "key": "liquid_spheroid:0.07",
+      "software": "liquid_spheroid",
+      "semimajor_m": "0.07",
+      "parent": "echosms:0.07",
       "finish_before_next": true,
       "inputs": {
         "mode": "extend",
-        "refresh_software": "prol_spheroid",
+        "refresh_software": "liquid_spheroid",
         "continuation_platform": "ubuntu-latest",
-        "continuation_frequency": "Keep saved frequency grid",
-        "case_order": "Complete each frequency sweep",
         "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0"
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "100",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
       }
     },
     {
-      "key": "prol_spheroid:0.1",
-      "software": "prol_spheroid",
+      "key": "liquid_spheroid:0.1",
+      "software": "liquid_spheroid",
       "semimajor_m": "0.1",
-      "parent": null,
+      "parent": "echosms:0.1",
       "finish_before_next": true,
       "inputs": {
-        "mode": "new",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_m": "0.1",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "case_order": "Complete each frequency sweep",
-        "repetitions": "1",
+        "mode": "extend",
+        "refresh_software": "liquid_spheroid",
+        "continuation_platform": "ubuntu-latest",
         "timing_budget_minutes": "240",
-        "reference_budget_minutes": "0"
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "100",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas"
       }
-    }
-  ],
-  "deferred_series": {
-    "schema_version": 1,
-    "status": "paused",
-    "repository": "brandynlucca/acousticTSbenchmark",
-    "source_ref": "29c225487d549c516eea0bfbe5ad8cc4bd747007",
-    "dispatch_ref": "benchmark-series-20261026-repair",
-    "initial_run_id": 40265517028,
-    "requests": [
-      {
-        "key": "prol_spheroid:0.01",
-        "semimajor_m": "0.01",
-        "software": "prol_spheroid",
-        "parent": "echosms_baseline:0.01",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid"
-        }
-      },
-      {
-        "key": "echosms:0.01",
-        "semimajor_m": "0.01",
-        "software": "echosms",
-        "parent": "prol_spheroid:0.01",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "echosms"
-        }
-      },
-      {
-        "key": "liquid_spheroid:0.01",
-        "semimajor_m": "0.01",
-        "software": "liquid_spheroid",
-        "parent": "echosms:0.01",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "liquid_spheroid"
-        }
-      },
-      {
-        "key": "acousticts:0.001",
-        "semimajor_m": "0.001",
-        "software": "acousticts",
-        "parent": null,
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "new",
-          "software": "acousticts",
-          "platform": "all",
-          "semimajor_m": "0.001",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "gas,pressure_release,liquid,rigid",
-          "repetitions": "1"
-        }
-      },
-      {
-        "key": "acousticts:0.07",
-        "semimajor_m": "0.07",
-        "software": "acousticts",
-        "parent": null,
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "new",
-          "software": "acousticts",
-          "platform": "all",
-          "semimajor_m": "0.07",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "gas,pressure_release,liquid,rigid",
-          "repetitions": "1"
-        }
-      },
-      {
-        "key": "acousticts:0.1",
-        "semimajor_m": "0.1",
-        "software": "acousticts",
-        "parent": null,
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "new",
-          "software": "acousticts",
-          "platform": "all",
-          "semimajor_m": "0.1",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "gas,pressure_release,liquid,rigid",
-          "repetitions": "1"
-        }
-      },
-      {
-        "key": "acousticts:0.5",
-        "semimajor_m": "0.5",
-        "software": "acousticts",
-        "parent": null,
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "new",
-          "software": "acousticts",
-          "platform": "all",
-          "semimajor_m": "0.5",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "gas,pressure_release,liquid,rigid",
-          "repetitions": "1"
-        }
-      },
-      {
-        "key": "prol_spheroid:0.001",
-        "semimajor_m": "0.001",
-        "software": "prol_spheroid",
-        "parent": "acousticts:0.001",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid"
-        }
-      },
-      {
-        "key": "prol_spheroid:0.07",
-        "semimajor_m": "0.07",
-        "software": "prol_spheroid",
-        "parent": "acousticts:0.07",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid"
-        }
-      },
-      {
-        "key": "prol_spheroid:0.1",
-        "semimajor_m": "0.1",
-        "software": "prol_spheroid",
-        "parent": "acousticts:0.1",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid"
-        }
-      },
-      {
-        "key": "prol_spheroid:0.5",
-        "semimajor_m": "0.5",
-        "software": "prol_spheroid",
-        "parent": "acousticts:0.5",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid"
-        }
-      },
-      {
-        "key": "echosms:0.001",
-        "semimajor_m": "0.001",
-        "software": "echosms",
-        "parent": "prol_spheroid:0.001",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "echosms"
-        }
-      },
-      {
-        "key": "echosms:0.07",
-        "semimajor_m": "0.07",
-        "software": "echosms",
-        "parent": "prol_spheroid:0.07",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "echosms"
-        }
-      },
-      {
-        "key": "echosms:0.1",
-        "semimajor_m": "0.1",
-        "software": "echosms",
-        "parent": "prol_spheroid:0.1",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "echosms"
-        }
-      },
-      {
-        "key": "echosms:0.5",
-        "semimajor_m": "0.5",
-        "software": "echosms",
-        "parent": "prol_spheroid:0.5",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "echosms"
-        }
-      },
-      {
-        "key": "liquid_spheroid:0.001",
-        "semimajor_m": "0.001",
-        "software": "liquid_spheroid",
-        "parent": "echosms:0.001",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "liquid_spheroid"
-        }
-      },
-      {
-        "key": "liquid_spheroid:0.07",
-        "semimajor_m": "0.07",
-        "software": "liquid_spheroid",
-        "parent": "echosms:0.07",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "liquid_spheroid"
-        }
-      },
-      {
-        "key": "liquid_spheroid:0.1",
-        "semimajor_m": "0.1",
-        "software": "liquid_spheroid",
-        "parent": "echosms:0.1",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "liquid_spheroid"
-        }
-      },
-      {
-        "key": "liquid_spheroid:0.5",
-        "semimajor_m": "0.5",
-        "software": "liquid_spheroid",
-        "parent": "echosms:0.5",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "liquid_spheroid"
-        }
-      }
-    ],
-    "dispatched": {
-      "prol_spheroid:0.01": {
-        "run_id": 40337262057,
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40337262057",
-        "inputs": {
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "case_order": "Complete each frequency sweep",
-          "mode": "extend",
-          "refresh_software": "prol_spheroid",
-          "resume_run_id": "40265517028"
-        }
-      }
-    },
-    "cancelled_runs": {
-      "prol_spheroid:0.01": 40171426279,
-      "echosms:0.01": 40171456913,
-      "liquid_spheroid:0.01": 40171459215,
-      "acousticts:0.001": 40171461093,
-      "acousticts:0.07": 40171463325,
-      "acousticts:0.1": 40171468314,
-      "acousticts:0.5": 40171476594,
-      "prol_spheroid:0.001": 40171479914,
-      "prol_spheroid:0.07": 40171482135,
-      "prol_spheroid:0.1": 40171484911,
-      "prol_spheroid:0.5": 40171486866,
-      "echosms:0.001": 40171488406,
-      "echosms:0.07": 40171491225,
-      "echosms:0.1": 40171492577,
-      "echosms:0.5": 40171493948,
-      "liquid_spheroid:0.001": 40171495468,
-      "liquid_spheroid:0.07": 40171497105,
-      "liquid_spheroid:0.1": 40171498995,
-      "liquid_spheroid:0.5": 40171501026
-    },
-    "updated_at": "2026-10-26T14:11:36.811698+00:00",
-    "history": [
-      {
-        "initial_run_id": 40170086146,
-        "source_ref": "e81528bc747ca13e26c48c2e8d28b595cc2cc4cb",
-        "dispatch_ref": "benchmark-series-20261025",
-        "dispatched": {
-          "prol_spheroid:0.01": {
-            "run_id": 40209471033,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40209471033",
-            "inputs": {
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "0",
-              "case_order": "Complete each frequency sweep",
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "resume_run_id": "40170086146"
-            }
-          },
-          "echosms:0.01": {
-            "run_id": 40265517028,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/40265517028",
-            "inputs": {
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "0",
-              "case_order": "Complete each frequency sweep",
-              "mode": "extend",
-              "refresh_software": "echosms",
-              "resume_run_id": "40209471033"
-            }
-          }
-        },
-        "replaced_at": "2026-10-26T05:10:39.205862+00:00"
-      }
-    ],
-    "initial_key": "echosms_baseline:0.01",
-    "recovery": {
-      "run_id": 40265517028,
-      "reason": "Repair retained metadata export and restore Rtools GCC14.3 before continuing saved Prol and echo predictions"
-    },
-    "reason": "User requested Ubuntu-only a=0.01 acousticTS first, then Prol_Spheroid and echoSMs",
-    "prol_spheroid_priority_2026_10_31": {
-      "reason": "User stopped acousticTS and requested Prol_Spheroid at three sizes",
-      "saved_at": "2026-10-31T07:10:22.825237+00:00",
-      "requests": [
-        {
-          "key": "acousticts:0.07",
-          "software": "acousticts",
-          "semimajor_m": "0.07",
-          "parent": null,
-          "inputs": {
-            "mode": "new",
-            "platform": "ubuntu-latest",
-            "software": "acousticts",
-            "semimajor_m": "0.07",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "rigid,pressure_release,liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30"
-          },
-          "finish_before_next": true
-        },
-        {
-          "key": "acousticts:0.1",
-          "software": "acousticts",
-          "semimajor_m": "0.1",
-          "parent": null,
-          "inputs": {
-            "mode": "new",
-            "platform": "ubuntu-latest",
-            "software": "acousticts",
-            "semimajor_m": "0.1",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "rigid,pressure_release,liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30"
-          },
-          "finish_before_next": true
-        }
-      ],
-      "dispatched": {
-        "acousticts:0.07": {
-          "run_id": 41173301619,
-          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41173301619",
-          "inputs": {
-            "mode": "new",
-            "platform": "ubuntu-latest",
-            "software": "acousticts",
-            "semimajor_m": "0.07",
-            "aspect_ratios": "1.001,1.01,5,10,50,100",
-            "incidences_deg": "0,37,90",
-            "boundaries": "rigid,pressure_release,liquid,gas",
-            "frequency_start_khz": "1",
-            "frequency_end_khz": "300",
-            "frequency_interval_khz": "2",
-            "case_order": "Complete each frequency sweep",
-            "repetitions": "1",
-            "timing_budget_minutes": "240",
-            "reference_budget_minutes": "30"
-          },
-          "source_ref": "771ca74de2d8cdff53a7d7cb655f44988a7c59ee"
-        }
-      },
-      "original_queue_path": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_original_queue_dfae4a054f1a.json",
-      "checkpoint_receipt": "C:\\Users\\Brandyn\\Desktop\\acousticTS\\.scratch\\codex\\psms-hard-batch\\switch_prol_checkpoint_receipt.json"
-    }
-  },
-  "updated_at": "2026-11-02T07:50:11.477286+00:00",
-  "superseded_measurement_runs": [
-    {
-      "key": "acousticts:0.07",
-      "receipt": {
-        "run_id": 41151695764,
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41151695764",
-        "inputs": {
-          "mode": "new",
-          "platform": "ubuntu-latest",
-          "software": "acousticts",
-          "semimajor_m": "0.07",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "rigid,pressure_release,liquid,gas",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "case_order": "Complete each frequency sweep",
-          "repetitions": "1",
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "30"
-        },
-        "source_ref": "1544c0c0398068a50a20e4b20427ed255818a78b"
-      },
-      "reason": "Rerun from the validated optimized backend",
-      "archived_at": "2026-10-31T04:20:53.784922+00:00"
-    },
-    {
-      "key": "acousticts:0.07",
-      "receipt": {
-        "run_id": 41168210900,
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41168210900",
-        "inputs": {
-          "mode": "new",
-          "platform": "ubuntu-latest",
-          "software": "acousticts",
-          "semimajor_m": "0.07",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "rigid,pressure_release,liquid,gas",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "case_order": "Complete each frequency sweep",
-          "repetitions": "1",
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "30"
-        },
-        "source_ref": "24df2867f7e733caa6219db4809561ae39a3ff0c"
-      },
-      "reason": "Rerun with validated bounded coefficient and Neumann reuse",
-      "archived_at": "2026-10-31T05:36:41.111978+00:00"
-    },
-    {
-      "key": "prol_spheroid:0.001",
-      "receipt": {
-        "run_id": 41179544162,
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41179544162",
-        "inputs": {
-          "mode": "new",
-          "platform": "ubuntu-latest",
-          "software": "prol_spheroid",
-          "semimajor_m": "0.001",
-          "aspect_ratios": "1.001,1.01,5,10,50,100",
-          "incidences_deg": "0,37,90",
-          "boundaries": "liquid,gas",
-          "frequency_start_khz": "1",
-          "frequency_end_khz": "300",
-          "frequency_interval_khz": "2",
-          "case_order": "Complete each frequency sweep",
-          "repetitions": "1",
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "30"
-        },
-        "source_ref": "3ae548deadb6607213a40a7057f23a5f398b57d5"
-      },
-      "reason": "Cancelled separate run. Existing acousticTS snapshot restored, append continues from original baselines.",
-      "archived_at": "2026-10-31T07:23:43.891420+00:00",
-      "preserved_cases": 88,
-      "artifacts_receipt": "prol_append_preserved_artifacts_receipt.json"
-    }
-  ],
-  "reference_independent_timing_recoveries": [
-    {
-      "run_id": 41196956469,
-      "verified_at": "2026-10-31T15:44:07.475687+00:00",
-      "reason": "Timing succeeded. Independent reference job failure paused the overall workflow.",
-      "recorded_cases": 4132,
-      "retained_acousticts": 3543,
-      "checkpoint_sha256": "973b84f99ddf42205c5e38482826995ce5cadf3b09474c7266630a30820a12ed",
-      "reference_budget_zero_for": [
-        "prol_spheroid:0.07",
-        "prol_spheroid:0.001",
-        "prol_spheroid:0.1"
-      ],
-      "local_reference_generation_unchanged": true
-    }
-  ],
-  "dispatch_ref_recoveries": [
-    {
-      "previous_dispatch_ref": "main",
-      "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-      "new_dispatch_ref": "benchmark-prol-83d573f8-20261101",
-      "main_ref_verified": "14226bc77ad38c0beed2ca27f12ca3be0463b7b4",
-      "changed_source_paths": [
-        "src/report.py"
-      ],
-      "reason": "Resume existing saved Prol continuation after report-only main changes",
-      "recovered_at": "2026-11-01T06:08:00.617056+00:00"
-    }
-  ],
-  "setup_failure_recoveries": [
-    {
-      "failed_receipt": {
-        "run_id": 41279583065,
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41279583065",
-        "inputs": {
-          "mode": "extend",
-          "refresh_software": "prol_spheroid",
-          "continuation_platform": "ubuntu-latest",
-          "continuation_frequency": "Keep saved frequency grid",
-          "case_order": "Complete each frequency sweep",
-          "timing_budget_minutes": "240",
-          "reference_budget_minutes": "0",
-          "resume_run_id": "41253354114"
-        },
-        "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-        "recorded_before": 5060,
-        "history": [
-          {
-            "run_id": 41180546815,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41180546815",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "30",
-              "resume_run_id": "41173301619"
-            },
-            "source_ref": "3ae548deadb6607213a40a7057f23a5f398b57d5"
-          },
-          {
-            "run_id": 41181227159,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41181227159",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "30",
-              "resume_run_id": "41180546815"
-            },
-            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-            "recorded_before": 76
-          },
-          {
-            "run_id": 41196956469,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41196956469",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "30",
-              "resume_run_id": "41181227159"
-            },
-            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-            "recorded_before": 3652
-          },
-          {
-            "run_id": 41216348274,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41216348274",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "0",
-              "resume_run_id": "41196956469"
-            },
-            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-            "recorded_before": 4132
-          },
-          {
-            "run_id": 41235381642,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41235381642",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "0",
-              "resume_run_id": "41216348274"
-            },
-            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-            "recorded_before": 4197
-          },
-          {
-            "run_id": 41253354114,
-            "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41253354114",
-            "inputs": {
-              "mode": "extend",
-              "refresh_software": "prol_spheroid",
-              "continuation_platform": "ubuntu-latest",
-              "continuation_frequency": "Keep saved frequency grid",
-              "case_order": "Complete each frequency sweep",
-              "timing_budget_minutes": "240",
-              "reference_budget_minutes": "0",
-              "resume_run_id": "41235381642"
-            },
-            "source_ref": "83d573f89ff67e15d4cb10f72271bd3d73e5aaed",
-            "recorded_before": 4622
-          }
-        ]
-      },
-      "reason": "Ubuntu latest changed from Ubuntu24/GCC14.2 to Ubuntu26/GCC14.3. No new measurements were produced. Restore last successful cursor with all 5060 Prol and 3543 acousticTS measurements.",
-      "recovered_at": "2026-11-01T06:14:54.130863+00:00",
-      "repair_source_ref": "73099ad6c8b058f348c1669678b5dcfa54760e95"
     }
   ]
 }
