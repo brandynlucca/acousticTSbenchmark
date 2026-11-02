@@ -25,6 +25,25 @@
         "resume_run_id": "41287239152"
       },
       "source_ref": "df48778195ae94a8da68cfcc820c79abaddda5f0"
+    },
+    "acousticts:0.01": {
+      "run_id": 41505968151,
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/41505968151",
+      "inputs": {
+        "mode": "refresh",
+        "refresh_software": "acousticts",
+        "continuation_platform": "ubuntu-latest",
+        "timing_budget_minutes": "240",
+        "reference_budget_minutes": "0",
+        "case_order": "Complete each frequency sweep",
+        "continuation_frequency": "Use frequency inputs above",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "continuation_boundaries": "rigid,pressure_release,liquid,gas",
+        "resume_run_id": "41106590478"
+      },
+      "source_ref": "df48778195ae94a8da68cfcc820c79abaddda5f0"
     }
   },
   "requests": [
@@ -273,24 +292,5 @@
       }
     }
   ],
-  "updated_at": "2026-11-02T19:00:58.133731+00:00",
-  "dispatch_intent": {
-    "key": "acousticts:0.01",
-    "inputs": {
-      "mode": "refresh",
-      "refresh_software": "acousticts",
-      "continuation_platform": "ubuntu-latest",
-      "timing_budget_minutes": "240",
-      "reference_budget_minutes": "0",
-      "case_order": "Complete each frequency sweep",
-      "continuation_frequency": "Use frequency inputs above",
-      "frequency_start_khz": "1",
-      "frequency_end_khz": "300",
-      "frequency_interval_khz": "2",
-      "continuation_boundaries": "rigid,pressure_release,liquid,gas",
-      "resume_run_id": "41106590478"
-    },
-    "source_ref": "df48778195ae94a8da68cfcc820c79abaddda5f0",
-    "created_at": "2026-11-02T19:00:58.133695+00:00"
-  }
+  "updated_at": "2026-11-02T19:01:02.564133+00:00"
 }
