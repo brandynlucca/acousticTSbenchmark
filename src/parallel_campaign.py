@@ -30,6 +30,7 @@ PLATFORMS = {'ubuntu-latest': ('ubuntu-24.04', 'Linux'),
              'windows-latest': ('windows-latest', 'Windows'),
              'macos-latest': ('macos-latest', 'Darwin')}
 MAX_BYTES = 512 * 1024 * 1024
+DOCUMENT_PART_BYTES = 4 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
@@ -84,7 +85,7 @@ def filename(campaign, kind, task=None):
     return name + '.json'
 
 
-def get_document(api, path):
+def _document_bytes(api, path):
     try:
         entry = api.request('GET', f'/contents/{path}?ref={BRANCH}')
     except APIError as error:
@@ -97,11 +98,78 @@ def get_document(api, path):
     raw = base64.b64decode(''.join(blob['content'].split()), validate=True)
     if hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() != entry['sha']:
         raise ValueError('Downloaded spectrum state has a different Git digest')
-    return unpack(json.loads(raw)), entry['sha']
+    return raw, entry['sha']
+
+
+def get_document(api, path):
+    raw, sha = _document_bytes(api, path)
+    if raw is None:
+        return None, None
+    return _unpack_document(api, raw), sha
+
+
+def _unpack_document(api, raw):
+    saved = json.loads(raw)
+    if saved.get('encoding') == 'spectrum-parts-v1':
+        length = saved.get('size')
+        parts = saved.get('parts')
+        if (type(length) is not int or not 0 < length <= MAX_BYTES * 2 or
+                not isinstance(parts, list) or not 1 <= len(parts) <= 256):
+            raise ValueError('Invalid spectrum document parts')
+        chunks, total = [], 0
+        for part in parts:
+            if not isinstance(part, str) or not re.fullmatch(r'[a-f0-9]{64}', part):
+                raise ValueError('Invalid spectrum document part identity')
+            chunk, _ = _document_bytes(api, f'spectra-part-{part}.part')
+            if chunk is None or hashlib.sha256(chunk).hexdigest() != part:
+                raise ValueError('Missing or corrupt spectrum document part')
+            total += len(chunk)
+            if total > length:
+                raise ValueError('Spectrum document parts exceed the recorded size')
+            chunks.append(chunk)
+        raw = b''.join(chunks)
+        if len(raw) != length or hashlib.sha256(raw).hexdigest() != saved.get('sha256'):
+            raise ValueError('Spectrum document parts do not match the recorded digest')
+        saved = json.loads(raw)
+    return unpack(saved)
+
+
+def _put_document_part(api, raw):
+    digest = hashlib.sha256(raw).hexdigest()
+    path = f'spectra-part-{digest}.part'
+    expected = hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
+    for attempt in range(6):
+        try:
+            existing = api.request('GET', f'/contents/{path}?ref={BRANCH}')
+        except APIError as error:
+            if error.status != 404:
+                raise
+        else:
+            if existing['sha'] != expected:
+                raise ValueError('Existing spectrum document part has changed')
+            return digest
+        try:
+            result = api.request('PUT', '/contents/' + path, dict(branch=BRANCH,
+                message=f'Save spectrum document part {digest}',
+                content=base64.b64encode(raw).decode()))
+            if result['content']['sha'] != expected:
+                raise ValueError('Saved spectrum document part has a different digest')
+            return digest
+        except APIError as error:
+            if error.status not in (409, 422) or attempt == 5:
+                raise
+            time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError('Unable to save spectrum document part')
 
 
 def put_document(api, path, value, previous_sha=None, *, immutable=False):
     raw = (json.dumps(pack(value), separators=(',', ':')) + '\n').encode()
+    if len(raw) > DOCUMENT_PART_BYTES:
+        # Publish the manifest only after every immutable part is durably saved.
+        parts = [_put_document_part(api, raw[offset:offset + DOCUMENT_PART_BYTES])
+                 for offset in range(0, len(raw), DOCUMENT_PART_BYTES)]
+        raw = json.dumps(dict(encoding='spectrum-parts-v1', parts=parts, size=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest()), separators=(',', ':')).encode()
     for attempt in range(6):
         if previous_sha is None:
             previous, previous_sha = get_document(api, path)
@@ -198,7 +266,7 @@ def read_packets(api, plan, *, cache=None):
         raw = base64.b64decode(''.join(blob['content'].split()), validate=True)
         if hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() != entry['sha']:
             raise ValueError('Worker packet does not match its Git digest')
-        packet = unpack(json.loads(raw))
+        packet = _unpack_document(api, raw)
         validate_packet(plan, task, packet)
         packet['_blob_sha'] = entry['sha']
         return task['id'], packet

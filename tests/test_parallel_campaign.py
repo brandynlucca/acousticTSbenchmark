@@ -490,4 +490,78 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(api.request.call_args.args[2]['inputs'],dict(campaign_id='100',platform='windows-latest'))
 
 
+class DocumentStorageTests(unittest.TestCase):
+    def api(self):
+        import base64
+        import hashlib
+        files = {}
+        def request(method, path, body=None):
+            name = path.removeprefix('/contents/').split('?')[0]
+            if method == 'GET':
+                if name not in files:
+                    raise parallel.APIError(404, 'missing')
+                raw = files[name]
+                return dict(encoding='base64', content=base64.b64encode(raw).decode(),
+                    sha=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest())
+            raw = base64.b64decode(body['content'])
+            files[name] = raw
+            return dict(content=dict(sha=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()))
+        return Mock(request=Mock(side_effect=request)), files
+
+    def test_large_plan_roundtrip_preserves_all_values_and_immutability(self):
+        api, files = self.api()
+        plan, _, _ = pending_plan()
+        with patch.object(parallel, 'DOCUMENT_PART_BYTES', 180):
+            sha = parallel.put_document(api, 'plan.json', plan, immutable=True)
+            self.assertEqual(parallel.get_document(api, 'plan.json'), (plan, sha))
+            self.assertGreater(len(files), 2)
+            before = dict(files)
+            self.assertEqual(parallel.put_document(api, 'plan.json', plan, immutable=True), sha)
+            self.assertEqual(files, before)
+            with self.assertRaisesRegex(ValueError, 'replace an existing'):
+                parallel.put_document(api, 'plan.json', dict(plan, changed=True), immutable=True)
+            self.assertEqual(parallel.get_document(api, 'plan.json'), (plan, sha))
+
+    def test_missing_corrupt_and_reordered_parts_are_rejected(self):
+        for mode in ('missing', 'corrupt', 'reordered'):
+            api, files = self.api()
+            with patch.object(parallel, 'DOCUMENT_PART_BYTES', 40):
+                parallel.put_document(api, 'plan.json', dict(values=list(range(30))))
+            manifest = json.loads(files['plan.json'])
+            path = 'spectra-part-' + manifest['parts'][0] + '.part'
+            if mode == 'missing':
+                del files[path]
+            elif mode == 'corrupt':
+                files[path] += b'!'
+            else:
+                manifest['parts'].reverse()
+                files['plan.json'] = json.dumps(manifest).encode()
+            with self.assertRaises(ValueError):
+                parallel.get_document(api, 'plan.json')
+
+    def test_failed_part_upload_leaves_no_visible_plan_and_can_resume(self):
+        api, files = self.api()
+        original = api.request.side_effect
+        def fail(method, path, body=None):
+            if method == 'PUT' and len(files) == 1:
+                raise parallel.APIError(500, 'interrupted')
+            return original(method, path, body)
+        api.request.side_effect = fail
+        value = dict(values=list(range(50)))
+        with patch.object(parallel, 'DOCUMENT_PART_BYTES', 40):
+            with self.assertRaises(parallel.APIError):
+                parallel.put_document(api, 'plan.json', value)
+            self.assertEqual(parallel.get_document(api, 'plan.json'), (None, None))
+            api.request.side_effect = original
+            parallel.put_document(api, 'plan.json', value)
+            self.assertEqual(parallel.get_document(api, 'plan.json')[0], value)
+
+    def test_legacy_single_document_remains_readable(self):
+        api, files = self.api()
+        value = dict(status='active', completed=['saved'])
+        parallel.put_document(api, 'state.json', value)
+        self.assertEqual(set(files), {'state.json'})
+        self.assertEqual(parallel.get_document(api, 'state.json')[0], value)
+
+
 if __name__ == '__main__': unittest.main()
