@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "active",
+  "status": "paused",
   "repository": "brandynlucca/acousticTSbenchmark",
   "initial_run_id": 41396956656,
   "initial_key": "prol_spheroid:0.1",
@@ -311,5 +311,5 @@
       }
     }
   ],
-  "updated_at": "2026-11-02T21:58:13.365299+00:00"
+  "updated_at": "2026-11-03T00:00:49.263728+00:00"
 }
