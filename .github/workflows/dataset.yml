@@ -1,7 +1,7 @@
 name: Consolidate benchmark dataset
 on:
   workflow_run:
-    workflows: [Dense spheroid timings, Attach cached references, Cached numerical references]
+    workflows: [Parallel spheroid spectra, Dense spheroid timings, Attach cached references, Cached numerical references]
     types: [completed]
   workflow_dispatch:
   schedule:
@@ -35,3 +35,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh workflow run dataset.yml --ref main
+

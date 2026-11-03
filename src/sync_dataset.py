@@ -178,7 +178,7 @@ def select_artifacts(artifacts):
             if key not in checkpoints or artifact["created_at"] > checkpoints[key]["created_at"]:
                 checkpoints[key] = artifact
             full.add((run, platform))
-        elif REFERENCE_NAME.fullmatch(name):
+        elif REFERENCE_NAME.fullmatch(name) or re.fullmatch(r'spectrum-[a-f0-9]{24}-[1-9][0-9]*', name):
             selected.append(artifact)
     selected.extend(checkpoints.values())
     selected.extend(value for key, value in baselines.items() if key not in full)
@@ -250,8 +250,8 @@ def publish_dataset(api, connection, database, catalog, previous_sha, processed,
     # prior complete dataset stays downloadable if any earlier step fails.
     write_catalog(api, value, previous_sha)
     body = (f"Updated {value['updated_at']}. **{summary['measurements']:,} measurements**.\n\n"
-            f"[SQLite database (.gz)]({assets['database']['url']}) · "
-            f"[Measurements CSV (.gz)]({assets['measurements']['url']}) · "
+            f"[SQLite database (.gz)]({assets['database']['url']}) Â· "
+            f"[Measurements CSV (.gz)]({assets['measurements']['url']}) Â· "
             f"[Comparisons CSV (.gz)]({assets['comparisons']['url']})\n\n"
             f"Imports: {summary['artifacts']} complete, {remaining} pending, {len(errors)} errors.")
     api.request("PATCH", f"/releases/{release['id']}", dict(body=body))
@@ -337,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

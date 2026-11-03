@@ -31,6 +31,7 @@ ROW_FIELDS = ("software", "boundary", "semimajor_m", "aspect_ratio", "incidence_
 ROW_FIELDS += ("memory_delta_peak_bytes", "memory_baseline_rss_bytes", "memory_peak_rss_bytes",
                "memory_sample_interval_seconds", "memory_samples", "memory_status", "memory_method")
 ROW_FIELDS += ("source_sha", "measurement_role", "retained_from_run_id")
+ROW_FIELDS += ("measurement_id", "measurement_origin_run_id", "allocation_id", "processor")
 MAX_JSON_BYTES = 128 * 1024 * 1024
 # Older continuations embedded the full reference plan in every provenance
 # manifest. Keep those saved measurements readable while new baselines omit
@@ -739,4 +740,5 @@ if __name__ == "__main__":
     except (ValueError, RuntimeError, OSError, zipfile.BadZipFile) as error:
         print(f"Progress publication failed: {safe_error_summary(error)}", file=sys.stderr)
         raise SystemExit(1)
+
 

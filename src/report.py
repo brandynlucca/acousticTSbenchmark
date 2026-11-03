@@ -57,11 +57,11 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
-<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show medians of successful repetitions. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
+<p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
-<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Total solve time (s)</th><th>Average solve time (s)</th><th>RMSE ΔTS (dB)</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
-<p class="note">Total and average solve time include successful timed predictions only.</p>
-<p class="note" id="rmse-note">RMSE uses the median ΔTS across successful repetitions of each prediction, then √mean(ΔTS²) across predictions with valid comparisons. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. No matched reference means successful predictions exist but their exact reference cases are missing. No successful prediction means there is no completed successful result in this selection.</p>
+<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Mean total solve time (s)</th><th>Mean average solve time (s)</th><th>Mean RMSE ΔTS (dB)</th><th>Repetitions</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<p class="note">Mean total solve time sums the mean for each physical case once. Mean average solve time divides that total by the number of timed cases. Totals remain partial until coverage is complete. Time ranges use complete successful repetitions. Repetitions counts successful measurements per case, shown as a range when unequal.</p>
+<p class="note" id="rmse-note">Mean RMSE averages the RMSE calculated separately for each repetition using its available matched predictions. Its min–max spans those repetition RMSE values. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. No matched reference means successful predictions exist but their exact reference cases are missing. No successful prediction means there is no completed successful result in this selection.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
@@ -151,6 +151,43 @@ for(const key of Object.keys(colors)){const s=document.createElement('span');s.d
 const referenceLegend=document.createElement('span');referenceLegend.id='reference-legend';referenceLegend.style.color=referenceColor;referenceLegend.textContent='━ BEM / FEM-BEM reference';referenceLegend.hidden=true;legend.append(referenceLegend);
 const angles=document.getElementById('angle-legend');
 function svgElement(name,attrs={},text){const e=document.createElementNS('http://www.w3.org/2000/svg',name);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;}
+
+// Timing samples retain their software revision and physical prediction identity.
+function mean(values){return values.reduce((sum,value)=>sum+value,0)/values.length;}
+function timingGroups(group){
+ const points=new Map();
+ for(const row of group){
+  if(row.status!=='ok'||!Number.isFinite(row.elapsed_seconds)||row.elapsed_seconds<=0)continue;
+  const physical=row.physical_id||JSON.stringify([row.semimajor_m,row.aspect_ratio,row.boundary,row.incidence_deg,row.frequency_hz]);
+  const key=JSON.stringify([row.software,row.source_sha,physical]);
+  if(!points.has(key))points.set(key,[]);points.get(key).push(row);
+ }
+ return [...points.values()];
+}
+function timingSummary(group,expectedCases){
+ const points=timingGroups(group),total=points.reduce((sum,point)=>sum+mean(point.map(row=>row.elapsed_seconds)),0);
+ const repetitions=new Map();
+ for(const point of points)for(const row of point){
+  if(!repetitions.has(row.repetition))repetitions.set(row.repetition,[]);
+  repetitions.get(row.repetition).push(row);
+ }
+ const passes=[...repetitions.values()].filter(pass=>pass.length===expectedCases&&timingGroups(pass).length===expectedCases)
+  .map(pass=>pass.reduce((sum,row)=>sum+row.elapsed_seconds,0));
+ return {total,average:points.length?total/points.length:null,passes,points};
+}
+function repetitionRMSE(group){
+ const repetitions=new Map();
+ for(const row of group){if(!repetitions.has(row.repetition))repetitions.set(row.repetition,[]);repetitions.get(row.repetition).push(row);}
+ const values=[...repetitions.values()].map(comparisonSummary).filter(summary=>summary.count).map(summary=>summary.rmse);
+ return {value:values.length?mean(values):null,values,count:comparisonSummary(group).count};
+}
+function meanWithRange(value,range){
+ const cell=document.createElement('span'),main=document.createElement('span');main.textContent=value;cell.append(main);
+ const detail=document.createElement('small');detail.style.display='block';detail.style.whiteSpace='nowrap';
+ detail.textContent=range.length?`min–max ${formatted(Math.min(...range))}–${formatted(Math.max(...range))}`:'Range pending';
+ cell.append(detail);return cell;
+}
+
 function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2?values[(n-1)/2]:(values[n/2-1]+values[n/2])/2;}
 function comparisonSummary(observations){
  const predictions=new Map();
@@ -352,7 +389,7 @@ function render(){
  document.getElementById('coverage-note').textContent=aspect.value?`Every plot and coverage row uses a = ${semimajor.value} m (total length 2a = ${Number(semimajor.value)*2} m), aspect ratio ${aspect.value} and ${incidence.value==='all'?'all incidences':incidence.value+'° incidence'}. Only boundaries supported by each software are included.`:'Size and incidence selections apply to every plot and coverage row once results are available.';
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
- plotStatus.textContent=!allFreq.length?`No benchmark frequency range is available for this selection yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Cost and absolute ΔTS use medians across matched successful repetitions.':'';
+ plotStatus.textContent=!allFreq.length?`No benchmark frequency range is available for this selection yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Time uses the arithmetic mean. RAM and absolute ΔTS use medians across matched successful repetitions.':'';
  if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
  if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
@@ -383,7 +420,7 @@ function render(){
    let count=0;
    for(const observations of grouped.values()){
     const pairs=observations.filter(r=>r.boundary===boundary&&validValue(r,field)&&validValue(r,'delta_ts_db'));if(!pairs.length)continue;
-    const row=pairs[0],cost=median(pairs.map(r=>valueFor(r,field))),error=median(pairs.map(r=>Math.abs(r.delta_ts_db)));
+    const row=pairs[0],cost=(field==='elapsed_seconds'?mean:median)(pairs.map(r=>valueFor(r,field))),error=median(pairs.map(r=>Math.abs(r.delta_ts_db)));
     point(svg,x(transform(cost)),y(error),row.incidence_deg,colors[row.software],`${labels[row.software]}, ${row.incidence_deg}°, ${row.frequency_hz/1000} kHz: ${formatted(cost)} ${field==='elapsed_seconds'?'s':'MiB'}, |ΔTS| ${formatted(error)} dB, n=${pairs.length}`,true);count++;
    }
    const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
@@ -417,9 +454,9 @@ function render(){
     for(const frequency of softwareFreq){
      const observations=(grouped.get(JSON.stringify([boundary,software,angle,frequency]))||[]).filter(r=>validValue(r,measure));
      if(!observations.length){path='';continue;}
-     const value=median(observations.map(r=>valueFor(r,measure))),xx=x(axisValues.get(frequency)),yy=y(transform(value));
+     const samples=observations.map(r=>valueFor(r,measure)),value=(measure==='elapsed_seconds'?mean:median)(samples),xx=x(axisValues.get(frequency)),yy=y(transform(value));
      if(path)svg.append(svgElement('path',{class:'series-segment','data-incidence':angle,d:`M ${path} L ${xx} ${yy}`,fill:'none',stroke:colors[software],'stroke-width':1.7,'stroke-dasharray':angleStyle(angle).dash}));
-     path=`${xx} ${yy}`;point(svg,xx,yy,angle,colors[software],`${labels[software]}, ${angle}°, ${frequency/1000} kHz: ${formatted(value)}, n=${observations.length}`);count++;
+     path=`${xx} ${yy}`;point(svg,xx,yy,angle,colors[software],`${labels[software]}, ${angle}°, ${frequency/1000} kHz: ${formatted(value)}, min–max ${formatted(Math.min(...samples))}–${formatted(Math.max(...samples))}, n=${observations.length}`);count++;
     }
    }
    for(const row of timedFailures.filter(r=>r.boundary===boundary)){
@@ -440,18 +477,20 @@ function render(){
   const group=selected.filter(r=>r.software===software&&r.boundary===boundary);if(!planned&&!group.length&&!completion?.planned)continue;
   const good=group.filter(r=>r.status==='ok'),pending=group.filter(r=>r.status==='pending');
   const timed=good.filter(r=>Number.isFinite(r.elapsed_seconds)&&r.elapsed_seconds>=0);
-  const seconds=timed.reduce((sum,r)=>sum+r.elapsed_seconds,0);
-  const total=coverage?.elapsed_seconds_sum??seconds,shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
-  const average=timed.length?seconds/timed.length:null;
+  const expectedCases=(data.axes?.[aspect.value]?.software_frequencies_hz?.[software]||allFreq).length*selectedAngles.length;
+  const timing=timingSummary(group,expectedCases),total=timing.total,shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
+  const counts=timing.points.map(point=>point.length);if(timing.points.length<expectedCases)counts.push(0);
+  const least=counts.length?Math.min(...counts):0,most=counts.length?Math.max(...counts):0,repetitions=least===most?String(least):`${least}–${most}`;
+  const average=timing.average;
   const shownAverage=average===null?'Unavailable':average>0&&average<.01?average.toExponential(2):average.toFixed(2);
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
   const remaining=completion?.pending??'Unknown';
-  const comparison=comparisonSummary(group),shownRMSE=comparison.count?comparison.rmse.toFixed(2):(successful?'No matched reference':'No successful prediction');
+  const comparison=repetitionRMSE(group),shownRMSE=comparison.count?formatted(comparison.value):(successful?'No matched reference':'No successful prediction');
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
   const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
   const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
-  for(const value of [successful,other,remaining,shownTotal,shownAverage,shownRMSE,comparison.count]){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);
+  for(const value of [successful,other,remaining,meanWithRange(shownTotal,timing.passes),meanWithRange(shownAverage,timing.passes.map(total=>total/expectedCases)),comparison.count?meanWithRange(shownRMSE,comparison.values):shownRMSE,repetitions,comparison.count]){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
@@ -633,3 +672,4 @@ if __name__ == "__main__":
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     render_report(output, [], dict(state="waiting", recorded=0, planned=0), args.repository)
+

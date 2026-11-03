@@ -1,0 +1,460 @@
+name: Parallel spheroid spectra
+run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.campaign_id) || format('{0} {1} spectra, a={2} m', inputs.mode, inputs.software, inputs.semimajor_axes) }}
+'on':
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Extend unfinished cases, refresh selected software, or append repetitions
+        type: choice
+        options:
+        - extend
+        - refresh
+        - repeat
+        default: extend
+      software:
+        description: Selected software CSV
+        type: string
+        default: acousticts
+      semimajor_axes:
+        description: Semimajor axes in metres, comma-separated
+        type: string
+        default: 0.07,0.1
+      baseline_runs:
+        description: Optional saved runs, e.g. 0.07=41533113878,0.1=41396956656
+        type: string
+        default: ''
+      aspect_ratios:
+        description: Aspect ratios CSV, blank keeps saved selection
+        type: string
+        default: ''
+      incidences_deg:
+        description: Incidences CSV, blank keeps saved selection
+        type: string
+        default: ''
+      boundaries:
+        description: Boundaries CSV, blank keeps saved selection
+        type: string
+        default: ''
+      frequency_start_khz:
+        description: Start kHz, leave all three frequency fields blank to keep saved grid
+        type: string
+        default: ''
+      frequency_end_khz:
+        description: End kHz, always included
+        type: string
+        default: ''
+      frequency_interval_khz:
+        description: Interval kHz
+        type: string
+        default: ''
+      additional_repetitions:
+        description: New repetitions per case in repeat mode
+        type: number
+        default: 1
+      max_parallel:
+        description: Maximum simultaneous spectrum workers (1 to 16)
+        type: number
+        default: 8
+      automatic_continue:
+        description: Continue only unfinished tasks in this selection
+        type: boolean
+        default: true
+      timing_budget_minutes:
+        description: Minutes per worker including setup
+        type: choice
+        options:
+        - '45'
+        - '120'
+        - '240'
+        - '330'
+        default: '330'
+      campaign_id:
+        description: Saved parallel campaign ID for continuation, blank starts a new request
+        type: string
+        default: ''
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: spheroid-timing-campaign
+  cancel-in-progress: false
+  queue: max
+env:
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  JULIA_NUM_THREADS: '1'
+  VECLIB_MAXIMUM_THREADS: '1'
+  NUMEXPR_NUM_THREADS: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      campaign_id: ${{ steps.plan.outputs.campaign_id }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+      max_parallel: ${{ steps.plan.outputs.max_parallel }}
+      budget: ${{ steps.plan.outputs.budget }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Resolve saved benchmark and select unfinished spectra
+      id: plan
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SPECTRA_INPUTS: ${{ toJSON(inputs) }}
+      run: python src/parallel_campaign.py plan --directory "$RUNNER_TEMP/spectra-plan"
+  spectrum:
+    name: ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      SOFTWARE: ${{ matrix.software }}
+      SETUP_ONLY: 'false'
+      BENCHMARK_PLATFORM: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Start worker deadline
+      env:
+        BUDGET: ${{ needs.plan.outputs.budget }}
+      run: |-
+        python - <<'PY'
+        import os,time
+        with open(os.environ["GITHUB_ENV"], "a") as stream:
+            stream.write(f"SPECTRA_DEADLINE={time.time()+60*int(os.environ['BUDGET'])}\n")
+        PY
+    - name: Install memory observer
+      run: python -m pip install psutil==7.2.2
+    - name: Identify R cache platform
+      if: contains(env.SOFTWARE, 'acousticts')
+      id: r-cache-platform
+      shell: bash
+      run: |
+        python - <<'PY'
+        import os, platform, re
+        if platform.system() == "Linux":
+            release = platform.freedesktop_os_release()
+            image = release["ID"] + "-" + release["VERSION_ID"]
+        else:
+            image = os.environ.get("ImageOS", platform.system() + "-" + platform.release())
+        image = re.sub(r"[^A-Za-z0-9_.-]", "-", image + "-" + os.environ.get("ImageVersion", "unknown"))
+        print("R cache platform:", image, platform.machine(), "image build", os.environ.get("ImageVersion", "unknown"))
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"image={image}\n")
+        PY
+    - name: Prepare Linux R cache destination
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
+      shell: bash
+      run: sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" /opt/R/4.5.2
+    - name: Restore Linux R 4.5.2
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
+      id: r-runtime-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: |
+          /opt/R/4.5.2
+          ${{ runner.temp }}/r-runtime-deps/*.deb
+        key: r-runtime-v2-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2
+    - name: Restore cached R system libraries
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit == 'true'
+      timeout-minutes: 2
+      shell: bash
+      run: |
+        python - <<'PY'
+        import os, subprocess
+        from pathlib import Path
+        packages = sorted((Path(os.environ["RUNNER_TEMP"]) / "r-runtime-deps").glob("*.deb"))
+        if packages:
+            print(f"Installing {len(packages)} cached system packages without downloads", flush=True)
+            command = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "dpkg"]
+            subprocess.run(command + ["--unpack", *map(str, packages)], check=True, timeout=60)
+            subprocess.run(command + ["--configure", "--pending"], check=True, timeout=45)
+        PY
+    - name: Validate existing Linux R
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts')
+      id: r-reuse
+      shell: bash
+      run: |
+        python - <<'PY'
+        import os, subprocess
+        from pathlib import Path
+        executable = Path("/opt/R/4.5.2/bin/Rscript")
+        usable = False
+        if executable.is_file():
+            try:
+                result = subprocess.run([str(executable), "--vanilla", "-e",
+                    'stopifnot(getRversion() == "4.5.2"); library(stats); cat(R.version.string, "\\n")'],
+                    capture_output=True, text=True, timeout=20)
+                print(result.stdout, result.stderr)
+                usable = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print("Existing R requires installation:", error)
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"usable={str(usable).lower()}\n")
+        if usable:
+            with open(os.environ["GITHUB_PATH"], "a") as output:
+                output.write(str(executable.parent) + "\n")
+        PY
+    - name: Install minimal Linux R runtime
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-reuse.outputs.usable != 'true'
+      timeout-minutes: 5
+      shell: bash
+      run: |
+        python - <<'PY'
+        import json, os, platform, subprocess, time, urllib.parse, urllib.request
+        from pathlib import Path
+        deadline = time.monotonic() + 270
+        release = platform.freedesktop_os_release()
+        if release["ID"] != "ubuntu" or platform.machine() != "x86_64":
+            raise SystemExit("The minimal R installer requires an Ubuntu x86_64 runner")
+        resolver = "https://api.r-hub.io/rversions/resolve/4.5.2/linux-ubuntu-" + release["VERSION_ID"] + "/x86_64"
+        with urllib.request.urlopen(resolver, timeout=15) as response:
+            resolved = json.load(response)
+        url = resolved["url"]
+        parsed = urllib.parse.urlparse(url)
+        if resolved["version"] != "4.5.2" or parsed.scheme != "https" or parsed.hostname != "cdn.posit.co":
+            raise SystemExit("Unexpected R binary resolution")
+        print("Installing official R 4.5.2 binary:", url, flush=True)
+        archive = Path(os.environ["RUNNER_TEMP"]) / "r-4.5.2.deb"
+        def run(command):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SystemExit("R installation exceeded its deadline")
+            subprocess.run(command, check=True, timeout=remaining)
+        run(["curl", "--fail", "--location", "--retry", "1", "--connect-timeout", "10",
+             "--max-time", "90", "--output", str(archive), url])
+        packages = Path(os.environ["RUNNER_TEMP"]) / "r-runtime-deps"
+        packages.mkdir(exist_ok=True)
+        sources = Path(os.environ["RUNNER_TEMP"]) / "r-runtime-sources.list"
+        codename = release["VERSION_CODENAME"]
+        sources.write_text(
+            f"deb https://archive.ubuntu.com/ubuntu {codename} main universe\n"
+            f"deb https://archive.ubuntu.com/ubuntu {codename}-updates main universe\n"
+            f"deb https://security.ubuntu.com/ubuntu {codename}-security main universe\n")
+        apt = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get",
+               "-o", "Dir::Etc::sourcelist=" + str(sources), "-o", "Dir::Etc::sourceparts=-",
+               "-o", "APT::Get::List-Cleanup=0", "-o", "Dir::Cache::archives=" + str(packages),
+               "-o", "APT::Keep-Downloaded-Packages=true",
+               "-o", "Binary::apt::APT::Keep-Downloaded-Packages=true",
+               "-o", "Acquire::Retries=1", "-o", "Acquire::http::Timeout=20",
+               "-o", "Acquire::https::Timeout=20"]
+        run(apt + ["update"])
+        run(apt + ["install", "--yes", "--no-install-recommends", str(archive)])
+        run(["/opt/R/4.5.2/bin/Rscript", "--vanilla", "-e",
+             'stopifnot(getRversion() == "4.5.2"); library(stats); cat(R.version.string, "\\n")'])
+        with open(os.environ["GITHUB_PATH"], "a") as output:
+            output.write("/opt/R/4.5.2/bin\n")
+        PY
+    - name: Set up R 4.5.2 environment
+      uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
+      if: contains(env.SOFTWARE, 'acousticts')
+      timeout-minutes: 5
+      with:
+        r-version: 4.5.2
+        install-r: ${{ runner.os != 'Linux' }}
+        use-public-rspm: true
+    - name: Verify requested R runtime
+      if: contains(env.SOFTWARE, 'acousticts')
+      timeout-minutes: 1
+      shell: Rscript {0}
+      run: |
+        stopifnot(getRversion() == "4.5.2")
+        library(stats)
+        cat(R.version.string, "\n")
+    - name: Save Linux R immediately
+      if: runner.os == 'Linux' && contains(env.SOFTWARE, 'acousticts') && steps.r-runtime-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: |
+          /opt/R/4.5.2
+          ${{ runner.temp }}/r-runtime-deps/*.deb
+        key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
+    - name: Configure native macOS GNU compilers and SDK
+      if: runner.os == 'macOS'
+      timeout-minutes: 3
+      shell: bash
+      run: |
+        arguments=(configure --directory "$RUNNER_TEMP/benchmark-env")
+        if [[ "$SOFTWARE" == *acousticts* ]]; then arguments+=(--with-r); fi
+        python "$MACOS_SETUP_SCRIPT" "${arguments[@]}"
+    - name: Restore R package library
+      if: contains(env.SOFTWARE, 'acousticts')
+      id: r-library-cache
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: ${{ runner.temp }}/benchmark-env/r-library
+        key: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-{3}', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY, hashFiles('src/setup_r.R', 'sources.lock.json'))
+          || format('r-library-v1-{0}-{1}-4.5.2-{2}', steps.r-cache-platform.outputs.image, runner.arch, hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml')) }}
+        restore-keys: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY) || format('r-library-v1-{0}-{1}-4.5.2-',
+          steps.r-cache-platform.outputs.image, runner.arch) }}
+    - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
+      if: contains(env.SOFTWARE, 'acousticscattering') || contains(env.SOFTWARE, 'liquid_spheroid')
+      timeout-minutes: 5
+      with:
+        version: 1.12.1
+    - name: Reuse installed Linux GCC 14 compilers
+      if: runner.os == 'Linux'
+      id: compiler-reuse
+      shell: bash
+      run: |
+        python - <<'PY'
+        import os, shutil, subprocess
+        compilers = {"FC": "gfortran-14", "CC": "gcc-14", "CXX": "g++-14"}
+        usable = True
+        for variable, compiler in compilers.items():
+            executable = shutil.which(compiler)
+            if executable is None:
+                print("Compiler unavailable:", compiler)
+                usable = False
+                continue
+            try:
+                result = subprocess.run([executable, "-dumpversion"], capture_output=True,
+                                        text=True, timeout=10)
+                valid = result.returncode == 0 and result.stdout.strip().split(".")[0] == "14"
+                print(compiler, "version", result.stdout.strip(), "usable", valid)
+                usable = usable and valid
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print("Compiler validation failed:", compiler, error)
+                usable = False
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"usable={str(usable).lower()}\n")
+        if usable:
+            with open(os.environ["GITHUB_ENV"], "a") as output:
+                for variable, compiler in compilers.items():
+                    output.write(f"{variable}={compiler}\nFPM_{variable}={compiler}\n")
+        PY
+    - name: Install fallback Linux GCC 14 compilers
+      uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
+      if: runner.os == 'Linux' && steps.compiler-reuse.outputs.usable != 'true'
+      timeout-minutes: 5
+      with:
+        compiler: gcc
+        version: '14'
+    - name: Cache downloaded dependencies
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: |
+          ~/.cache/pip
+          ~/Library/Caches/pip
+          ~/AppData/Local/pip/Cache
+          ~/.julia/artifacts
+          ~/.julia/packages
+          ~/.julia/registries
+        key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
+    - name: Build compatible macOS Rcpp libraries
+      if: runner.os == 'macOS' && contains(env.SOFTWARE, 'acousticts') && steps.r-library-cache.outputs.cache-hit != 'true'
+      timeout-minutes: 8
+      shell: bash
+      run: python "$MACOS_SETUP_SCRIPT" rebuild-r --directory "$RUNNER_TEMP/benchmark-env"
+    - name: Prepare pinned software
+      id: prepare
+      shell: bash
+      env:
+        BENCHMARK_R_LIBRARY_CACHE_HIT: ${{ steps.r-library-cache.outputs.cache-hit }}
+        SETUP_ONLY: ${{ inputs.mode == 'prepare' }}
+      run: |
+        arguments=(src/prepare.py --directory "$RUNNER_TEMP/benchmark-env" --software "$SOFTWARE")
+        arguments+=(--validate-workers --validation-timeout-seconds 120)
+        python "${arguments[@]}"
+    - name: Verify native macOS quad backend
+      if: runner.os == 'macOS' && contains(env.SOFTWARE, 'acousticts')
+      shell: bash
+      run: python "$MACOS_SETUP_SCRIPT" verify-r --directory "$RUNNER_TEMP/benchmark-env"
+    - name: Check prepared R package library
+      if: contains(env.SOFTWARE, 'acousticts')
+      id: r-library-ready
+      shell: bash
+      env:
+        SETUP_ONLY: ${{ inputs.mode == 'prepare' }}
+      run: |
+        python - <<'PY'
+        import json, os
+        from pathlib import Path
+        runtime = json.loads((Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/runtime.json").read_text())
+        ready = (runtime.get("availability", {}).get("acousticts", {}).get("status") == "ready"
+                 and (Path(os.environ["RUNNER_TEMP"]) / "benchmark-env/r-packages.json").is_file())
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"ready={str(ready).lower()}\n")
+        if not ready and os.environ["SETUP_ONLY"] == "true":
+            raise SystemExit("acousticTS setup failed. Its package cache will not be saved")
+        PY
+    - name: Save R packages before benchmarking
+      if: steps.r-library-ready.outputs.ready == 'true' && steps.r-library-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: ${{ runner.temp }}/benchmark-env/r-library
+        key: ${{ steps.r-library-cache.outputs.cache-primary-key }}
+    - name: Run serial frequency spectrum
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        CAMPAIGN: ${{ needs.plan.outputs.campaign_id }}
+        TASK: ${{ matrix.id }}
+      run: python src/parallel_campaign.py worker --campaign-id "$CAMPAIGN" --task-id "$TASK" --runtime "$RUNNER_TEMP/benchmark-env/runtime.json" --directory "$RUNNER_TEMP/spectrum" --deadline "$SPECTRA_DEADLINE"
+    - name: Save timing observations and logs
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: spectrum-${{ matrix.id }}-${{ github.run_attempt }}
+        path: |-
+          ${{ runner.temp }}/spectrum
+          ${{ runner.temp }}/benchmark-env/runtime.json
+          ${{ runner.temp }}/benchmark-env/prepare.log
+        if-no-files-found: warn
+        retention-days: 90
+  progress:
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Merge live task checkpoints into the existing benchmark
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        CAMPAIGN: ${{ needs.plan.outputs.campaign_id }}
+      run: python src/parallel_campaign.py monitor --campaign-id "$CAMPAIGN" --directory "$RUNNER_TEMP/spectra-results"
+  finish:
+    needs:
+    - plan
+    - spectrum
+    - progress
+    if: always() && !cancelled() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Publish merged results and queue unfinished tasks
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        CAMPAIGN: ${{ needs.plan.outputs.campaign_id }}
+      run: python src/parallel_campaign.py finish --campaign-id "$CAMPAIGN" --directory "$RUNNER_TEMP/spectra-results"
+    - name: Save combined benchmark results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: parallel-results
+        path: ${{ runner.temp }}/spectra-results
+        if-no-files-found: warn
+        retention-days: 90
