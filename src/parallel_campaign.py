@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import benchmark as core
 from campaign import checkpoint_settings, read_checkpoint, select_resume_artifacts
-from publish_progress import (APIError, BRANCH, GitHub, compact_payload, existing_snapshot,
+from publish_progress import (APIError, PublicationConflict, BRANCH, GitHub, compact_payload, existing_snapshot,
                               publish, retained_comparison_rows, snapshot_filename, _progress_tree)
 from refresh import _environments, _runtime_selection
 
@@ -29,6 +29,8 @@ MAX_BYTES = 512 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
+CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py',
+                    'tests/test_parallel_campaign.py', 'tests/test_publish_progress.py'}
 
 
 class LiveGitHub(GitHub):
@@ -410,6 +412,32 @@ def write_outputs(values):
                 stream.write(f'{key}={text}\n')
 
 
+def select_controller(api, plan, state):
+    """Permit a recorded orchestration repair while retaining the original numerical plan."""
+    current = os.environ['GITHUB_SHA']
+    previous = state.get('controller_ref', plan['source_ref'])
+    if current == previous:
+        return
+    comparison = api.request('GET', f'/compare/{previous}...{current}')
+    files = comparison.get('files', [])
+    if (comparison.get('status') != 'ahead' or not files or len(files) >= 300 or
+            any(item['filename'] not in CONTROLLER_FILES or item.get('status') == 'renamed' for item in files)):
+        raise ValueError('A controller repair must leave numerical sources, inputs and timing adapters unchanged')
+    tag = f"spectra-{plan['campaign_id']}-controller-{current[:12]}"
+    try:
+        existing = api.request('GET', '/git/ref/tags/' + tag)
+    except APIError as error:
+        if error.status != 404:
+            raise
+        api.request('POST', '/git/refs', dict(ref='refs/tags/' + tag, sha=current))
+    else:
+        if existing['object']['sha'] != current:
+            raise ValueError('Controller tag differs from its recorded revision')
+    state.setdefault('controller_history', []).append(dict(previous=previous, current=current,
+        files=[item['filename'] for item in files], changed_at=core.utc_now()))
+    state.update(controller_ref=current, controller_tag=tag)
+
+
 def plan_campaign(api, inputs, directory):
     campaign_id = inputs.get('campaign_id', '').strip()
     if campaign_id:
@@ -417,9 +445,8 @@ def plan_campaign(api, inputs, directory):
         state, state_sha = get_document(api, filename(campaign_id, 'state'))
         if plan is None or state is None:
             raise ValueError('Cannot continue a missing parallel campaign')
-        if plan['source_ref'] != os.environ['GITHUB_SHA']:
-            raise ValueError('Continue using the pinned campaign tag')
-        if state['status'] not in ('active', 'paused'):
+        select_controller(api, plan, state)
+        if state['status'] not in ('active', 'paused', 'publishing'):
             raise ValueError('Campaign has no resumable work')
         if state['waves']:
             recover_artifacts(api, plan, state['waves'][-1])
@@ -531,7 +558,8 @@ def export_task(plan, task, packet, runtime, directory):
 
 def run_task(api, campaign_id, task_id, runtime_path, directory, deadline):
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
-    if plan['source_ref'] != os.environ['GITHUB_SHA']:
+    state, _ = get_document(api, filename(campaign_id, 'state'))
+    if (state or {}).get('controller_ref', plan['source_ref']) != os.environ['GITHUB_SHA']:
         raise ValueError('Worker source differs from the pinned campaign')
     task = next(task for task in plan['tasks'] if task['id'] == task_id)
     runtime = core.read_json(runtime_path)
@@ -642,7 +670,6 @@ def publish_datasets(api, plan, packets, directory, finished=False):
         current, _ = existing_snapshot(api, PLATFORM, snapshot_filename(PLATFORM, float(size)))
         if current and int(current['run_id']) > int(plan['campaign_id']):
             raise ValueError('A newer campaign owns this benchmark. Refusing to replace its measurements')
-        publish(api, payload)
         target = directory / size
         target.mkdir(parents=True, exist_ok=True)
         core.atomic_json(target / 'results.json', rows)
@@ -652,6 +679,7 @@ def publish_datasets(api, plan, packets, directory, finished=False):
         render_report(target / 'index.html', rows,
                       dict(state='complete' if completed == len(tasks) else 'running',
                            planned=len(rows), recorded=sum(row['status'] != 'pending' for row in rows)))
+        publish(api, payload)
         print(f"PUBLISHED a={size} m tasks={completed}/{len(tasks)} observations="
               f"{sum(row['status'] != 'pending' for row in rows)}", flush=True)
 
@@ -669,8 +697,13 @@ def monitor(api, campaign_id, directory):
         done = len(workers) == len(names) and all(job['status'] == 'completed' for job in workers)
         if time.monotonic() >= next_update or done:
             packets = read_packets(api, plan, cache=packets)
-            publish_datasets(api, plan, packets, directory)
-            next_update = time.monotonic() + 180
+            try:
+                publish_datasets(api, plan, packets, directory)
+            except PublicationConflict as error:
+                print(f'PUBLICATION_DEFERRED {error}. Retrying in 30 seconds', flush=True)
+                next_update = time.monotonic() + 30
+            else:
+                next_update = time.monotonic() + 180
         if done:
             return
         time.sleep(30)
@@ -692,17 +725,30 @@ def finish(api, campaign_id, directory):
             state['blocked'].append(task_id)
     state['completed'] = sorted(task_id for task_id, packet in packets.items() if packet.get('state') == 'complete')
     pending = [task for task in plan['tasks'] if task['id'] not in set(state['completed']) | set(state['blocked'])]
-    state['status'] = ('active' if plan['automatic_continue'] else 'paused') if pending else (
+    work_status = ('active' if plan['automatic_continue'] else 'paused') if pending else (
         'blocked' if state['blocked'] else 'complete')
+    state['status'] = work_status if pending else 'publishing'
     state['updated_at'] = core.utc_now()
+    state_sha = put_document(api, filename(campaign_id, 'state'), state, state_sha)
+    try:
+        publish_datasets(api, plan, packets, directory, finished=True)
+    except PublicationConflict as error:
+        state['publication_pending'] = True
+        state['publication_attempts'] = state.get('publication_attempts', 0) + 1
+        if not pending and state['publication_attempts'] >= 3:
+            state['status'] = 'publication_blocked'
+        print(f'PUBLICATION_DEFERRED {error}. Saved observations remain available', flush=True)
+    else:
+        state.update(status=work_status, publication_pending=False, publication_attempts=0)
     put_document(api, filename(campaign_id, 'state'), state, state_sha)
-    publish_datasets(api, plan, packets, directory, finished=True)
     write_outputs(dict(pending=len(pending), completed=len(state['completed']), blocked=len(state['blocked']),
                        state=state['status']))
-    if pending and plan['automatic_continue']:
+    if (pending or state['status'] == 'publishing') and plan['automatic_continue']:
         api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
-                    dict(ref=f'spectra-{campaign_id}', inputs=dict(campaign_id=campaign_id)))
+                    dict(ref=state.get('controller_tag', f'spectra-{campaign_id}'), inputs=dict(campaign_id=campaign_id)))
         print(f'CONTINUATION_DISPATCHED campaign={campaign_id} unfinished_tasks={len(pending)}', flush=True)
+    if state['status'] == 'publication_blocked':
+        raise PublicationConflict('All timing tasks are saved, but final dashboard publication requires recovery')
 
 
 def main():

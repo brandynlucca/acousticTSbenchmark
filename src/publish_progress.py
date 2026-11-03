@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import random
 import sys
 import time
 from urllib.error import HTTPError, URLError
@@ -51,6 +52,10 @@ class APIError(RuntimeError):
         self.status = status
         self.method = method
         self.path = path
+
+
+class PublicationConflict(RuntimeError):
+    """Concurrent data-branch writers exhausted this bounded publication attempt."""
 
 
 def safe_error_summary(error, api=None):
@@ -658,7 +663,7 @@ def publish(api, payload):
     _cache_guard(api, proposed_sha, payload)
     blob = None
     message = f"Update {platform} progress for run {payload['run_id']} attempt {payload['run_attempt']}"
-    for attempt in range(4):
+    for attempt in range(8):
         head, tree_sha, entries = _progress_tree(api)
         selected = [name for name in names if entries.get(name, {}).get("sha") != proposed_sha
                     and should_publish(_snapshot_guard(api, entries.get(name)), payload)]
@@ -683,9 +688,14 @@ def publish(api, payload):
         except APIError as error:
             if error.status not in (409, 422):
                 raise
-            if attempt < 3:
-                time.sleep(.1 * (attempt + 1))
-    raise RuntimeError("Progress changed concurrently too often. Retry publication")
+            latest, _, _ = _progress_tree(api)
+            if latest == head:
+                raise
+            if attempt < 7:
+                delay = random.uniform(.5, min(8., 2. ** attempt))
+                print(f"PUBLICATION_RETRY conflict={attempt + 1}/8 delay_seconds={delay:.2f}", flush=True)
+                time.sleep(delay)
+    raise PublicationConflict("Data branch remained busy. Timing checkpoints are unchanged")
 
 
 def main():

@@ -976,6 +976,55 @@ assert.deepEqual(benchmarkFrequencyWindow([],saved,{frequency_hz:[1000,300000]})
         self.assertEqual(api.current("ubuntu-latest-a-0.01.json"), proposed)
         self.assertEqual(sum(call.args[0] == "POST" and call.args[1] == "/git/blobs" for call in api.request.call_args_list), 1)
 
+    def test_publication_survives_six_competing_checkpoint_updates(self):
+        proposed = dict(self.payload(12), semimajor_m=.01)
+        api = GitAPI({"ubuntu-latest.json": self.payload(11)})
+        updates = 0
+
+        def request(method, path, body=None):
+            nonlocal updates
+            if method == "PATCH" and updates < 6:
+                updates += 1
+                api.conflict = {f"worker-{updates}.json": {"saved": updates}}
+            return api._request(method, path, body)
+
+        api.request.side_effect = request
+        with patch.object(progress.time, "sleep") as sleep:
+            self.assertTrue(progress.publish(api, proposed))
+        self.assertEqual(sleep.call_count, 6)
+        for index in range(1, 7):
+            self.assertEqual(api.current(f"worker-{index}.json"), {"saved": index})
+        self.assertEqual(api.current("ubuntu-latest.json"), proposed)
+        self.assertEqual(api.current("ubuntu-latest-a-0.01.json"), proposed)
+
+    def test_persistent_contention_is_recoverable_and_preserves_observations(self):
+        previous = self.payload(11)
+        api = GitAPI({"ubuntu-latest.json": previous})
+        updates = 0
+
+        def request(method, path, body=None):
+            nonlocal updates
+            if method == "PATCH":
+                updates += 1
+                api.conflict = {"worker.json": {"saved": updates}}
+            return api._request(method, path, body)
+
+        api.request.side_effect = request
+        with patch.object(progress.time, "sleep"), self.assertRaises(progress.PublicationConflict):
+            progress.publish(api, self.payload(12))
+        self.assertEqual(updates, 8)
+        self.assertEqual(api.current("ubuntu-latest.json"), previous)
+        self.assertEqual(api.current("worker.json"), {"saved": 8})
+
+    def test_validation_error_without_branch_movement_is_not_retried(self):
+        previous = self.payload(11)
+        api = GitAPI({"ubuntu-latest.json": previous})
+        api.ref_error = progress.APIError(422, "Invalid reference update")
+        with patch.object(progress.time, "sleep") as sleep, self.assertRaises(progress.APIError):
+            progress.publish(api, self.payload(12))
+        sleep.assert_not_called()
+        self.assertEqual(api.current("ubuntu-latest.json"), previous)
+
     def test_safe_errors_include_status_and_endpoint_but_never_query_or_credentials(self):
         error = progress.APIError(409, "secret response", method="PATCH", path="/git/refs/heads/benchmark-data?token=secret")
         self.assertEqual(progress.safe_error_summary(error), "APIError HTTP 409 during PATCH /git/refs/heads/benchmark-data")
@@ -996,3 +1045,4 @@ assert.deepEqual(benchmarkFrequencyWindow([],saved,{frequency_hz:[1000,300000]})
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -215,7 +215,7 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary);core.atomic_json(directory/'runtime.json',runtime)
             with patch.dict(os.environ,GITHUB_RUN_ID='100',GITHUB_SHA='c'*40), \
-                 patch.object(parallel,'get_document',side_effect=[(plan,'p'),(None,None)]), \
+                 patch.object(parallel,'get_document',side_effect=[(plan,'p'),(None,None),(None,None)]), \
                  patch.object(parallel,'put_document',return_value='t'), \
                  patch.object(core,'measure') as measure:
                 parallel.run_task(Mock(),'100',task['id'],directory/'runtime.json',directory/'worker',0)
@@ -265,6 +265,89 @@ class ObservationTests(unittest.TestCase):
         artifacts=[dict(id=index,name=f"spectrum-{'a'*23}{index}-1",created_at='2026-11-02',
                         workflow_run=dict(id=100)) for index in (1,2)]
         self.assertEqual(len(select_artifacts(artifacts)),2)
+
+
+class PublicationTests(unittest.TestCase):
+    def test_monitor_survives_exhausted_publication_retries(self):
+        plan,task,_=pending_plan()
+        state=dict(waves=[dict(run_id=100,tasks=[task['id']])])
+        api=Mock()
+        api.request.side_effect=[dict(jobs=[dict(name=task['name'],status=status)])
+                                 for status in ('in_progress','completed')]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'read_packets',return_value={}), \
+             patch.object(parallel.time,'sleep'), \
+             patch.object(parallel,'publish_datasets',side_effect=[parallel.PublicationConflict('busy'),None]) as publish:
+            parallel.monitor(api,'100',Path(directory))
+        self.assertEqual(publish.call_count,2)
+
+    def test_final_publication_conflict_dispatches_publication_only_recovery(self):
+        plan,task,runtime=pending_plan();plan['automatic_continue']=True
+        packet=packet_for(plan,task,runtime,len(task['cases']))
+        state=dict(waves=[dict(run_id=100,tasks=[task['id']])],attempts={},blocked=[])
+        api=Mock();saved=[]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'recover_artifacts'), \
+             patch.object(parallel,'read_packets',return_value={task['id']:packet}), \
+             patch.object(parallel,'put_document',side_effect=lambda api,path,value,*args: saved.append(copy.deepcopy(value)) or 's'), \
+             patch.object(parallel,'publish_datasets',side_effect=parallel.PublicationConflict('busy')):
+            parallel.finish(api,'100',Path(directory))
+        self.assertEqual(saved[-1]['status'],'publishing')
+        self.assertTrue(saved[-1]['publication_pending'])
+        self.assertEqual(saved[-1]['completed'],[task['id']])
+        self.assertEqual(api.request.call_args.args[2]['inputs'],dict(campaign_id='100'))
+
+    def test_controller_upgrade_records_pin_and_rejects_numerical_changes(self):
+        plan,_,_=pending_plan()
+        api=Mock();state={}
+        with patch.dict(os.environ,GITHUB_SHA='d'*40):
+            api.request.side_effect=[dict(status='ahead',files=[dict(filename='src/publish_progress.py')]),
+                                     dict(object=dict(sha='d'*40))]
+            parallel.select_controller(api,plan,state)
+            self.assertEqual(state['controller_ref'],'d'*40)
+            self.assertEqual(plan['source_ref'],'c'*40)
+            for filename in ('src/worker_acousticts.R','sources.lock.json','.github/workflows/parallel-spectra.yml'):
+                api.request.side_effect=[dict(status='ahead',files=[dict(filename=filename)])]
+                with self.assertRaises(ValueError): parallel.select_controller(api,plan,{})
+
+    def test_publication_conflict_still_continues_unfinished_spectrum(self):
+        plan,task,runtime=pending_plan();plan['automatic_continue']=True
+        packet=packet_for(plan,task,runtime,1)
+        state=dict(waves=[dict(run_id=100,tasks=[task['id']])],attempts={},blocked=[],controller_tag='fixed-controller')
+        api=Mock();saved=[]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'recover_artifacts'), \
+             patch.object(parallel,'read_packets',return_value={task['id']:packet}), \
+             patch.object(parallel,'put_document',side_effect=lambda api,path,value,*args: saved.append(copy.deepcopy(value)) or 's'), \
+             patch.object(parallel,'publish_datasets',side_effect=parallel.PublicationConflict('busy')):
+            parallel.finish(api,'100',Path(directory))
+        self.assertEqual(saved[-1]['status'],'active')
+        self.assertEqual(saved[-1]['attempts'][task['id']]['recorded'],1)
+        self.assertEqual(api.request.call_args.args[2],dict(ref='fixed-controller',inputs=dict(campaign_id='100')))
+
+    def test_final_publication_failure_stops_after_three_recovery_attempts(self):
+        plan,task,runtime=pending_plan();plan['automatic_continue']=True
+        packet=packet_for(plan,task,runtime,len(task['cases']))
+        state=dict(waves=[dict(run_id=100,tasks=[])],attempts={},blocked=[],publication_attempts=2)
+        api=Mock();saved=[]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'recover_artifacts'), \
+             patch.object(parallel,'read_packets',return_value={task['id']:packet}), \
+             patch.object(parallel,'put_document',side_effect=lambda api,path,value,*args: saved.append(copy.deepcopy(value)) or 's'), \
+             patch.object(parallel,'publish_datasets',side_effect=parallel.PublicationConflict('busy')), \
+             self.assertRaises(parallel.PublicationConflict):
+            parallel.finish(api,'100',Path(directory))
+        self.assertEqual(saved[-1]['status'],'publication_blocked')
+        self.assertEqual(saved[-1]['completed'],[task['id']])
+        api.request.assert_not_called()
 
 
 class DashboardTests(unittest.TestCase):
