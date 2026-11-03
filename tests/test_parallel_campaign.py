@@ -198,6 +198,7 @@ class ObservationTests(unittest.TestCase):
             directory=Path(temporary)
             core.atomic_json(directory/'runtime.json',runtime)
             with patch.dict(os.environ,GITHUB_RUN_ID='100',GITHUB_RUN_ATTEMPT='1',GITHUB_SHA='c'*40), \
+                 patch.object(parallel.host_platform,'system',return_value='Linux'), \
                  patch.object(parallel,'get_document',side_effect=read), \
                  patch.object(parallel,'put_document',side_effect=write), \
                  patch.object(parallel,'task_environment',return_value=packet['environments']['inv']), \
@@ -215,6 +216,7 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary);core.atomic_json(directory/'runtime.json',runtime)
             with patch.dict(os.environ,GITHUB_RUN_ID='100',GITHUB_SHA='c'*40), \
+                 patch.object(parallel.host_platform,'system',return_value='Linux'), \
                  patch.object(parallel,'get_document',side_effect=[(plan,'p'),(None,None),(None,None)]), \
                  patch.object(parallel,'put_document',return_value='t'), \
                  patch.object(core,'measure') as measure:
@@ -380,6 +382,112 @@ assert.equal(error.count,2);assert.equal(error.values.length,2);
 assert.ok(Math.abs(error.value-(Math.sqrt(.00125)+Math.sqrt(.005))/2)<1e-14);
 """
         subprocess.run([shutil.which('node'),'-e',functions+harness],check=True,capture_output=True,text=True)
+
+
+class PlatformTests(unittest.TestCase):
+    def test_five_fresh_repetitions_archive_old_acousticts_and_keep_other_software(self):
+        baseline,sources,_=fixture()
+        sources['sources']['acousticts']['sha']='d'*40
+        data,cases=parallel.prepare_dataset(baseline,dict(mode='refresh',software='acousticts',additional_repetitions=5),sources)
+        old=[r for r in baseline['rows'] if r['software']=='acousticts']
+        self.assertEqual(data['archived_rows'],old)
+        self.assertEqual(len(cases),5*len(old))
+        self.assertEqual({r['repetition'] for r in cases},{1,2,3,4,5})
+        self.assertTrue(all(r['status']=='pending' for r in data['rows'] if r['software']=='acousticts'))
+        self.assertEqual([r for r in data['rows'] if r['software']!='acousticts'],
+                         [r for r in baseline['rows'] if r['software']!='acousticts'])
+        self.assertTrue(all(r['reference_ts_db']==-20.001 for r in data['rows']))
+
+    def test_repeat_on_empty_platform_starts_at_one(self):
+        baseline,sources,_=fixture();baseline.update(rows=[],environments=[])
+        data,cases=parallel.prepare_dataset(baseline,dict(mode='repeat',software='acousticts',additional_repetitions=5),sources)
+        self.assertEqual({r['repetition'] for r in cases},{1,2,3,4,5})
+        self.assertEqual(len(cases),5*72)
+        self.assertEqual(data['compatibility']['acousticts'],[])
+
+    def test_new_platform_plan_seeds_configuration_without_foreign_measurements(self):
+        baseline,sources,_=fixture()
+        for platform in ('windows-latest','macos-latest'):
+            documents={};outputs=[]
+            def get(api,path):return copy.deepcopy(documents.get(path)),None
+            def put(api,path,value,*args,**kwargs):documents[path]=copy.deepcopy(value);return 's'
+            def config(path):return sources if path.name=='sources.lock.json' else baseline['configuration']
+            api=Mock(repository='owner/repo');api.request.return_value=dict(object=dict(sha='c'*40))
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp, \
+                 patch.dict(os.environ,GITHUB_SHA='c'*40,GITHUB_RUN_ID='100'), \
+                 patch.object(parallel,'get_document',side_effect=get), \
+                 patch.object(parallel,'put_document',side_effect=put), \
+                 patch.object(parallel,'existing_snapshot',return_value=(None,None)) as snapshot, \
+                 patch.object(core,'read_json',side_effect=config), \
+                 patch.object(parallel,'read_packets',return_value={}), \
+                 patch.object(parallel,'write_outputs',side_effect=outputs.append):
+                parallel.plan_campaign(api,dict(platform=platform,mode='refresh',software='acousticts',
+                    semimajor_axes='0.001,0.01,0.07,0.1',additional_repetitions=5),Path(tmp))
+            plan=documents[parallel.filename('100','plan')]
+            self.assertEqual(plan['platform'],platform)
+            self.assertEqual(outputs[-1]['runner'],platform)
+            self.assertEqual(len(plan['tasks']),4*2*3*4*5)
+            self.assertTrue(all(call.args[1]==platform for call in snapshot.call_args_list))
+            self.assertTrue(all(row['status']=='pending' for d in plan['datasets'].values() for row in d['rows']))
+            self.assertTrue(all(not d['environments'] for d in plan['datasets'].values()))
+
+    def test_saved_parallel_baseline_rejects_another_platform(self):
+        plan,_,_=pending_plan();plan['platform']='windows-latest'
+        with patch.object(parallel,'get_document',return_value=(plan,'s')):
+            with self.assertRaisesRegex(ValueError,'another platform'):
+                parallel.load_parallel(Mock(),'100',.07,'macos-latest')
+
+    def test_platform_export_roundtrip_and_cross_platform_packet_rejection(self):
+        import dataset
+        for platform,(runner,system) in parallel.PLATFORMS.items():
+            plan,task,runtime=pending_plan();plan['platform']=platform
+            packet=packet_for(plan,task,runtime,3);packet['environments']['inv']['platform']=system
+            parallel.validate_packet(plan,task,packet)
+            bad=copy.deepcopy(packet);bad['environments']['inv']['platform']='invalid'
+            with self.assertRaisesRegex(ValueError,'worker environment'):parallel.validate_packet(plan,task,bad)
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(parallel.host_platform,'machine',return_value='arm64' if system=='Darwin' else 'AMD64'):
+                directory=Path(tmp)
+                parallel.export_task(plan,task,packet,runtime,directory)
+                manifest=core.read_json(directory/'manifest.json')
+                self.assertEqual(manifest['platform'],system)
+                self.assertEqual(manifest['architecture'],'arm64' if system=='Darwin' else 'AMD64')
+                archive=directory/'worker.zip'
+                with zipfile.ZipFile(archive,'w') as stream:
+                    for path in directory.rglob('*.json'):stream.write(path,path.relative_to(directory))
+                connection=dataset.connect_database(directory/'test.sqlite')
+                try:
+                    result=dataset.import_artifact(connection,archive,dict(id=1,name=f"spectrum-{task['id']}-1",run_id=100),'owner/repo')
+                    self.assertEqual(result['observations'],3)
+                    self.assertEqual(connection.execute('SELECT DISTINCT platform FROM observations').fetchone()[0],platform)
+                finally:connection.close()
+
+    def test_platform_publication_and_archival_leave_other_platform_snapshots_untouched(self):
+        for platform in ('windows-latest','macos-latest'):
+            plan,task,runtime=pending_plan();plan.update(platform=platform,repository='owner/repo')
+            data=plan['datasets']['0.07'];data['archived_rows']=[dict(software='acousticts',source_sha='old')]
+            with self.subTest(platform=platform),tempfile.TemporaryDirectory() as tmp, \
+                 patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+                 patch.object(parallel,'attach_latest_references',side_effect=lambda api,rows,size:rows), \
+                 patch.object(parallel,'existing_snapshot',return_value=(None,None)) as read, \
+                 patch.object(parallel,'publish') as publish, \
+                 patch('report.render_report'):
+                parallel.publish_datasets(Mock(repository='owner/repo'),plan,{},Path(tmp))
+                self.assertEqual(read.call_args.args[1],platform)
+                self.assertEqual(publish.call_args.args[1]['platform'],platform)
+                archive=core.read_json(Path(tmp)/'0.07/archived-results.json')
+                self.assertEqual(archive['rows'],data['archived_rows'])
+
+    def test_continuation_preserves_windows_platform(self):
+        plan,task,runtime=pending_plan();plan.update(platform='windows-latest',automatic_continue=True)
+        state=dict(waves=[dict(run_id=100,tasks=[task['id']])],attempts={},blocked=[])
+        api=Mock()
+        with tempfile.TemporaryDirectory() as tmp,patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'recover_artifacts'),patch.object(parallel,'read_packets',return_value={}), \
+             patch.object(parallel,'put_document'),patch.object(parallel,'publish_datasets'):
+            parallel.finish(api,'100',Path(tmp))
+        self.assertEqual(api.request.call_args.args[2]['inputs'],dict(campaign_id='100',platform='windows-latest'))
 
 
 if __name__ == '__main__': unittest.main()

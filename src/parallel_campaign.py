@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import platform as host_platform
 from pathlib import Path
 import random
 import re
@@ -25,6 +26,9 @@ from refresh import _environments, _runtime_selection
 
 WORKFLOW = 'parallel-spectra.yml'
 PLATFORM = 'ubuntu-latest'
+PLATFORMS = {'ubuntu-latest': ('ubuntu-24.04', 'Linux'),
+             'windows-latest': ('windows-latest', 'Windows'),
+             'macos-latest': ('macos-latest', 'Darwin')}
 MAX_BYTES = 512 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
@@ -140,17 +144,24 @@ def all_artifacts(api, run_id):
     raise ValueError('Too many checkpoint artifacts')
 
 
-def load_legacy(api, run_id):
+def campaign_platform(plan):
+    platform = plan.get('platform', PLATFORM)
+    if platform not in PLATFORMS:
+        raise ValueError('Unsupported benchmark platform')
+    return platform
+
+
+def load_legacy(api, run_id, platform=PLATFORM):
     run = api.request('GET', f'/actions/runs/{int(run_id)}')
-    artifact = select_resume_artifacts(all_artifacts(api, run_id), platform=PLATFORM).get(PLATFORM)
+    artifact = select_resume_artifacts(all_artifacts(api, run_id), platform=platform).get(platform)
     if artifact is None:
-        raise ValueError(f'No saved Ubuntu measurements for run {run_id}')
+        raise ValueError(f'No saved {platform} measurements for run {run_id}')
     archive = api.archive(artifact['id'])
     digest = 'sha256:' + hashlib.sha256(archive).hexdigest()
     if artifact.get('digest') and artifact['digest'] != digest:
         raise ValueError('Baseline artifact does not match its GitHub digest')
     interrupted = run.get('conclusion') in ('cancelled', 'failure')
-    settings = checkpoint_settings(archive, api.repository, run['head_sha'], PLATFORM,
+    settings = checkpoint_settings(archive, api.repository, run['head_sha'], platform,
                                    allow_unexported=interrupted)
     values, records = read_checkpoint(archive, allow_unexported=interrupted)
     cases = core.build_cases(settings['configuration'], settings['profile'],
@@ -169,7 +180,7 @@ def load_legacy(api, run_id):
     for proof in retained.get('provenance', []):
         evidence.extend(proof.get('environments', {}).get('evidence', {}).values())
     return dict(configuration=settings['configuration'], profile=settings['profile'], rows=rows,
-                environments=evidence, baseline_run_id=int(run_id), archive_sha256=digest)
+                environments=evidence, baseline_run_id=int(run_id), archive_sha256=digest, platform=platform)
 
 
 def read_packets(api, plan, *, cache=None):
@@ -217,7 +228,8 @@ def validate_packet(plan, task, packet):
                 row.get('allocation_id') != row.get('invocation_id')):
             raise ValueError('Worker observation does not match its physical inputs or provenance')
         environment = packet['environments'][row['invocation_id']]
-        if (str(environment.get('github_run_id')) != str(row.get('measurement_origin_run_id')) or
+        if (environment.get('platform') != PLATFORMS[campaign_platform(plan)][1] or
+                str(environment.get('github_run_id')) != str(row.get('measurement_origin_run_id')) or
                 environment.get('runtime', {}).get('source_shas', {}).get(case['software']) != row['source_sha']):
             raise ValueError('Timing origin or source differs from its worker environment')
         if row['status'] == 'ok' and (not math.isfinite(row.get('elapsed_seconds', float('nan')))
@@ -284,10 +296,12 @@ def merge_dataset(dataset, tasks, packets):
     return list(rows.values())
 
 
-def load_parallel(api, campaign_id, size):
+def load_parallel(api, campaign_id, size, platform=PLATFORM):
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
     if plan is None:
         raise ValueError('Saved parallel benchmark plan is missing')
+    if campaign_platform(plan) != platform:
+        raise ValueError('Saved parallel benchmark belongs to another platform')
     dataset = plan['datasets'][format(size, '.15g')]
     packets = read_packets(api, plan)
     tasks = [task for task in plan['tasks'] if task['size'] == format(size, '.15g')]
@@ -295,7 +309,7 @@ def load_parallel(api, campaign_id, size):
     for task in tasks:
         environments.extend(packets.get(task['id'], {}).get('environments', {}).values())
     return dict(dataset, rows=merge_dataset(dataset, tasks, packets), environments=environments,
-                baseline_run_id=int(campaign_id))
+                baseline_run_id=int(campaign_id), platform=platform)
 
 
 def prepare_dataset(baseline, inputs, sources):
@@ -324,7 +338,7 @@ def prepare_dataset(baseline, inputs, sources):
             raise ValueError('Invalid frequency grid')
         config['frequency'] = dict(start_hz=values[0], stop_hz=values[1], step_hz=values[2], include_stop=True)
     previous = [row for row in baseline['rows'] if row['software'] in programs]
-    repeats = max([row['repetition'] for row in previous] or [1])
+    repeats = max([row['repetition'] for row in previous] or [0])
     mode = inputs['mode']
     if mode not in ('extend', 'refresh', 'repeat'):
         raise ValueError('Mode must be extend, refresh or repeat')
@@ -335,13 +349,16 @@ def prepare_dataset(baseline, inputs, sources):
     if mode == 'repeat':
         repeats += additional
     elif mode == 'refresh':
-        repeats = 1
+        repeats = additional
+    else:
+        repeats = max(1, repeats)
     config.update(software=programs, repetitions=repeats, case_order='boundary_major')
     cases = [case for case in core.build_cases(config, profile, programs, repeats)
              if case['boundary'] in core.CAPABILITIES[case['software']]]
     active_physical = {(case['software'], case['physical_id']) for case in cases}
     by_id = {case['case_id']: case for case in cases}
     rows, original = [], {}
+    archived_rows = copy.deepcopy(baseline.get('archived_rows', []))
     reference_fields = {}
     for row in baseline['rows']:
         if row.get('reference_ts_db') is not None:
@@ -349,6 +366,8 @@ def prepare_dataset(baseline, inputs, sources):
         if (row['software'], row['physical_id']) not in active_physical:
             rows.append(copy.deepcopy(row))
             continue
+        if mode == 'refresh' and row['status'] != 'pending':
+            archived_rows.append(copy.deepcopy(row))
         if row['status'] != 'pending' and mode != 'refresh':
             case = by_id.get(row['case_id'])
             if case is None or any(row.get(key) != value for key, value in case.items()):
@@ -381,6 +400,7 @@ def prepare_dataset(baseline, inputs, sources):
             raise ValueError('Saved measurements require one verified build configuration')
         compatibility[program] = values if mode != 'refresh' else []
     return dict(configuration=config, profile=profile, rows=rows,
+                archived_rows=archived_rows,
                 environments=baseline.get('environments', []), compatibility=compatibility,
                 baseline_run_id=baseline['baseline_run_id']), pending
 
@@ -445,6 +465,8 @@ def plan_campaign(api, inputs, directory):
         state, state_sha = get_document(api, filename(campaign_id, 'state'))
         if plan is None or state is None:
             raise ValueError('Cannot continue a missing parallel campaign')
+        if inputs.get('platform', campaign_platform(plan)) != campaign_platform(plan):
+            raise ValueError('Continuation platform differs from the saved campaign')
         select_controller(api, plan, state)
         if state['status'] not in ('active', 'paused', 'publishing'):
             raise ValueError('Campaign has no resumable work')
@@ -455,6 +477,7 @@ def plan_campaign(api, inputs, directory):
         existing, _ = get_document(api, filename(campaign_id, 'plan'))
         if existing is not None:
             return plan_campaign(api, dict(inputs, campaign_id=campaign_id), directory)
+        platform = campaign_platform(inputs)
         sizes = csv_values(inputs.get('semimajor_axes', '0.07,0.1'), float)
         if not sizes or set(sizes) - {0.001, 0.01, 0.07, 0.1, 0.5}:
             raise ValueError('Select supported semimajor axes')
@@ -465,21 +488,24 @@ def plan_campaign(api, inputs, directory):
         sources = core.read_json(core.ROOT / 'sources.lock.json')
         datasets, pending = {}, {}
         for size in sizes:
-            snapshot, _ = existing_snapshot(api, PLATFORM, snapshot_filename(PLATFORM, size))
+            snapshot, _ = existing_snapshot(api, platform, snapshot_filename(platform, size))
             if snapshot and snapshot.get('parallel_campaign_id'):
                 prior_state, _ = get_document(api, filename(snapshot['parallel_campaign_id'], 'state'))
                 if prior_state and prior_state['status'] != 'complete':
                     raise ValueError('Finish or continue the existing parallel campaign for this size first')
             run_id = baselines.get(size, snapshot.get('run_id') if snapshot else None)
+            prior, _ = get_document(api, filename(run_id, 'plan')) if run_id else (None, None)
             if not run_id:
-                raise ValueError(f'No saved benchmark for a={size:g} m')
-            prior, _ = get_document(api, filename(run_id, 'plan'))
-            if prior is not None:
-                baseline = load_parallel(api, run_id, size)
+                config = copy.deepcopy(core.read_json(core.ROOT / 'benchmark.json'))
+                config['geometry']['semimajor_m'] = size
+                baseline = dict(configuration=config, profile='full', rows=[], environments=[],
+                                baseline_run_id=None, platform=platform)
+            elif prior is not None:
+                baseline = load_parallel(api, run_id, size, platform)
             elif snapshot and size not in baselines and snapshot.get('parallel_campaign_id'):
-                baseline = load_parallel(api, snapshot['parallel_campaign_id'], size)
+                baseline = load_parallel(api, snapshot['parallel_campaign_id'], size, platform)
             else:
-                baseline = load_legacy(api, run_id)
+                baseline = load_legacy(api, run_id, platform)
             if baseline['configuration']['geometry']['semimajor_m'] != size:
                 raise ValueError('Saved run belongs to a different semimajor axis')
             key = format(size, '.15g')
@@ -491,6 +517,7 @@ def plan_campaign(api, inputs, directory):
         if budget not in (45, 120, 240, 330):
             raise ValueError('Unsupported worker budget')
         plan = dict(schema_version=1, campaign_id=campaign_id, repository=api.repository,
+                    platform=platform,
                     source_ref=os.environ['GITHUB_SHA'], sources=sources, inputs=inputs,
                     datasets=datasets, tasks=make_tasks(campaign_id, pending),
                     max_parallel=parallel, budget_minutes=budget,
@@ -521,7 +548,8 @@ def plan_campaign(api, inputs, directory):
     core.atomic_json(directory / 'wave.json', state['waves'][-1])
     write_outputs(dict(campaign_id=campaign_id, matrix=[dict(id=task['id'], name=task['name'],
         software=task['software']) for task in wave], has_work=bool(wave), max_parallel=plan['max_parallel'],
-        budget=plan['budget_minutes']))
+        budget=plan['budget_minutes'], platform=campaign_platform(plan),
+        runner=PLATFORMS[campaign_platform(plan)][0]))
 
 
 def task_environment(runtime):
@@ -533,6 +561,24 @@ def task_environment(runtime):
             env['processor'] = fields[0]
     except OSError:
         pass
+    if host_platform.system() == 'Windows':
+        import subprocess
+        try:
+            result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command',
+                '(Get-CimInstance Win32_Processor | Select-Object -First 1).Name'],
+                capture_output=True, text=True, check=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW)
+            env['processor'] = result.stdout.strip() or env.get('processor')
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif host_platform.system() == 'Darwin':
+        import subprocess
+        try:
+            result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
+                capture_output=True, text=True, check=True, timeout=10)
+            env['processor'] = result.stdout.strip() or env.get('processor')
+        except (OSError, subprocess.SubprocessError):
+            pass
     env.update(runtime=runtime, started_at=core.utc_now(), github_job=os.getenv('GITHUB_JOB'))
     return env
 
@@ -545,7 +591,8 @@ def export_task(plan, task, packet, runtime, directory):
                              'worker_acousticts.R', 'worker_python.py', 'worker_julia.jl')}
     identity = dict(configuration=configuration, sources=plan['sources'],
         profile=plan['datasets'][task['size']]['profile'], cases=[case['case_id'] for case in task['cases']],
-        adapter_hashes=adapters, platform='Linux', architecture='x86_64',
+        adapter_hashes=adapters, platform=PLATFORMS[campaign_platform(plan)][1],
+        architecture=host_platform.machine(),
         environment_fingerprint=core.fingerprint(dict(runtime=runtime['environment_fingerprint'],
             memory_observer=core.memory_provenance())),
         workload='fresh_process_warmed_distinct_problem_single_prediction')
@@ -562,6 +609,8 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline):
     if (state or {}).get('controller_ref', plan['source_ref']) != os.environ['GITHUB_SHA']:
         raise ValueError('Worker source differs from the pinned campaign')
     task = next(task for task in plan['tasks'] if task['id'] == task_id)
+    if host_platform.system() != PLATFORMS[campaign_platform(plan)][1]:
+        raise ValueError('Worker operating system differs from the pinned campaign')
     runtime = core.read_json(runtime_path)
     program = task['software']
     if runtime.get('source_shas', {}).get(program) != plan['sources']['sources'][program]['sha']:
@@ -653,6 +702,7 @@ def attach_latest_references(api, rows, size):
 
 
 def publish_datasets(api, plan, packets, directory, finished=False):
+    platform = campaign_platform(plan)
     for size, dataset in plan['datasets'].items():
         tasks = [task for task in plan['tasks'] if task['size'] == size]
         rows = merge_dataset(dataset, tasks, packets)
@@ -662,19 +712,22 @@ def publish_datasets(api, plan, packets, directory, finished=False):
             row.pop('measurement_role', None)
             row.pop('retained_from_run_id', None)
         completed = sum(packets.get(task['id'], {}).get('state') == 'complete' for task in tasks)
-        payload = compact_payload(api.repository, PLATFORM, int(plan['campaign_id']), 1, rows,
+        payload = compact_payload(api.repository, platform, int(plan['campaign_id']), 1, rows,
                                   state='completed' if finished and completed == len(tasks) else 'running')
         payload.update(parallel_campaign_id=plan['campaign_id'], parallel_tasks=dict(planned=len(tasks),
             completed=completed, pending=len(tasks)-completed), timing_statistic='arithmetic_mean')
         payload['artifact_url'] = f"https://github.com/{api.repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}#artifacts"
-        current, _ = existing_snapshot(api, PLATFORM, snapshot_filename(PLATFORM, float(size)))
+        current, _ = existing_snapshot(api, platform, snapshot_filename(platform, float(size)))
         if current and int(current['run_id']) > int(plan['campaign_id']):
             raise ValueError('A newer campaign owns this benchmark. Refusing to replace its measurements')
         target = directory / size
         target.mkdir(parents=True, exist_ok=True)
         core.atomic_json(target / 'results.json', rows)
         core.atomic_json(target / 'parallel-plan.json', dict(campaign_id=plan['campaign_id'],
-            source_ref=plan['source_ref'], configuration=dataset['configuration'], sources=plan['sources']))
+            platform=platform, source_ref=plan['source_ref'], configuration=dataset['configuration'], sources=plan['sources']))
+        if dataset.get('archived_rows'):
+            core.atomic_json(target / 'archived-results.json', dict(platform=platform,
+                reason='Superseded selected software measurements', rows=dataset['archived_rows']))
         from report import render_report
         render_report(target / 'index.html', rows,
                       dict(state='complete' if completed == len(tasks) else 'running',
@@ -744,8 +797,11 @@ def finish(api, campaign_id, directory):
     write_outputs(dict(pending=len(pending), completed=len(state['completed']), blocked=len(state['blocked']),
                        state=state['status']))
     if (pending or state['status'] == 'publishing') and plan['automatic_continue']:
+        continuation = dict(campaign_id=campaign_id)
+        if 'platform' in plan:
+            continuation['platform'] = campaign_platform(plan)
         api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
-                    dict(ref=state.get('controller_tag', f'spectra-{campaign_id}'), inputs=dict(campaign_id=campaign_id)))
+                    dict(ref=state.get('controller_tag', f'spectra-{campaign_id}'), inputs=continuation))
         print(f'CONTINUATION_DISPATCHED campaign={campaign_id} unfinished_tasks={len(pending)}', flush=True)
     if state['status'] == 'publication_blocked':
         raise PublicationConflict('All timing tasks are saved, but final dashboard publication requires recovery')

@@ -1,5 +1,6 @@
 name: Parallel spheroid spectra
-run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.campaign_id) || format('{0} {1} spectra, a={2} m', inputs.mode, inputs.software, inputs.semimajor_axes) }}
+run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.campaign_id) || format('{0} {1} {2} spectra, a={3} m', inputs.mode, inputs.software, inputs.platform, inputs.semimajor_axes)
+  }}
 'on':
   workflow_dispatch:
     inputs:
@@ -48,7 +49,7 @@ run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.
         type: string
         default: ''
       additional_repetitions:
-        description: New repetitions per case in repeat mode
+        description: New repetitions to append, or repetitions per case when refreshing
         type: number
         default: 1
       max_parallel:
@@ -72,11 +73,19 @@ run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.
         description: Saved parallel campaign ID for continuation, blank starts a new request
         type: string
         default: ''
+      platform:
+        description: Operating system for the selected spectra
+        type: choice
+        options:
+        - ubuntu-latest
+        - windows-latest
+        - macos-latest
+        default: ubuntu-latest
 permissions:
   contents: write
   actions: write
 concurrency:
-  group: spheroid-timing-campaign
+  group: ${{ format('spheroid-parallel-{0}', inputs.platform) }}
   cancel-in-progress: false
   queue: max
 env:
@@ -97,6 +106,8 @@ jobs:
       has_work: ${{ steps.plan.outputs.has_work }}
       max_parallel: ${{ steps.plan.outputs.max_parallel }}
       budget: ${{ steps.plan.outputs.budget }}
+      platform: ${{ steps.plan.outputs.platform }}
+      runner: ${{ steps.plan.outputs.runner }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -112,7 +123,7 @@ jobs:
     name: ${{ matrix.name }}
     needs: plan
     if: needs.plan.outputs.has_work == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -122,12 +133,22 @@ jobs:
     env:
       SOFTWARE: ${{ matrix.software }}
       SETUP_ONLY: 'false'
-      BENCHMARK_PLATFORM: ubuntu-latest
+      BENCHMARK_PLATFORM: ${{ needs.plan.outputs.platform }}
+      MACOS_SETUP_SCRIPT: src/setup_macos.py
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
+    - name: Normalize worker paths
+      shell: bash
+      run: |-
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+            stream.write('RUNNER_TEMP=' + Path(os.environ['RUNNER_TEMP']).as_posix() + '\n')
+        PY
     - name: Start worker deadline
       env:
         BUDGET: ${{ needs.plan.outputs.budget }}
@@ -458,3 +479,6 @@ jobs:
         path: ${{ runner.temp }}/spectra-results
         if-no-files-found: warn
         retention-days: 90
+defaults:
+  run:
+    shell: bash
