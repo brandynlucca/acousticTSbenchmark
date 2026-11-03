@@ -169,6 +169,32 @@ class PlanningTests(unittest.TestCase):
 
 
 class ObservationTests(unittest.TestCase):
+    def test_publication_outage_does_not_stop_measurements_or_lose_local_records(self):
+        plan, task, runtime = pending_plan()
+        packet = packet_for(plan, task, runtime)
+        def read(api, path):
+            if path.endswith('-plan.json'):
+                return copy.deepcopy(plan), 'p'
+            if path.endswith('-state.json'):
+                return {}, 's'
+            return copy.deepcopy(packet), 't'
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            core.atomic_json(directory/'runtime.json', runtime)
+            with patch.dict(os.environ,GITHUB_RUN_ID='100',GITHUB_RUN_ATTEMPT='1',GITHUB_SHA='c'*40), \
+                 patch.object(parallel.host_platform,'system',return_value='Linux'), \
+                 patch.object(parallel,'get_document',side_effect=read), \
+                 patch.object(parallel,'put_document',side_effect=parallel.APIError(403,'rate limited')), \
+                 patch.object(parallel,'task_environment',return_value=packet['environments']['inv']), \
+                 patch.object(core,'measure',return_value=dict(status='ok',elapsed_seconds=.4,ts_db=-20.)) as measure:
+                parallel.run_task(Mock(), '100',task['id'],directory/'runtime.json',directory/'worker',float('inf'))
+            self.assertEqual(measure.call_count, 2)
+            saved = core.read_json(directory/'worker/checkpoint.json')
+            self.assertEqual(saved['state'], 'complete')
+            self.assertEqual(len(saved['records']), 3)
+            parallel.validate_packet(plan,task,saved)
+            self.assertEqual(len(core.read_json(directory/'worker/results.json')),3)
+
     def test_packet_identity_origin_and_finite_validation(self):
         plan,task,runtime=pending_plan()
         packet=packet_for(plan,task,runtime)
@@ -275,6 +301,25 @@ class ObservationTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_platform_queue_advances_only_after_completed_publication(self):
+        for complete in (False, True):
+            plan,task,runtime=pending_plan();plan['automatic_continue']=True
+            packet=packet_for(plan,task,runtime,len(task['cases']) if complete else 1)
+            state=dict(waves=[dict(run_id=100,tasks=[task['id']])],attempts={},blocked=[],
+                max_parallel=16,next_platform_campaign=dict(campaign_id='200',platform='windows-latest'))
+            api=Mock();saved=[]
+            with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,GITHUB_RUN_ID='100'), \
+                 patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+                 patch.object(parallel,'recover_artifacts'), \
+                 patch.object(parallel,'read_packets',return_value={task['id']:packet}), \
+                 patch.object(parallel,'put_document',side_effect=lambda api,path,value,*args: saved.append(copy.deepcopy(value)) or 's'), \
+                 patch.object(parallel,'publish_datasets'):
+                parallel.finish(api,'100',Path(directory))
+            inputs=api.request.call_args.args[2]['inputs']
+            self.assertEqual(inputs['campaign_id'],'200' if complete else '100')
+            self.assertEqual(inputs['max_parallel'],'16')
+            self.assertEqual(bool(saved[-1].get('next_platform_dispatched')),complete)
+
     def test_monitor_survives_exhausted_publication_retries(self):
         plan,task,_=pending_plan()
         state=dict(waves=[dict(run_id=100,tasks=[task['id']])])
@@ -623,6 +668,62 @@ class DocumentStorageTests(unittest.TestCase):
             parallel.put_document(api,'plan.json',dict(saved=list(range(25))),immutable=True)
         self.assertEqual(files['other-platform.json'],b'7')
         self.assertEqual(parallel.get_document(api,'plan.json')[0],dict(saved=list(range(25))))
+
+
+class GitDataStorageTests(unittest.TestCase):
+    def test_rate_limit_metadata_does_not_echo_response_credentials(self):
+        from urllib.error import HTTPError
+        error=HTTPError('https://api.github.com/repos/owner/repo/private',403,'Forbidden',
+            {'x-ratelimit-remaining':'0','x-ratelimit-reset':'2000000000'},
+            io.BytesIO(b'{"message":"API rate limit exceeded, secret token"}'))
+        api=parallel.GitHub('owner/repo','private-token')
+        with patch.object(api.opener,'open',side_effect=error),self.assertRaises(parallel.APIError) as raised:
+            api.request('GET','/contents/private')
+        self.assertTrue(raised.exception.rate_limited)
+        self.assertEqual(raised.exception.rate_remaining,0)
+        self.assertEqual(raised.exception.rate_reset,2000000000)
+        self.assertNotIn('secret',str(raised.exception))
+        self.assertNotIn('private-token',str(raised.exception))
+
+    def test_existing_checkout_publishes_parts_without_checkout_or_rest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)/'source'
+            remote=Path(temporary)/'remote.git'
+            root.mkdir()
+            def git(*args):
+                return subprocess.run(['git',*args],cwd=root,check=True,capture_output=True).stdout.decode().strip()
+            git('init','--bare',str(remote))
+            git('init')
+            git('config','user.name','test')
+            git('config','user.email','test@example.invalid')
+            (root/'source.txt').write_text('source remains unchanged')
+            git('add','source.txt')
+            git('commit','-m','source fixture')
+            original=git('rev-parse','HEAD')
+            git('remote','add','origin',str(remote))
+            git('push','origin',f'HEAD:refs/heads/{parallel.BRANCH}')
+            api=parallel.GitDataStore(root)
+            value=dict(values=list(range(100)),sources={'acousticts':'pinned'})
+            with patch.object(parallel,'DOCUMENT_PART_BYTES',80):
+                parallel.put_document(api,'spectra-100-plan.json',value,immutable=True)
+            self.assertEqual(parallel.get_document(api,'spectra-100-plan.json')[0],value)
+            other=parallel.GitDataStore(root)
+            parallel.put_document(other,'other-platform.json',dict(saved=True))
+            parallel.put_document(api,'state.json',dict(status='active'))
+            self.assertEqual(parallel.get_document(api,'other-platform.json')[0],dict(saved=True))
+            self.assertEqual(git('rev-parse','HEAD'),original)
+            self.assertEqual(git('status','--porcelain'),'')
+            self.assertEqual((root/'source.txt').read_text(),'source remains unchanged')
+            self.assertFalse((root/'state.json').exists())
+
+    def test_git_data_routes_exclude_github_actions_and_source_control_metadata(self):
+        store=parallel.GitDataStore('.')
+        self.assertTrue(store.handles('GET','/contents/state.json?ref='+parallel.BRANCH))
+        self.assertTrue(store.handles('PATCH','/git/refs/heads/'+parallel.BRANCH))
+        self.assertFalse(store.handles('GET','/actions/runs/100/jobs'))
+        self.assertFalse(store.handles('POST','/actions/workflows/run.yml/dispatches'))
+        self.assertFalse(store.handles('GET','/contents/sources.lock.json?ref=main'))
+        self.assertFalse(store.handles('PATCH','/git/refs/heads/main'))
 
 
 if __name__ == '__main__': unittest.main()

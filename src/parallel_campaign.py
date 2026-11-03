@@ -14,6 +14,9 @@ import platform as host_platform
 from pathlib import Path
 import random
 import re
+import subprocess
+import tempfile
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -41,12 +44,141 @@ CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py',
 class LiveGitHub(GitHub):
     """Give every network operation a bounded deadline during long-running jobs."""
     def request(self, method, path, body=None):
-        self.deadline = time.monotonic() + 90
-        return super().request(method, path, body)
+        data_store = getattr(self, 'data_store', None)
+        if data_store is not None and data_store.handles(method, path):
+            return data_store.request(method, path, body)
+        for attempt in range(4):
+            self.deadline = time.monotonic() + 90
+            try:
+                return super().request(method, path, body)
+            except APIError as error:
+                if (not getattr(error, 'rate_limited', False) or attempt == 3 or
+                        not getattr(self, 'wait_on_rate_limit', True)):
+                    raise
+                delay = max(60 * 2**attempt, getattr(error, 'retry_after', 0),
+                    getattr(error, 'rate_reset', 0)-time.time()+2)
+                print(f'API_RATE_LIMIT status={error.status} remaining={getattr(error, "rate_remaining", None)} '
+                      f'reset_epoch={getattr(error, "rate_reset", None)} retry_seconds={delay:.0f}', flush=True)
+                until = time.monotonic()+delay
+                while time.monotonic() < until:
+                    time.sleep(min(30, until-time.monotonic()))
 
     def archive(self, artifact_id):
         self.deadline = time.monotonic() + 180
         return super().archive(artifact_id)
+
+
+class GitDataStore:
+    """Read and publish data through the existing checkout without REST polling."""
+    def __init__(self, root):
+        self.root = Path(root)
+        self.lock = threading.RLock()
+        self.fetched = 0.
+        self.head = None
+
+    def git(self, *arguments, data=None, env=None, check=True):
+        result = subprocess.run(['git', *arguments], cwd=self.root, input=data,
+            capture_output=True, env=env, timeout=180)
+        if check and result.returncode:
+            raise APIError(503, 'Git data transport failed')
+        return result
+
+    def fetch(self, force=False):
+        with self.lock:
+            if self.head is not None and not force and time.monotonic()-self.fetched < 15:
+                return self.head
+            ref = f'refs/remotes/origin/{BRANCH}'
+            self.git('config','remote.origin.promisor','true')
+            self.git('config','remote.origin.partialclonefilter','blob:none')
+            self.git('fetch', '--quiet', '--no-tags', '--depth=1', '--filter=blob:none', 'origin',
+                f'+refs/heads/{BRANCH}:{ref}')
+            self.head = self.git('rev-parse', ref).stdout.decode().strip()
+            self.fetched = time.monotonic()
+            return self.head
+
+    def handles(self, method, path):
+        return (path.startswith('/contents/') and path.endswith('?ref='+BRANCH) or
+            path.startswith(('/git/blobs', '/git/trees', '/git/commits')) or
+            path == '/git/ref/heads/'+BRANCH or path == '/git/refs/heads/'+BRANCH or
+            path.startswith('/git/ref/tags/spectra-') or method == 'POST' and path == '/git/refs')
+
+    def blob(self, sha):
+        raw = self.git('cat-file', 'blob', sha).stdout
+        return dict(sha=sha, size=len(raw), encoding='base64', content=base64.b64encode(raw).decode())
+
+    def request(self, method, path, body=None):
+        if method == 'GET' and path.startswith('/git/ref/tags/spectra-'):
+            ref='refs/tags/'+path.rsplit('/',1)[1]
+            raw=self.git('ls-remote','--refs','origin',ref).stdout
+            if not raw:
+                raise APIError(404,'Missing campaign tag')
+            return dict(object=dict(sha=raw.split()[0].decode()))
+        if method == 'POST' and path == '/git/refs':
+            ref=body['ref']
+            if not re.fullmatch(r'refs/tags/spectra-[A-Za-z0-9-]+',ref):
+                raise ValueError('Only immutable campaign tags can be created')
+            result=self.git('push','--quiet','origin',f"{body['sha']}:{ref}",check=False)
+            if result.returncode:
+                raise APIError(409,'Campaign tag publication failed')
+            return dict(object=dict(sha=body['sha']))
+        if method == 'GET' and path.startswith('/contents/'):
+            name = path[len('/contents/'):].split('?')[0]
+            head = self.fetch()
+            entry = self.git('ls-tree', '-z', head, '--', name).stdout
+            if not entry:
+                raise APIError(404, 'Missing Git data file')
+            sha = entry.split(b'\t', 1)[0].split()[2].decode()
+            return self.blob(sha)
+        if method == 'GET' and path == '/git/ref/heads/'+BRANCH:
+            return dict(object=dict(sha=self.fetch(force=True)))
+        if method == 'GET' and path.startswith('/git/blobs/'):
+            return self.blob(path.rsplit('/',1)[1])
+        if method == 'GET' and path.startswith('/git/commits/'):
+            raw = self.git('cat-file','commit',path.rsplit('/',1)[1]).stdout
+            return dict(tree=dict(sha=raw.splitlines()[0].split()[1].decode()))
+        if method == 'GET' and path.startswith('/git/trees/'):
+            raw = self.git('ls-tree','-z',path.rsplit('/',1)[1]).stdout
+            entries = []
+            for item in raw.split(b'\0'):
+                if not item:
+                    continue
+                metadata, name = item.split(b'\t',1)
+                mode, kind, sha = metadata.decode().split()
+                entries.append(dict(path=name.decode(),mode=mode,type=kind,sha=sha))
+            return dict(tree=entries,truncated=False)
+        if method == 'POST' and path == '/git/blobs':
+            raw = base64.b64decode(body['content'],validate=True)
+            return dict(sha=self.git('hash-object','-w','--stdin',data=raw).stdout.decode().strip())
+        if method == 'POST' and path == '/git/trees':
+            with tempfile.TemporaryDirectory(prefix='spectra-index-') as temporary:
+                env = dict(os.environ,GIT_INDEX_FILE=str(Path(temporary)/'index'))
+                self.git('read-tree',body.get('base_tree','--empty'),env=env)
+                lines = []
+                for entry in body['tree']:
+                    name = entry['path']
+                    if not re.fullmatch(r'[A-Za-z0-9_.-]+',name):
+                        raise ValueError('Invalid data checkpoint path')
+                    lines.append(f"100644 blob {entry['sha']}\t{name}\n")
+                self.git('update-index','--index-info',data=''.join(lines).encode(),env=env)
+                return dict(sha=self.git('write-tree',env=env).stdout.decode().strip())
+        if method == 'POST' and path == '/git/commits':
+            arguments=['-c','user.name=acousticTSbenchmark','-c','user.email=benchmark@users.noreply.github.com',
+                'commit-tree',body['tree']]
+            for parent in body.get('parents',[]):
+                arguments.extend(['-p',parent])
+            return dict(sha=self.git(*arguments,data=(body['message']+'\n').encode()).stdout.decode().strip())
+        if method == 'PATCH' and path == '/git/refs/heads/'+BRANCH:
+            if body.get('force'):
+                raise ValueError('Forced data publication is prohibited')
+            result = self.git('push','--quiet','origin',f"{body['sha']}:refs/heads/{BRANCH}",check=False)
+            if result.returncode:
+                self.fetched = 0.
+                if b'rejected' in result.stderr or b'failed to update ref' in result.stderr:
+                    raise APIError(409,'Concurrent Git data publication')
+                raise APIError(503,'Git data publication failed')
+            self.head, self.fetched = body['sha'], time.monotonic()
+            return dict(object=dict(sha=body['sha']))
+        raise ValueError('Unsupported Git data operation')
 
 
 def pack(value):
@@ -545,7 +677,7 @@ def plan_campaign(api, inputs, directory):
         select_controller(api, plan, state)
         if state['status'] not in ('active', 'paused', 'publishing'):
             raise ValueError('Campaign has no resumable work')
-        if state['waves']:
+        if state['waves'] and state['waves'][-1]['run_id'] not in state.get('artifacts_recovered_runs', []):
             recover_artifacts(api, plan, state['waves'][-1])
     else:
         campaign_id = identifier(os.environ['GITHUB_RUN_ID'])
@@ -714,8 +846,12 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline):
         core.atomic_json(directory / 'checkpoint.json', packet)
         if force or time.monotonic() >= next_publication:
             export_task(plan, task, packet, runtime, directory)
-            packet_sha = put_document(api, path, packet, packet_sha)
-            next_publication = time.monotonic() + 120
+            try:
+                packet_sha = put_document(api, path, packet, packet_sha)
+            except (APIError, OSError, TimeoutError) as error:
+                print(f"CHECKPOINT_DEFERRED {task['name']} error={type(error).__name__} "
+                      f"status={getattr(error, 'status', None)} local_records={len(packet['records'])}", flush=True)
+            next_publication = time.monotonic() + 120 + random.uniform(0,60)
             print(f"CHECKPOINT {task['name']} recorded={len(packet['records'])}/{len(task['cases'])}", flush=True)
     packet['state'] = 'running'
     timeout = plan['datasets'][task['size']]['configuration']['case_timeout_seconds']
@@ -822,15 +958,26 @@ def monitor(api, campaign_id, directory):
     names = {task['name'] for task in plan['tasks'] if task['id'] in wave['tasks']}
     packets = {}
     next_update = 0
+    next_job_poll = 0
+    done = False
     while True:
-        jobs = api.request('GET', f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/jobs?per_page=100")['jobs']
-        workers = [job for job in jobs if job['name'] in names]
-        done = len(workers) == len(names) and all(job['status'] == 'completed' for job in workers)
+        if time.time() >= next_job_poll:
+            try:
+                jobs = api.request('GET', f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/jobs?per_page=100")['jobs']
+                workers = [job for job in jobs if job['name'] in names]
+                done = len(workers) == len(names) and all(job['status'] == 'completed' for job in workers)
+            except APIError as error:
+                if error.status not in (403,429,500,502,503,504):
+                    raise
+                next_job_poll = max(time.time()+60,getattr(error,'rate_reset',0)+2,
+                    time.time()+getattr(error,'retry_after',0))
+                print(f'JOB_STATUS_DEFERRED status={error.status} retry_epoch={next_job_poll:.0f}',flush=True)
         if time.monotonic() >= next_update or done:
             packets = read_packets(api, plan, cache=packets)
+            done = done or all(packets.get(task_id,{}).get('state') == 'complete' for task_id in wave['tasks'])
             try:
                 publish_datasets(api, plan, packets, directory)
-            except PublicationConflict as error:
+            except (PublicationConflict, APIError, OSError, TimeoutError) as error:
                 print(f'PUBLICATION_DEFERRED {error}. Retrying in 30 seconds', flush=True)
                 next_update = time.monotonic() + 30
             else:
@@ -885,6 +1032,15 @@ def finish(api, campaign_id, directory):
         print(f'CONTINUATION_DISPATCHED campaign={campaign_id} unfinished_tasks={len(pending)}', flush=True)
     if state['status'] == 'publication_blocked':
         raise PublicationConflict('All timing tasks are saved, but final dashboard publication requires recovery')
+    following = state.get('next_platform_campaign')
+    if state['status'] == 'complete' and following and not state.get('next_platform_dispatched'):
+        next_inputs = dict(campaign_id=identifier(following['campaign_id']),
+            platform=campaign_platform(following), max_parallel='16')
+        api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
+            dict(ref=state.get('controller_tag', f'spectra-{campaign_id}'), inputs=next_inputs))
+        state['next_platform_dispatched'] = core.utc_now()
+        put_document(api, filename(campaign_id, 'state'), state)
+        print(f"NEXT_PLATFORM_DISPATCHED campaign={next_inputs['campaign_id']} platform={next_inputs['platform']}", flush=True)
 
 
 def main():
@@ -897,6 +1053,9 @@ def main():
     parser.add_argument('--deadline', type=float, default=float('inf'))
     args = parser.parse_args()
     api = LiveGitHub(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], timeout_seconds=90)
+    api.wait_on_rate_limit = args.action != 'monitor'
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        api.data_store = GitDataStore(core.ROOT)
     if args.action == 'plan':
         plan_campaign(api, json.loads(os.environ['SPECTRA_INPUTS']), args.directory)
     elif args.action == 'worker':

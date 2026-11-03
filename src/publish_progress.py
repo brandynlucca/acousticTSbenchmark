@@ -128,7 +128,16 @@ class GitHub:
                 return json.loads(content) if content else None
         except HTTPError as error:
             # Do not include headers, tokens, signed URLs, or request bodies in errors.
-            raise APIError(error.code, error.reason, method=method, path=path) from None
+            failure = APIError(error.code, error.reason, method=method, path=path)
+            for header, attribute in (("x-ratelimit-remaining", "rate_remaining"),
+                                      ("x-ratelimit-reset", "rate_reset"), ("retry-after", "retry_after")):
+                value = error.headers.get(header, "")
+                if value.isdigit():
+                    setattr(failure, attribute, int(value))
+            description = error.read(8192).decode("utf-8", errors="replace").lower()
+            failure.rate_limited = (error.code == 429 or getattr(failure, "rate_remaining", None) == 0
+                                    or error.code == 403 and "rate limit" in description)
+            raise failure from None
         except OSError as error:
             error.method, error.path = method, path
             raise
