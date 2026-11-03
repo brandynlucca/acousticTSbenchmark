@@ -95,8 +95,13 @@ class PlanningTests(unittest.TestCase):
             self.assertTrue(any(call.args[:2]==('POST','/actions/workflows/parallel-spectra.yml/dispatches')
                                 for call in api.request.call_args_list))
             os.environ['GITHUB_RUN_ID']='101'
-            parallel.plan_campaign(api,dict(campaign_id='100'),directory)
+            saved_plan = copy.deepcopy(plan)
+            parallel.plan_campaign(api,dict(campaign_id='100',max_parallel='16'),directory)
             self.assertFalse({item['id'] for item in first}&{item['id'] for item in outputs[-1]['matrix']})
+            self.assertEqual(outputs[-1]['max_parallel'],16)
+            self.assertEqual(documents[parallel.filename('100','plan')],saved_plan)
+            parallel.finish(api,'100',directory)
+            self.assertEqual(api.request.call_args.args[2]['inputs']['max_parallel'],'16')
 
     def test_extend_preserves_recorded_software_and_references(self):
         base, sources, _ = fixture()
@@ -494,18 +499,50 @@ class DocumentStorageTests(unittest.TestCase):
     def api(self):
         import base64
         import hashlib
-        files = {}
+        files, blobs, trees, commits = {}, {}, {}, {}
+        state = {'head': 'initial'}
+        def digest(raw):
+            return hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()
+        def record(raw):
+            return dict(encoding='base64', content=base64.b64encode(raw).decode(), sha=digest(raw))
         def request(method, path, body=None):
-            name = path.removeprefix('/contents/').split('?')[0]
-            if method == 'GET':
+            if method == 'GET' and path.startswith('/contents/'):
+                name = path.removeprefix('/contents/').split('?')[0]
                 if name not in files:
                     raise parallel.APIError(404, 'missing')
-                raw = files[name]
-                return dict(encoding='base64', content=base64.b64encode(raw).decode(),
-                    sha=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest())
-            raw = base64.b64decode(body['content'])
-            files[name] = raw
-            return dict(content=dict(sha=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()))
+                return record(files[name])
+            if method == 'GET' and path.startswith('/git/ref/'):
+                return dict(object=dict(sha=state['head']))
+            if method == 'GET' and path.startswith('/git/commits/'):
+                return dict(tree=dict(sha='current-tree'))
+            if method == 'GET' and path.startswith('/git/trees/'):
+                return dict(tree=[dict(path=name,sha=digest(raw),type='blob') for name,raw in files.items()])
+            if method == 'GET' and path.startswith('/git/blobs/'):
+                return record(blobs[path.split('/')[-1]])
+            if method == 'POST' and path == '/git/blobs':
+                raw = base64.b64decode(body['content'])
+                sha = digest(raw)
+                blobs[sha] = raw
+                return dict(sha=sha)
+            if method == 'POST' and path == '/git/trees':
+                sha = 'tree'+str(len(trees))
+                trees[sha] = dict(files)
+                for entry in body['tree']:
+                    trees[sha][entry['path']] = blobs[entry['sha']]
+                return dict(sha=sha)
+            if method == 'POST' and path == '/git/commits':
+                sha = 'commit'+str(len(commits))
+                commits[sha] = body
+                return dict(sha=sha)
+            if method == 'PATCH' and path.startswith('/git/refs/'):
+                commit = commits[body['sha']]
+                if commit['parents'] != [state['head']]:
+                    raise parallel.APIError(409, 'competing writer')
+                files.clear()
+                files.update(trees[commit['tree']])
+                state['head'] = body['sha']
+                return dict(object=dict(sha=body['sha']))
+            raise AssertionError((method,path))
         return Mock(request=Mock(side_effect=request)), files
 
     def test_large_plan_roundtrip_preserves_all_values_and_immutability(self):
@@ -542,8 +579,11 @@ class DocumentStorageTests(unittest.TestCase):
     def test_failed_part_upload_leaves_no_visible_plan_and_can_resume(self):
         api, files = self.api()
         original = api.request.side_effect
+        uploads = []
         def fail(method, path, body=None):
-            if method == 'PUT' and len(files) == 1:
+            if method == 'POST' and path == '/git/blobs':
+                uploads.append(path)
+            if method == 'POST' and path == '/git/blobs' and len(uploads) == 2:
                 raise parallel.APIError(500, 'interrupted')
             return original(method, path, body)
         api.request.side_effect = fail
@@ -562,6 +602,27 @@ class DocumentStorageTests(unittest.TestCase):
         parallel.put_document(api, 'state.json', value)
         self.assertEqual(set(files), {'state.json'})
         self.assertEqual(parallel.get_document(api, 'state.json')[0], value)
+
+    def test_atomic_publication_rebases_seven_competing_writes(self):
+        import base64
+        api, files = self.api()
+        original = api.request.side_effect
+        conflicts = []
+        def competing(method, path, body=None):
+            if method == 'PATCH' and len(conflicts) < 7:
+                conflicts.append(1)
+                sha = original('POST', '/git/blobs', dict(content=base64.b64encode(str(len(conflicts)).encode()).decode()))['sha']
+                tree = original('POST', '/git/trees', dict(tree=[dict(path='other-platform.json',sha=sha)]))
+                head = original('GET', '/git/ref/heads/data')['object']['sha']
+                commit = original('POST', '/git/commits', dict(tree=tree['sha'],parents=[head]))
+                original(method,path,dict(sha=commit['sha'],force=False))
+                raise parallel.APIError(409,'competing platform')
+            return original(method,path,body)
+        api.request.side_effect = competing
+        with patch.object(parallel.time,'sleep'),patch.object(parallel,'DOCUMENT_PART_BYTES',40):
+            parallel.put_document(api,'plan.json',dict(saved=list(range(25))),immutable=True)
+        self.assertEqual(files['other-platform.json'],b'7')
+        self.assertEqual(parallel.get_document(api,'plan.json')[0],dict(saved=list(range(25))))
 
 
 if __name__ == '__main__': unittest.main()

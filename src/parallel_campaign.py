@@ -134,64 +134,71 @@ def _unpack_document(api, raw):
     return unpack(saved)
 
 
-def _put_document_part(api, raw):
-    digest = hashlib.sha256(raw).hexdigest()
-    path = f'spectra-part-{digest}.part'
+def _document_blob(api, raw):
     expected = hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
-    for attempt in range(6):
-        try:
-            existing = api.request('GET', f'/contents/{path}?ref={BRANCH}')
-        except APIError as error:
-            if error.status != 404:
-                raise
-        else:
-            if existing['sha'] != expected:
-                raise ValueError('Existing spectrum document part has changed')
-            return digest
-        try:
-            result = api.request('PUT', '/contents/' + path, dict(branch=BRANCH,
-                message=f'Save spectrum document part {digest}',
-                content=base64.b64encode(raw).decode()))
-            if result['content']['sha'] != expected:
-                raise ValueError('Saved spectrum document part has a different digest')
-            return digest
-        except APIError as error:
-            if error.status not in (409, 422) or attempt == 5:
-                raise
-            time.sleep(min(2 ** attempt, 8))
-    raise RuntimeError('Unable to save spectrum document part')
+    result = api.request('POST', '/git/blobs', dict(
+        content=base64.b64encode(raw).decode(), encoding='base64'))
+    if result['sha'] != expected:
+        raise ValueError('Saved spectrum document blob has a different digest')
+    return expected
 
 
 def put_document(api, path, value, previous_sha=None, *, immutable=False):
+    previous, actual_sha = get_document(api, path)
+    if immutable and previous is not None:
+        if previous != value:
+            raise ValueError('Refusing to replace an existing spectrum plan')
+        return actual_sha
+    if previous_sha is not None and actual_sha != previous_sha:
+        if previous == value:
+            return actual_sha
+        raise ValueError('Another writer changed this task or campaign state')
+    previous_sha = actual_sha
     raw = (json.dumps(pack(value), separators=(',', ':')) + '\n').encode()
+    entries = []
     if len(raw) > DOCUMENT_PART_BYTES:
-        # Publish the manifest only after every immutable part is durably saved.
-        parts = [_put_document_part(api, raw[offset:offset + DOCUMENT_PART_BYTES])
-                 for offset in range(0, len(raw), DOCUMENT_PART_BYTES)]
+        parts = []
+        for offset in range(0, len(raw), DOCUMENT_PART_BYTES):
+            chunk = raw[offset:offset + DOCUMENT_PART_BYTES]
+            digest = hashlib.sha256(chunk).hexdigest()
+            parts.append(digest)
+            entries.append(dict(path=f'spectra-part-{digest}.part', mode='100644',
+                type='blob', sha=_document_blob(api, chunk)))
         raw = json.dumps(dict(encoding='spectrum-parts-v1', parts=parts, size=len(raw),
             sha256=hashlib.sha256(raw).hexdigest()), separators=(',', ':')).encode()
-    for attempt in range(6):
-        if previous_sha is None:
-            previous, previous_sha = get_document(api, path)
-            if previous is not None and immutable:
-                if previous != value:
-                    raise ValueError('Refusing to replace an existing spectrum plan')
-                return previous_sha
-        body = dict(branch=BRANCH, message=f'Checkpoint {path}',
-                    content=base64.b64encode(raw).decode())
-        if previous_sha:
-            body['sha'] = previous_sha
+    proposed_sha = _document_blob(api, raw)
+    entries.append(dict(path=path, mode='100644', type='blob', sha=proposed_sha))
+    # Upload blobs independently, then attach every part and the manifest atomically.
+    for attempt in range(12):
+        head, tree_sha, existing = _progress_tree(api)
+        current_sha = existing.get(path, {}).get('sha')
+        if current_sha == proposed_sha:
+            return proposed_sha
+        if current_sha != previous_sha:
+            raise ValueError('Another writer changed this task or campaign state')
+        body = dict(tree=entries)
+        if tree_sha:
+            body['base_tree'] = tree_sha
+        tree = api.request('POST', '/git/trees', body)
+        commit = api.request('POST', '/git/commits', dict(message=f'Checkpoint {path}',
+            tree=tree['sha'], parents=[head] if head else []))
         try:
-            return api.request('PUT', '/contents/' + path, body)['content']['sha']
+            if head:
+                api.request('PATCH', '/git/refs/heads/' + BRANCH,
+                    dict(sha=commit['sha'], force=False))
+            else:
+                api.request('POST', '/git/refs',
+                    dict(ref='refs/heads/' + BRANCH, sha=commit['sha']))
+            return proposed_sha
         except APIError as error:
-            if error.status not in (409, 422) or attempt == 5:
+            if error.status not in (409, 422) or attempt == 11:
                 raise
-            current, current_sha = get_document(api, path)
-            if current == value:
-                return current_sha
-            if current_sha != previous_sha:
-                raise ValueError('Another writer changed this task or campaign state') from error
-            time.sleep(min(2 ** attempt, 8))
+            latest, _, _ = _progress_tree(api)
+            if latest == head:
+                raise
+            delay = random.uniform(.5, min(8., 2. ** attempt))
+            print(f'CHECKPOINT_RETRY conflict={attempt + 1}/12 delay_seconds={delay:.2f}', flush=True)
+            time.sleep(delay)
     raise RuntimeError('Unable to checkpoint spectrum state')
 
 
@@ -606,8 +613,11 @@ def plan_campaign(api, inputs, directory):
     packets = read_packets(api, plan)
     completed = {task_id for task_id, packet in packets.items() if packet.get('state') == 'complete'}
     candidates = [task for task in plan['tasks'] if task['id'] not in completed | set(state['blocked'])]
-    wave = candidates[:plan['max_parallel']]
-    state.update(status='active', completed=sorted(completed))
+    parallel = int(inputs.get('max_parallel') or state.get('max_parallel', plan['max_parallel']))
+    if not 1 <= parallel <= 16:
+        raise ValueError('Concurrent workers must be between 1 and 16')
+    wave = candidates[:parallel]
+    state.update(status='active', completed=sorted(completed), max_parallel=parallel)
     state['waves'].append(dict(run_id=int(os.environ['GITHUB_RUN_ID']),
                                tasks=[task['id'] for task in wave], started_at=core.utc_now()))
     put_document(api, filename(campaign_id, 'state'), state, state_sha)
@@ -615,7 +625,7 @@ def plan_campaign(api, inputs, directory):
     core.atomic_json(directory / 'plan.json', plan)
     core.atomic_json(directory / 'wave.json', state['waves'][-1])
     write_outputs(dict(campaign_id=campaign_id, matrix=[dict(id=task['id'], name=task['name'],
-        software=task['software']) for task in wave], has_work=bool(wave), max_parallel=plan['max_parallel'],
+        software=task['software']) for task in wave], has_work=bool(wave), max_parallel=parallel,
         budget=plan['budget_minutes'], platform=campaign_platform(plan),
         runner=PLATFORMS[campaign_platform(plan)][0]))
 
@@ -868,6 +878,8 @@ def finish(api, campaign_id, directory):
         continuation = dict(campaign_id=campaign_id)
         if 'platform' in plan:
             continuation['platform'] = campaign_platform(plan)
+        if 'max_parallel' in state:
+            continuation['max_parallel'] = str(state['max_parallel'])
         api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
                     dict(ref=state.get('controller_tag', f'spectra-{campaign_id}'), inputs=continuation))
         print(f'CONTINUATION_DISPATCHED campaign={campaign_id} unfinished_tasks={len(pending)}', flush=True)
