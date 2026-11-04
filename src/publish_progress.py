@@ -698,11 +698,13 @@ def publish(api, payload):
             if error.status not in (409, 422):
                 raise
             latest, _, _ = _progress_tree(api)
-            if latest == head:
+            # A reference-lock conflict can precede a visible branch-head change.
+            if latest == head and error.status != 409:
                 raise
             if attempt < 7:
                 delay = random.uniform(.5, min(8., 2. ** attempt))
-                print(f"PUBLICATION_RETRY conflict={attempt + 1}/8 delay_seconds={delay:.2f}", flush=True)
+                print(f"PUBLICATION_RETRY conflict={attempt + 1}/8 status={error.status} "
+                      f"head_changed={latest != head} delay_seconds={delay:.2f}", flush=True)
                 time.sleep(delay)
     raise PublicationConflict("Data branch remained busy. Timing checkpoints are unchanged")
 
