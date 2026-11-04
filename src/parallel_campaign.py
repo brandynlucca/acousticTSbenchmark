@@ -37,7 +37,7 @@ DOCUMENT_PART_BYTES = 4 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
-CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py',
+CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py', 'src/dataset.py',
                     'tests/test_parallel_campaign.py', 'tests/test_publish_progress.py'}
 
 
@@ -275,6 +275,10 @@ def _document_blob(api, raw):
     return expected
 
 
+class DocumentConflict(ValueError):
+    """A competing writer changed the expected checkpoint revision."""
+
+
 def put_document(api, path, value, previous_sha=None, *, immutable=False):
     previous, actual_sha = get_document(api, path)
     if immutable and previous is not None:
@@ -284,7 +288,7 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
     if previous_sha is not None and actual_sha != previous_sha:
         if previous == value:
             return actual_sha
-        raise ValueError('Another writer changed this task or campaign state')
+        raise DocumentConflict('Another writer changed this task or campaign state')
     previous_sha = actual_sha
     raw = (json.dumps(pack(value), separators=(',', ':')) + '\n').encode()
     entries = []
@@ -307,7 +311,7 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
         if current_sha == proposed_sha:
             return proposed_sha
         if current_sha != previous_sha:
-            raise ValueError('Another writer changed this task or campaign state')
+            raise DocumentConflict('Another writer changed this task or campaign state')
         body = dict(tree=entries)
         if tree_sha:
             body['base_tree'] = tree_sha
@@ -326,12 +330,60 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
             if error.status not in (409, 422) or attempt == 11:
                 raise
             latest, _, _ = _progress_tree(api)
-            if latest == head:
+            if latest == head and error.status != 409:
                 raise
             delay = random.uniform(.5, min(8., 2. ** attempt))
             print(f'CHECKPOINT_RETRY conflict={attempt + 1}/12 delay_seconds={delay:.2f}', flush=True)
             time.sleep(delay)
     raise RuntimeError('Unable to checkpoint spectrum state')
+
+
+def queue_filename(campaign_id, run_id):
+    return f'spectra-{identifier(campaign_id)}-queue-{identifier(run_id)}.json'
+
+
+def change_queue(api, campaign_id, run_id, worker_id, completed_task=None, outcome=None):
+    """Claim or finish a whole spectrum with an atomic ownership update."""
+    path = queue_filename(campaign_id, run_id)
+    for attempt in range(32):
+        queue, sha = get_document(api, path)
+        if (queue is None or queue.get('campaign_id') != campaign_id or
+                queue.get('run_id') != int(run_id) or worker_id not in queue['owners']):
+            raise ValueError('Worker does not belong to the saved spectrum queue')
+        if completed_task is None:
+            owned = queue['owners'][worker_id]
+            if owned is not None:
+                return owned
+            if not queue['pending']:
+                return None
+            selected = queue['pending'].pop(0)
+            if selected in queue['claims']:
+                raise ValueError('Spectrum queue contains an already claimed task')
+            queue['claims'][selected] = worker_id
+            queue['owners'][worker_id] = selected
+        else:
+            if queue['claims'].get(completed_task) != worker_id:
+                raise ValueError('A worker cannot complete another worker spectrum')
+            if queue['finished'].get(completed_task) == outcome:
+                return completed_task
+            if queue['owners'][worker_id] != completed_task:
+                raise ValueError('Spectrum completion differs from the current claim')
+            queue['finished'][completed_task] = outcome
+            if outcome == 'complete':
+                queue['owners'][worker_id] = None
+            selected = completed_task
+        queue['updated_at'] = core.utc_now()
+        try:
+            put_document(api, path, queue, sha)
+            return selected
+        except DocumentConflict:
+            pass
+        except (APIError, OSError, TimeoutError) as error:
+            if isinstance(error, APIError) and error.status not in (409, 422, 500, 502, 503, 504):
+                raise
+        if attempt == 31:
+            raise PublicationConflict('Spectrum claim remained busy. Saved measurements are unchanged')
+        time.sleep(random.uniform(.1, min(2., .2 * (attempt + 1))))
 
 
 def csv_values(value, cast=str):
@@ -449,14 +501,17 @@ def validate_packet(plan, task, packet):
 def recover_artifacts(api, plan, wave):
     """Recover final local checkpoints when a worker lost its publication connection."""
     tasks = {task['id']: task for task in plan['tasks'] if task['id'] in wave['tasks']}
+    queue = get_document(api, wave['queue'])[0] if wave.get('queue') else None
     for artifact in all_artifacts(api, wave['run_id']):
         match = re.fullmatch(r'spectrum-([a-f0-9]{24})-([1-9][0-9]*)', artifact['name'])
         if not match or match[1] not in tasks or artifact.get('expired'):
             continue
+        if queue is not None and match[1] not in wave['workers']:
+            raise ValueError('Recovery artifact belongs to an unknown worker')
         task = tasks[match[1]]
         path = filename(plan['campaign_id'], 'task', task['id'])
         current, sha = get_document(api, path)
-        if current and current.get('state') == 'complete':
+        if not wave.get('queue') and current and current.get('state') == 'complete':
             continue
         raw = api.archive(artifact['id'])
         if artifact.get('digest') and artifact['digest'] != 'sha256:' + hashlib.sha256(raw).hexdigest():
@@ -465,21 +520,39 @@ def recover_artifacts(api, plan, wave):
             entries = [entry for entry in archive.infolist() if Path(entry.filename).name == 'checkpoint.json']
             if not entries:
                 continue
-            if len(entries) != 1 or entries[0].file_size > MAX_BYTES:
+            if (len(entries) > len(tasks) or (not wave.get('queue') and len(entries) != 1)
+                    or any(entry.file_size > MAX_BYTES for entry in entries)):
                 raise ValueError('Ambiguous or oversized recovery checkpoint')
-            saved = json.loads(archive.read(entries[0]))
-        validate_packet(plan, task, saved)
-        if current:
-            validate_packet(plan, task, current)
-            for identity, row in current['records'].items():
-                if identity in saved['records'] and saved['records'][identity] != row:
-                    raise ValueError('Recovery artifact conflicts with a published observation')
-                saved['records'][identity] = row
-            saved['environments'].update(current['environments'])
-        if len(saved['records']) == len(task['cases']):
-            saved['state'] = 'complete'
-        validate_packet(plan, task, saved)
-        put_document(api, path, saved, sha)
+            saved_packets = [json.loads(archive.read(entry)) for entry in entries]
+        seen = set()
+        for saved in saved_packets:
+            task_id = saved.get('task_id')
+            if task_id not in tasks or task_id in seen or (not wave.get('queue') and task_id != match[1]):
+                raise ValueError('Recovery artifact contains an unexpected or duplicate spectrum')
+            if queue is not None and queue['claims'].get(task_id) != match[1]:
+                raise ValueError('Recovery spectrum differs from the saved worker ownership')
+            seen.add(task_id)
+            task = tasks[task_id]
+            path = filename(plan['campaign_id'], 'task', task_id)
+            current, sha = get_document(api, path)
+            restore_packet(api, plan, task, saved, current, sha)
+
+
+def restore_packet(api, plan, task, saved, current, sha):
+    """Merge a recovered spectrum without replacing any published observation."""
+    validate_packet(plan, task, saved)
+    if current:
+        validate_packet(plan, task, current)
+        for identity, row in current['records'].items():
+            if identity in saved['records'] and saved['records'][identity] != row:
+                raise ValueError('Recovery artifact conflicts with a published observation')
+            saved['records'][identity] = row
+        saved['environments'].update(current['environments'])
+    if len(saved['records']) == len(task['cases']):
+        saved['state'] = 'complete'
+    validate_packet(plan, task, saved)
+    if current != saved:
+        put_document(api, filename(plan['campaign_id'], 'task', task['id']), saved, sha)
 
 
 def merge_dataset(dataset, tasks, packets):
@@ -663,6 +736,7 @@ def select_controller(api, plan, state):
     state.setdefault('controller_history', []).append(dict(previous=previous, current=current,
         files=[item['filename'] for item in files], changed_at=core.utc_now()))
     state.update(controller_ref=current, controller_tag=tag)
+    state.pop('controller_upgrade_pending', None)
 
 
 def plan_campaign(api, inputs, directory):
@@ -748,16 +822,38 @@ def plan_campaign(api, inputs, directory):
     parallel = int(inputs.get('max_parallel') or state.get('max_parallel', plan['max_parallel']))
     if not 1 <= parallel <= 16:
         raise ValueError('Concurrent workers must be between 1 and 16')
-    wave = candidates[:parallel]
+    workers = candidates[:parallel]
+    run_id = int(os.environ['GITHUB_RUN_ID'])
+    queue = dict(campaign_id=campaign_id, run_id=run_id,
+        pending=[task['id'] for task in candidates[parallel:]],
+        owners={task['id']: task['id'] for task in workers},
+        claims={task['id']: task['id'] for task in workers}, finished={})
+    queue_path = queue_filename(campaign_id, run_id)
+    saved_wave = next((wave for wave in state['waves'] if wave['run_id'] == run_id), None)
+    if saved_wave is not None:
+        if saved_wave.get('queue') != queue_path:
+            raise ValueError('Continue legacy allocations with a new workflow run')
+        existing_queue, _ = get_document(api, queue_path)
+        if existing_queue is None or set(existing_queue['owners']) != set(saved_wave['workers']):
+            raise ValueError('Saved worker slots differ from the spectrum queue')
+        tasks_by_id = {task['id']: task for task in plan['tasks']}
+        candidates = [tasks_by_id[task_id] for task_id in saved_wave['tasks']]
+        workers = [tasks_by_id[task_id] for task_id in saved_wave['workers']]
+    else:
+        put_document(api, queue_path, queue, immutable=True)
+    programs = ','.join(sorted({task['software'] for task in candidates}))
+    matrix = [dict(id=task['id'], name=f'{programs} spectrum worker {index + 1:02d}',
+                   software=programs) for index, task in enumerate(workers)]
     state.update(status='active', completed=sorted(completed), max_parallel=parallel)
-    state['waves'].append(dict(run_id=int(os.environ['GITHUB_RUN_ID']),
-                               tasks=[task['id'] for task in wave], started_at=core.utc_now()))
+    if saved_wave is None:
+        state['waves'].append(dict(run_id=run_id, tasks=[task['id'] for task in candidates],
+            queue=queue_path, workers=[task['id'] for task in workers],
+            worker_names=[item['name'] for item in matrix], started_at=core.utc_now()))
     put_document(api, filename(campaign_id, 'state'), state, state_sha)
     directory.mkdir(parents=True, exist_ok=True)
     core.atomic_json(directory / 'plan.json', plan)
     core.atomic_json(directory / 'wave.json', state['waves'][-1])
-    write_outputs(dict(campaign_id=campaign_id, matrix=[dict(id=task['id'], name=task['name'],
-        software=task['software']) for task in wave], has_work=bool(wave), max_parallel=parallel,
+    write_outputs(dict(campaign_id=campaign_id, matrix=matrix, has_work=bool(workers), max_parallel=parallel,
         budget=plan['budget_minutes'], platform=campaign_platform(plan),
         runner=PLATFORMS[campaign_platform(plan)][0]))
 
@@ -813,9 +909,12 @@ def export_task(plan, task, packet, runtime, directory):
         core.atomic_json(directory / 'environments' / f'{invocation}.json', environment)
 
 
-def run_task(api, campaign_id, task_id, runtime_path, directory, deadline):
-    plan, _ = get_document(api, filename(campaign_id, 'plan'))
-    state, _ = get_document(api, filename(campaign_id, 'state'))
+def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, context=None):
+    if context is None:
+        plan, _ = get_document(api, filename(campaign_id, 'plan'))
+        state, _ = get_document(api, filename(campaign_id, 'state'))
+    else:
+        plan, state = context
     if (state or {}).get('controller_ref', plan['source_ref']) != os.environ['GITHUB_SHA']:
         raise ValueError('Worker source differs from the pinned campaign')
     task = next(task for task in plan['tasks'] if task['id'] == task_id)
@@ -887,6 +986,50 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline):
         if packet['state'] == 'running':
             packet['state'] = 'interrupted'
         checkpoint(True)
+    return packet
+
+
+def run_worker(api, campaign_id, worker_id, runtime_path, directory, deadline):
+    """Keep one serial measurement stream busy across complete spectra."""
+    plan, _ = get_document(api, filename(campaign_id, 'plan'))
+    state, _ = get_document(api, filename(campaign_id, 'state'))
+    if (state or {}).get('controller_ref', plan['source_ref']) != os.environ['GITHUB_SHA']:
+        raise ValueError('Worker source differs from the pinned campaign')
+    run_id = int(os.environ['GITHUB_RUN_ID'])
+    wave = next(item for item in reversed(state['waves']) if item['run_id'] == run_id)
+    if not wave.get('queue'):
+        return run_task(api, campaign_id, worker_id, runtime_path, directory, deadline,
+                        context=(plan, state))
+    if worker_id not in wave['workers']:
+        raise ValueError('Unknown spectrum worker slot')
+    directory.mkdir(parents=True, exist_ok=True)
+    bundle_path = directory / 'spectrum-bundle.json'
+    bundle = core.read_json(bundle_path) if bundle_path.exists() else dict(
+        schema_version=1, campaign_id=campaign_id, worker_id=worker_id, task_ids=[])
+    if bundle.get('campaign_id') != campaign_id or bundle.get('worker_id') != worker_id:
+        raise ValueError('Local spectrum bundle belongs to another worker')
+    tasks = {task['id']: task for task in plan['tasks']}
+    minimum_timeout = min((plan['datasets'][task['size']]['configuration']['case_timeout_seconds']
+                           for task in plan['tasks'] if task['id'] in wave['tasks']), default=0)
+    while time.time() + minimum_timeout + 60 < deadline:
+        task_id = change_queue(api, campaign_id, run_id, worker_id)
+        if task_id is None:
+            print(f'QUEUE_EMPTY worker={worker_id}', flush=True)
+            return
+        if task_id not in wave['tasks']:
+            raise ValueError('Claimed spectrum is outside the saved allocation')
+        if task_id not in bundle['task_ids']:
+            bundle['task_ids'].append(task_id)
+            core.atomic_json(bundle_path, bundle)
+        task = tasks[task_id]
+        print(f'SPECTRUM_CLAIMED worker={worker_id} task={task["name"]}', flush=True)
+        packet = run_task(api, campaign_id, task_id, runtime_path, directory / task_id,
+                          deadline, context=(plan, state))
+        change_queue(api, campaign_id, run_id, worker_id, task_id, packet['state'])
+        print(f'SPECTRUM_FINISHED worker={worker_id} task={task["name"]} state={packet["state"]}', flush=True)
+        if packet['state'] != 'complete':
+            return
+    print(f'WORKER_BUDGET_REACHED worker={worker_id}', flush=True)
 
 
 def attach_latest_references(api, rows, size):
@@ -955,7 +1098,8 @@ def monitor(api, campaign_id, directory):
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
     state, _ = get_document(api, filename(campaign_id, 'state'))
     wave = next(item for item in reversed(state['waves']) if item['run_id'] == int(os.environ['GITHUB_RUN_ID']))
-    names = {task['name'] for task in plan['tasks'] if task['id'] in wave['tasks']}
+    names = set(wave.get('worker_names') or
+                [task['name'] for task in plan['tasks'] if task['id'] in wave['tasks']])
     packets = {}
     next_update = 0
     next_job_poll = 0
@@ -993,7 +1137,13 @@ def finish(api, campaign_id, directory):
     wave = next(item for item in reversed(state['waves']) if item['run_id'] == int(os.environ['GITHUB_RUN_ID']))
     recover_artifacts(api, plan, wave)
     packets = read_packets(api, plan)
-    for task_id in wave['tasks']:
+    attempted = wave['tasks']
+    if wave.get('queue'):
+        queue, _ = get_document(api, wave['queue'])
+        attempted = list(queue['claims'])
+        if set(attempted) - set(wave['tasks']):
+            raise ValueError('Spectrum queue contains claims outside the saved selection')
+    for task_id in attempted:
         packet = packets.get(task_id, {})
         previous = state['attempts'].get(task_id, dict(recorded=0, stalled=0))
         count = len(packet.get('records', {}))
@@ -1059,7 +1209,7 @@ def main():
     if args.action == 'plan':
         plan_campaign(api, json.loads(os.environ['SPECTRA_INPUTS']), args.directory)
     elif args.action == 'worker':
-        run_task(api, args.campaign_id, args.task_id, args.runtime, args.directory, args.deadline)
+        run_worker(api, args.campaign_id, args.task_id, args.runtime, args.directory, args.deadline)
     elif args.action == 'monitor':
         monitor(api, args.campaign_id, args.directory)
     else:

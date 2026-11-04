@@ -417,6 +417,116 @@ def _transaction(connection):
         connection.execute("RELEASE artifact_import")
 
 
+def _artifact_groups(archive, files):
+    """Validate worker bundles while preserving the legacy artifact layout."""
+    descriptor = _find(files, "spectrum-bundle.json")
+    if descriptor is None:
+        return [files]
+    bundle = _object(archive, descriptor)
+    task_ids = bundle.get("task_ids")
+    if (bundle.get("schema_version") != 1 or not isinstance(task_ids, list)
+            or len(task_ids) > 10000
+            or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{24}", value) for value in task_ids)
+            or len(task_ids) != len(set(task_ids))
+            or not re.fullmatch(r"[a-f0-9]{24}", str(bundle.get("worker_id", "")))
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", str(bundle.get("campaign_id", "")))):
+        raise ValueError("Invalid spectrum bundle descriptor")
+    root = PurePosixPath(descriptor).parent
+    groups, covered = [], set()
+    for task_id in task_ids:
+        prefix = str(root / task_id) + "/"
+        group = {name: entry for name, entry in files.items() if name.startswith(prefix)}
+        manifest = _find(group, "manifest.json")
+        results = _find(group, "results.json")
+        if bool(manifest) != bool(results):
+            raise ValueError("Incomplete spectrum export in worker bundle")
+        covered.update(group)
+        if manifest:
+            groups.append(group)
+    for name in set(files) - covered:
+        if PurePosixPath(name).name in ("manifest.json", "results.json", "checkpoint.json",
+                                       "retained-results.json", "references.json", "published-references.json"):
+            raise ValueError("Worker bundle contains an undeclared spectrum")
+    return groups
+
+
+def _import_files(connection, archive, files, artifact_id, run_id, name, repository):
+    """Import one validated spectrum or legacy file group."""
+    manifest_name = _find(files, "manifest.json")
+    result_name = _find(files, "results.json")
+    sidecar_name = _find(files, "retained-results.json")
+    baseline_name = _find(files, "refresh-campaign.json")
+    source_name = _find(files, "benchmark-source.json")
+    reference_names = [entry for entry in files if PurePosixPath(entry).name in
+                       ("references.json", "published-references.json")]
+    manifest = _object(archive, manifest_name, omit=("reference_requests",)) if manifest_name else None
+    baseline = _object(archive, baseline_name) if baseline_name else None
+    platform = _platform(name, manifest)
+    if baseline and (baseline.get("repository") != repository or baseline.get("platform") != platform):
+        raise ValueError("Baseline metadata belongs to another repository or platform")
+    if source_name:
+        source = _object(archive, source_name)
+        if source.get("repository", repository) != repository:
+            raise ValueError("Artifact source metadata belongs to another repository")
+    if manifest and PLATFORMS.get(manifest["platform"]) != platform:
+        raise ValueError("Artifact name and manifest platform disagree")
+    if (result_name or sidecar_name) and platform is None:
+        raise ValueError("Timing artifact has no identifiable platform")
+    if result_name and manifest is None:
+        raise ValueError("Timing case table lacks its historical manifest")
+    if manifest:
+        _manifest(connection, manifest, artifact_id)
+    if sidecar_name:
+        sidecar_meta = _object(archive, sidecar_name, omit=("rows", "provenance", "reused_records"))
+        if sidecar_meta.get("schema_version") != 1:
+            raise ValueError("Unsupported comparison metadata schema")
+        for proof in _stream_items(archive, sidecar_name, "provenance.item", omit=("reference_requests",)):
+            _proof(connection, proof, artifact_id)
+    for entry in files:
+        path = PurePosixPath(entry)
+        if path.parent.name == "environments" and path.suffix == ".json":
+            _environment(connection, platform, path.stem, _object(archive, entry))
+    expected_cases = set(manifest["cases"]) if manifest else None
+    seen = set()
+    if result_name:
+        prefix = PurePosixPath(result_name).parent
+        for row in _stream_items(archive, result_name, "item"):
+            identity = row.get("case_id")
+            if identity not in expected_cases or identity in seen:
+                raise ValueError("Case table differs from its manifest or repeats a case")
+            seen.add(identity)
+            software = row.get("software")
+            source_sha = manifest["sources"].get("sources", {}).get(software, {}).get("sha")
+            raw_name = str(prefix / "records" / f"{identity}.json")
+            raw = _object(archive, raw_name) if raw_name in files else None
+            _observation(connection, row, platform, artifact_id, run_id, raw=raw, expected_source=source_sha)
+            connection.execute("INSERT OR IGNORE INTO planned_cases VALUES (?, ?, ?, ?)",
+                               (artifact_id, identity, platform, source_sha))
+        if seen != expected_cases:
+            raise ValueError("Case table is incomplete")
+    if sidecar_name:
+        for row in _stream_items(archive, sidecar_name, "rows.item"):
+            _observation(connection, row, platform, artifact_id, run_id)
+        # Reused records are an object keyed by case ID, not an array.
+        import ijson
+        with archive.open(sidecar_name) as source:
+            for identity, row in ijson.kvitems(source, "reused_records", use_float=True):
+                if row.get("case_id") != identity:
+                    raise ValueError("Reused case key differs from its record")
+                raw_name = str(PurePosixPath(sidecar_name).parent / "records" / f"{identity}.json")
+                raw = _object(archive, raw_name) if raw_name in files else None
+                _observation(connection, row, platform, artifact_id, run_id, raw=raw)
+    for reference_name in reference_names:
+        for reference in _stream_items(archive, reference_name, "references.item"):
+            _reference(connection, reference, artifact_id)
+    # Some reference artifacts include individual cache records as well.
+    if not reference_names and not result_name and not sidecar_name:
+        for entry in files:
+            path = PurePosixPath(entry)
+            if path.parent.name in ("references", "reference-cache") and re.fullmatch(r"[a-f0-9]{64}\.json", path.name):
+                _reference(connection, _object(archive, entry), artifact_id)
+
+
 def import_artifact(connection, archive_path, artifact_metadata, repository):
     """Atomically import an artifact, deduplicating copied records across runs.
 
@@ -439,82 +549,11 @@ def import_artifact(connection, archive_path, artifact_metadata, repository):
     before = database_summary(connection)
     with _transaction(connection), zipfile.ZipFile(archive_path) as archive:
         files = _files(archive)
-        manifest_name = _find(files, "manifest.json")
-        result_name = _find(files, "results.json")
-        sidecar_name = _find(files, "retained-results.json")
-        baseline_name = _find(files, "refresh-campaign.json")
-        source_name = _find(files, "benchmark-source.json")
-        reference_names = [entry for entry in files if PurePosixPath(entry).name in
-                           ("references.json", "published-references.json")]
-        manifest = _object(archive, manifest_name, omit=("reference_requests",)) if manifest_name else None
-        baseline = _object(archive, baseline_name) if baseline_name else None
-        platform = _platform(name, manifest)
-        if baseline and (baseline.get("repository") != repository or baseline.get("platform") != platform):
-            raise ValueError("Baseline metadata belongs to another repository or platform")
-        if source_name:
-            source = _object(archive, source_name)
-            if source.get("repository", repository) != repository:
-                raise ValueError("Artifact source metadata belongs to another repository")
-        if manifest and PLATFORMS.get(manifest["platform"]) != platform:
-            raise ValueError("Artifact name and manifest platform disagree")
-        if (result_name or sidecar_name) and platform is None:
-            raise ValueError("Timing artifact has no identifiable platform")
-        if result_name and manifest is None:
-            raise ValueError("Timing case table lacks its historical manifest")
         connection.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (artifact_id, repository, run_id, name, metadata.get("created_at"), digest,
              datetime.now(timezone.utc).isoformat(timespec="seconds"), _json(metadata)))
-        if manifest:
-            _manifest(connection, manifest, artifact_id)
-        if sidecar_name:
-            sidecar_meta = _object(archive, sidecar_name, omit=("rows", "provenance", "reused_records"))
-            if sidecar_meta.get("schema_version") != 1:
-                raise ValueError("Unsupported comparison metadata schema")
-            for proof in _stream_items(archive, sidecar_name, "provenance.item", omit=("reference_requests",)):
-                _proof(connection, proof, artifact_id)
-        for entry in files:
-            path = PurePosixPath(entry)
-            if path.parent.name == "environments" and path.suffix == ".json":
-                _environment(connection, platform, path.stem, _object(archive, entry))
-        expected_cases = set(manifest["cases"]) if manifest else None
-        seen = set()
-        if result_name:
-            prefix = PurePosixPath(result_name).parent
-            for row in _stream_items(archive, result_name, "item"):
-                identity = row.get("case_id")
-                if identity not in expected_cases or identity in seen:
-                    raise ValueError("Case table differs from its manifest or repeats a case")
-                seen.add(identity)
-                software = row.get("software")
-                source_sha = manifest["sources"].get("sources", {}).get(software, {}).get("sha")
-                raw_name = str(prefix / "records" / f"{identity}.json")
-                raw = _object(archive, raw_name) if raw_name in files else None
-                _observation(connection, row, platform, artifact_id, run_id, raw=raw, expected_source=source_sha)
-                connection.execute("INSERT OR IGNORE INTO planned_cases VALUES (?, ?, ?, ?)",
-                                   (artifact_id, identity, platform, source_sha))
-            if seen != expected_cases:
-                raise ValueError("Case table is incomplete")
-        if sidecar_name:
-            for row in _stream_items(archive, sidecar_name, "rows.item"):
-                _observation(connection, row, platform, artifact_id, run_id)
-            # Reused records are an object keyed by case ID, not an array.
-            import ijson
-            with archive.open(sidecar_name) as source:
-                for identity, row in ijson.kvitems(source, "reused_records", use_float=True):
-                    if row.get("case_id") != identity:
-                        raise ValueError("Reused case key differs from its record")
-                    raw_name = str(PurePosixPath(sidecar_name).parent / "records" / f"{identity}.json")
-                    raw = _object(archive, raw_name) if raw_name in files else None
-                    _observation(connection, row, platform, artifact_id, run_id, raw=raw)
-        for reference_name in reference_names:
-            for reference in _stream_items(archive, reference_name, "references.item"):
-                _reference(connection, reference, artifact_id)
-        # Some reference artifacts include individual cache records as well.
-        if not reference_names and not result_name and not sidecar_name:
-            for entry in files:
-                path = PurePosixPath(entry)
-                if path.parent.name in ("references", "reference-cache") and re.fullmatch(r"[a-f0-9]{64}\.json", path.name):
-                    _reference(connection, _object(archive, entry), artifact_id)
+        for group in _artifact_groups(archive, files):
+            _import_files(connection, archive, group, artifact_id, run_id, name, repository)
     after = database_summary(connection)
     return dict(imported=True, skipped=False, artifact_id=artifact_id,
         observations=after["observations"] - before["observations"],
@@ -576,3 +615,4 @@ def database_summary(connection):
     result["semimajor_m"] = [row[0] for row in connection.execute("SELECT DISTINCT semimajor_m FROM cases ORDER BY semimajor_m")]
     result["latest_measurement_at"] = connection.execute("SELECT max(finished_at) FROM observations").fetchone()[0]
     return result
+
