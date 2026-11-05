@@ -279,6 +279,168 @@ def main():
 
 """Pending-only queue additions for the existing reference_store runner."""
 
+class ReferenceGitTransport:
+    """Use the existing checkout for reference data, outside the REST request quota."""
+    def __init__(self, root):
+        import threading
+        from parallel_campaign import GitDataStore
+        self.store = GitDataStore(root)
+        self.lock = threading.RLock()
+        self.heads = {}
+        self.fetched = {}
+        self.store.git('config', 'remote.origin.promisor', 'true')
+        self.store.git('config', 'remote.origin.partialclonefilter', 'blob:limit=1m')
+
+    def handles(self, method, path, body=None):
+        branches = ('benchmark-data', 'reference-data', 'local-reference-data')
+        if path.startswith('/contents/'):
+            branch = (body or {}).get('branch') if method == 'PUT' else path.partition('?ref=')[2]
+            return branch in branches
+        if path.startswith(('/git/blobs', '/git/trees', '/git/commits')):
+            return True
+        return any(path in ('/git/ref/heads/' + b, '/git/refs/heads/' + b) for b in branches)
+
+    def fetch(self, branch, force=False):
+        import time
+        with self.lock:
+            if not force and branch in self.heads and time.monotonic() - self.fetched.get(branch, 0) < 15:
+                return self.heads[branch]
+            ref = 'refs/remotes/origin/' + branch
+            self.store.git('fetch', '--quiet', '--no-tags', '--depth=1', '--filter=blob:limit=1m',
+                'origin', f'+refs/heads/{branch}:{ref}')
+            head = self.store.git('rev-parse', ref).stdout.decode().strip()
+            self.heads[branch], self.fetched[branch] = head, time.monotonic()
+            return head
+
+    def tree(self, tree, recursive=False):
+        args = ['ls-tree', '-z'] + (['-r'] if recursive else []) + [tree]
+        rows = []
+        for item in self.store.git(*args).stdout.split(b'\0'):
+            if item:
+                meta, name = item.split(b'\t', 1)
+                mode, kind, sha = meta.decode().split()
+                rows.append(dict(path=name.decode(), mode=mode, type=kind, sha=sha))
+        return rows
+
+    def create_tree(self, body):
+        import tempfile
+        import re
+        with tempfile.TemporaryDirectory(prefix='reference-index-') as directory:
+            env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / 'index'))
+            self.store.git('read-tree', body.get('base_tree', '--empty'), env=env)
+            rows = []
+            for item in body['tree']:
+                path = item['path']
+                if not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', path) or any(p in ('.','..') for p in path.split('/')):
+                    raise ValueError('Invalid reference data path')
+                sha = item.get('sha')
+                if sha is None:
+                    sha = self.store.git('hash-object', '-w', '--stdin', data=item['content'].encode()).stdout.decode().strip()
+                rows.append(f'100644 blob {sha}\t{path}\n')
+            self.store.git('update-index', '--index-info', data=''.join(rows).encode(), env=env)
+            return self.store.git('write-tree', env=env).stdout.decode().strip()
+
+    def commit(self, body):
+        command = ['-c','user.name=acousticTSbenchmark','-c','user.email=benchmark@users.noreply.github.com',
+                   'commit-tree',body['tree']]
+        for parent in body.get('parents', []):
+            command.extend(['-p',parent])
+        return self.store.git(*command, data=(body['message']+'\n').encode()).stdout.decode().strip()
+
+    def push(self, branch, sha):
+        import time
+        result = self.store.git('push', '--quiet', 'origin', f'{sha}:refs/heads/{branch}', check=False)
+        if result.returncode:
+            self.fetched[branch] = 0
+            conflict = b'rejected' in result.stderr or b'failed to update ref' in result.stderr
+            raise APIError(409 if conflict else 503, 'Reference Git publication conflict' if conflict else 'Reference Git transport unavailable')
+        self.heads[branch], self.fetched[branch] = sha, time.monotonic()
+
+    def put(self, path, body):
+        import time
+        import random
+        branch = body['branch']
+        raw = base64.b64decode(body['content'])
+        proposed = self.store.git('hash-object', '-w', '--stdin', data=raw).stdout.decode().strip()
+        for attempt in range(24):
+            head = self.fetch(branch, force=True)
+            entries = {item['path']:item['sha'] for item in self.tree(head, recursive='/' in path)}
+            actual = entries.get(path)
+            if actual == proposed:
+                return dict(content=dict(sha=proposed))
+            if actual != body.get('sha'):
+                raise APIError(409, 'Reference document changed concurrently')
+            tree = self.create_tree(dict(base_tree=head, tree=[dict(path=path, sha=proposed)]))
+            commit = self.commit(dict(tree=tree, parents=[head], message=body['message']))
+            try:
+                self.push(branch, commit)
+                return dict(content=dict(sha=proposed))
+            except APIError as error:
+                if error.status != 409 or attempt == 23:
+                    raise
+                time.sleep(random.uniform(.3, min(4., 1 + attempt / 4)))
+        raise RuntimeError('Reference Git checkpoint remains pending')
+
+    def request(self, method, path, body=None):
+        if path.startswith('/contents/'):
+            name = path[len('/contents/'):].split('?')[0]
+            if method == 'PUT':
+                return self.put(name, body)
+            head = self.fetch(path.partition('?ref=')[2])
+            entry = self.store.git('ls-tree', '-z', head, '--', name).stdout
+            if not entry:
+                raise APIError(404, 'Missing reference document')
+            return self.store.blob(entry.split(b'\t', 1)[0].split()[2].decode())
+        if method == 'GET' and path.startswith('/git/ref/heads/'):
+            return dict(object=dict(sha=self.fetch(path.rsplit('/',1)[1], force=True)))
+        if method == 'PATCH' and path.startswith('/git/refs/heads/'):
+            if body.get('force'):
+                raise ValueError('Forced reference publication is prohibited')
+            self.push(path.rsplit('/',1)[1], body['sha'])
+            return dict(object=dict(sha=body['sha']))
+        if method == 'GET' and path.startswith('/git/blobs/'):
+            return self.store.blob(path.rsplit('/',1)[1])
+        if method == 'POST' and path == '/git/blobs':
+            return dict(sha=self.store.git('hash-object','-w','--stdin',data=base64.b64decode(body['content'])).stdout.decode().strip())
+        if method == 'GET' and path.startswith('/git/commits/'):
+            raw = self.store.git('cat-file','commit',path.rsplit('/',1)[1]).stdout
+            return dict(tree=dict(sha=raw.splitlines()[0].split()[1].decode()))
+        if method == 'GET' and path.startswith('/git/trees/'):
+            sha = path.rsplit('/',1)[1].split('?')[0]
+            return dict(tree=self.tree(sha, recursive='recursive=1' in path),truncated=False)
+        if method == 'POST' and path == '/git/trees':
+            return dict(sha=self.create_tree(body))
+        if method == 'POST' and path == '/git/commits':
+            return dict(sha=self.commit(body))
+        raise ValueError('Unsupported reference Git operation')
+
+
+def reference_api(repository, token, root):
+    import time
+    from parallel_campaign import LiveGitHub
+    class ReferenceAPI(LiveGitHub):
+        def __init__(self):
+            super().__init__(repository, token, 300)
+            self.reference_git = ReferenceGitTransport(root)
+            self.job_cache = {}
+        def request(self, method, path, body=None):
+            if self.reference_git.handles(method, path, body):
+                return self.reference_git.request(method, path, body)
+            cached = self.job_cache.get(path)
+            if method == 'GET' and '/jobs?' in path and cached and time.monotonic()-cached[0] < 180:
+                return cached[1]
+            for attempt in range(5):
+                try:
+                    result = super().request(method, path, body)
+                    if method == 'GET' and '/jobs?' in path:
+                        self.job_cache[path] = (time.monotonic(), result)
+                    return result
+                except APIError as error:
+                    if error.status not in (500, 502, 503, 504) or attempt == 4:
+                        raise
+                    time.sleep(min(20, 2**attempt))
+    return ReferenceAPI()
+
 def queue_path(queue_id, kind, task=None):
     import re
     if not re.fullmatch(r'[a-zA-Z0-9-]{1,64}', queue_id):
@@ -309,7 +471,7 @@ def queue_write(api, path, value, expected):
         try:
             return api.request('PUT', '/contents/' + path, body)['content']['sha']
         except APIError as error:
-            if error.status not in (409, 422, 502, 503, 504):
+            if error.status not in (409, 422, 500, 502, 503, 504):
                 raise
             previous, sha = queue_read(api, path)
             if previous == value:
@@ -329,7 +491,10 @@ def queue_change(api, queue_id, change):
         state, sha = queue_read(api, path)
         if state is None:
             raise ValueError('Reference queue is missing')
+        original = json.dumps(state, sort_keys=True)
         result = change(state)
+        if json.dumps(state, sort_keys=True) == original:
+            return result
         try:
             queue_write(api, path, state, sha)
             return result
@@ -475,7 +640,8 @@ def queue_initialize(api, args):
             state['allocations'][old] = dict(slots=list(range(16)), status='active')
             state['slots'] = {str(slot):dict(run=old) for slot in range(16)}
     queue_change(api, args.queue_id, upgrade)
-    queue_reconcile(api, args.queue_id, plan)
+    if role != 'workers':
+        queue_reconcile(api, args.queue_id, plan)
     def allocate(state):
         state['active_run'] = run
         if state['status'] not in ('running', 'continuation_pending', 'ready'):
@@ -616,12 +782,32 @@ def queue_worker(api, args):
         packet['skipped'] = sorted(set(packet['skipped']) | {
             job['reference_id'] for job in task['jobs'] if job['physical_id'] in shared})
         last_progress = 0
+        last_checkpoint = 0
 
-        def checkpoint():
-            nonlocal sha
+        def checkpoint(force=False):
+            nonlocal sha, last_checkpoint
+            from parallel_campaign import DocumentConflict
             packet['updated_at'] = utc_now()
             atomic_json(args.directory / (task_id + '.json'), packet)
-            sha = queue_write(api, queue_path(args.queue_id, 'task', task_id), packet, sha)
+            if not force and time.monotonic() - last_checkpoint < 60:
+                return True
+            limit = time.monotonic() + (300 if force else 0)
+            while True:
+                try:
+                    sha = queue_write(api, queue_path(args.queue_id, 'task', task_id), packet, sha)
+                    last_checkpoint = time.monotonic()
+                    return True
+                except DocumentConflict:
+                    remote, current_sha = queue_packet(api, args.queue_id, task)
+                    if remote.get('owner') not in (None, owner) or any(
+                            packet['records'].get(key) != value for key, value in remote['records'].items()):
+                        raise ValueError('Reference checkpoint changed ownership or evidence')
+                    sha = current_sha
+                except (APIError, OSError, RuntimeError) as error:
+                    print(f'REFERENCE_CHECKPOINT_DEFERRED worker={args.worker} saved_locally={len(packet["records"])} error={type(error).__name__}', flush=True)
+                if time.monotonic() >= limit:
+                    return False
+                time.sleep(5)
 
         def accept(job, evidence):
             record = reference_record(job, evidence, provenance)
@@ -655,7 +841,9 @@ def queue_worker(api, args):
             if not completed:
                 break
         packet['active'] = None
-        checkpoint()
+        if not checkpoint(force=True):
+            print('REFERENCE_SAVED_FOR_ARTIFACT_RECOVERY ' + task_id, flush=True)
+            break
         todo = [j for j in task['jobs'] if j['reference_id'] not in packet['records']
                 and j['reference_id'] not in packet['skipped']]
         if todo:
@@ -688,7 +876,9 @@ def queue_publish(api, plan, directory, seen):
                 records.append(record)
                 atomic_json(directory / (job['reference_id'] + '.json'), record)
     if jobs:
+        print(f'REFERENCE_PUBLISHING qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
         publish_cache(api, jobs, directory)
+        print('REFERENCE_EVIDENCE_SAVED publishing shared curves', flush=True)
         publish_shared_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
     for task, packet, sha in packets:
         seen[task['id']] = sha
@@ -729,7 +919,12 @@ def queue_monitor(api, args, once=False):
         except (APIError, OSError, RuntimeError) as error:
             if once:
                 raise
-            print(f'REFERENCE_PUBLICATION_RETRY error={type(error).__name__}', flush=True)
+            print(f'REFERENCE_PUBLICATION_RETRY error={type(error).__name__} detail={str(error)[:180]}', flush=True)
+            # Preserve the last complete public counters while publication is unavailable.
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(15)
+            continue
         state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
         totals = {key:sum(s[key] for s in stats.values()) for key in ('qualified','failed','skipped')}
         totals['planned'] = sum(len(t['jobs']) for t in plan['tasks'])
@@ -790,6 +985,9 @@ def queue_recover(api, plan, run, workers=None):
 
 
 def queue_finish(api, args):
+    if os.getenv('QUEUE_ROLE', 'pool') == 'workers':
+        print('REFERENCE_WORKER_ALLOCATION_FINISHED controller handles recovery', flush=True)
+        return
     plan = queue_plan(api, args.queue_id)
     queue_reconcile(api, args.queue_id, plan)
     if os.getenv('QUEUE_ROLE', 'pool') != 'workers':
@@ -809,8 +1007,7 @@ def queue_main():
     args = parser.parse_args()
     if not 600 <= args.budget_seconds <= 18000:
         parser.error('Reference queue budget must be between 600 and 18000 seconds')
-    from parallel_campaign import LiveGitHub
-    api = LiveGitHub(args.repository, os.environ.get('GITHUB_TOKEN'), 300)
+    api = reference_api(args.repository, os.environ.get('GITHUB_TOKEN'), ROOT)
     actions = {'queue-init':queue_initialize, 'queue-settings':queue_settings,
                'queue-worker':queue_worker, 'queue-monitor':queue_monitor, 'queue-finish':queue_finish}
     actions[args.action](api, args)
