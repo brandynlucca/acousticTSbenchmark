@@ -272,9 +272,6 @@ jobs:
     if: ${{ inputs.queue_id != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    concurrency:
-      group: reference-queue-initialize-${{ inputs.queue_id }}
-      cancel-in-progress: false
     env:
       GITHUB_TOKEN: ${{ github.token }}
       QUEUE_ID: ${{ inputs.queue_id }}
