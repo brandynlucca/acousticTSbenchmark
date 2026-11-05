@@ -284,12 +284,19 @@ class ReferenceGitTransport:
     def __init__(self, root):
         import threading
         from parallel_campaign import GitDataStore
-        self.store = GitDataStore(root)
+        class ReferenceDataStore(GitDataStore):
+            def git(self, *arguments, **kwargs):
+                import subprocess
+                try:
+                    return super().git(*arguments, **kwargs)
+                except subprocess.TimeoutExpired as error:
+                    raise APIError(503, 'Reference Git transport timed out') from error
+        self.store = ReferenceDataStore(root)
         self.lock = threading.RLock()
         self.heads = {}
         self.fetched = {}
         self.store.git('config', 'remote.origin.promisor', 'true')
-        self.store.git('config', 'remote.origin.partialclonefilter', 'blob:limit=1m')
+        self.store.git('config', 'remote.origin.partialclonefilter', 'blob:none')
 
     def handles(self, method, path, body=None):
         branches = ('benchmark-data', 'reference-data', 'local-reference-data')
@@ -306,11 +313,24 @@ class ReferenceGitTransport:
             if not force and branch in self.heads and time.monotonic() - self.fetched.get(branch, 0) < 15:
                 return self.heads[branch]
             ref = 'refs/remotes/origin/' + branch
-            self.store.git('fetch', '--quiet', '--no-tags', '--depth=1', '--filter=blob:limit=1m',
+            self.store.git('fetch', '--quiet', '--no-tags', '--depth=1', '--filter=blob:none',
                 'origin', f'+refs/heads/{branch}:{ref}')
             head = self.store.git('rev-parse', ref).stdout.decode().strip()
             self.heads[branch], self.fetched[branch] = head, time.monotonic()
             return head
+
+    def prefetch(self, shas):
+        # Fetch requested checkpoint blobs together without downloading the reference archive.
+        if not shas:
+            return
+        env = dict(os.environ, GIT_NO_LAZY_FETCH='1')
+        raw = self.store.git('cat-file', '--batch-check=%(objectname) %(objecttype)',
+            data=('\n'.join(shas)+'\n').encode(), env=env).stdout.decode().splitlines()
+        missing = [line.split()[0] for line in raw if line.endswith(' missing')]
+        for start in range(0, len(missing), 128):
+            self.store.git('-c','fetch.negotiationAlgorithm=noop','fetch','--quiet','--no-tags',
+                '--no-write-fetch-head','--recurse-submodules=no','--filter=blob:none','--stdin','origin',
+                data=('\n'.join(missing[start:start+128])+'\n').encode())
 
     def tree(self, tree, recursive=False):
         args = ['ls-tree', '-z'] + (['-r'] if recursive else []) + [tree]
@@ -421,6 +441,7 @@ def reference_api(repository, token, root):
     class ReferenceAPI(LiveGitHub):
         def __init__(self):
             super().__init__(repository, token, 300)
+            self.wait_on_rate_limit = False
             self.reference_git = ReferenceGitTransport(root)
             self.job_cache = {}
         def request(self, method, path, body=None):
@@ -641,7 +662,10 @@ def queue_initialize(api, args):
             state['slots'] = {str(slot):dict(run=old) for slot in range(16)}
     queue_change(api, args.queue_id, upgrade)
     if role != 'workers':
-        queue_reconcile(api, args.queue_id, plan)
+        try:
+            queue_reconcile(api, args.queue_id, plan)
+        except (APIError, OSError, RuntimeError) as error:
+            print(f'REFERENCE_INITIAL_RECONCILIATION_DEFERRED error={type(error).__name__}', flush=True)
     def allocate(state):
         state['active_run'] = run
         if state['status'] not in ('running', 'continuation_pending', 'ready'):
@@ -696,8 +720,9 @@ def queue_refill(api, args, plan):
                 eligible.append(identity)
         return eligible
     for identity in queue_change(api, args.queue_id, reserve):
+        state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
         api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
-            ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
+            ref=state.get('controller_ref', os.environ['GITHUB_REF_NAME']), inputs=dict(queue_id=args.queue_id,
                 budget_minutes=str(int(args.budget_seconds / 60)), profile='full',
                 queue_role='workers', allocation_id=identity)))
         print('REFERENCE_REPLACEMENT_DISPATCHED ' + identity, flush=True)
@@ -714,8 +739,9 @@ def queue_next_controller(api, args):
         return True
     if queue_change(api, args.queue_id, reserve):
         try:
+            state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
             api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
-                ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
+                ref=state.get('controller_ref', os.environ['GITHUB_REF_NAME']), inputs=dict(queue_id=args.queue_id,
                     budget_minutes=str(int(args.budget_seconds / 60)), profile='full', queue_role='controller')))
         except BaseException:
             queue_change(api, args.queue_id, lambda state: state.pop('controller_successor_for', None))
@@ -861,6 +887,8 @@ def queue_publish(api, plan, directory, seen):
     changed = [(task, tree.get(queue_path(plan['queue_id'], 'task', task['id']), {}).get('sha'))
                for task in plan['tasks']]
     changed = [(task, sha) for task, sha in changed if sha and seen.get(task['id']) != sha]
+    if hasattr(api, 'reference_git'):
+        api.reference_git.prefetch([sha for task, sha in changed])
     def read(pair):
         task, sha = pair
         packet, actual = queue_packet(api, plan['queue_id'], task)
@@ -902,12 +930,20 @@ def queue_monitor(api, args, once=False):
                 print(f'REFERENCE_REFILL_RETRY error={type(error).__name__}', flush=True)
             state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
             legacy = state.get('legacy_run')
-            if legacy and api.request('GET', '/actions/runs/' + legacy)['status'] != 'completed':
-                print('REFERENCE_REFILL_ACTIVE previous publisher finishing', flush=True)
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(30)
-                continue
+            if legacy:
+                try:
+                    old = api.request('GET', '/actions/runs/' + legacy)
+                except APIError as error:
+                    print(f'REFERENCE_LEGACY_STATUS_DEFERRED error={error.status}', flush=True)
+                else:
+                    if old['status'] == 'completed':
+                        queue_change(api, args.queue_id, lambda current: current.pop('legacy_run', None))
+                    else:
+                        print('REFERENCE_REFILL_ACTIVE previous publisher finishing', flush=True)
+                        if time.monotonic() >= deadline:
+                            break
+                        time.sleep(30)
+                        continue
         try:
             changed = queue_publish(api, plan, args.directory, seen)
             for task, packet, sha in changed:
