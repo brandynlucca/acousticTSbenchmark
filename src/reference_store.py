@@ -340,7 +340,10 @@ def queue_change(api, queue_id, change):
 
 def queue_claim(api, queue_id, owner, previous=None):
     def change(state):
-        if state['status'] != 'running' or state['active_run'] != owner.split(':')[0]:
+        run, slot = owner.split(':')
+        owns_slot = (state.get('slots', {}).get(slot, {}).get('run') == run
+                     if state.get('scheduler_version') == 2 else state['active_run'] == run)
+        if state['status'] != 'running' or not owns_slot:
             return None
         if previous is not None:
             if state['claims'].get(previous) != owner:
@@ -387,7 +390,7 @@ def queue_plan(api, queue_id):
     return plan
 
 
-def queue_initialize(api, args):
+def queue_initialize_legacy(api, args):
     plan = queue_plan(api, args.queue_id)
     run = str(os.environ['GITHUB_RUN_ID'])
     current, _ = queue_read(api, queue_path(args.queue_id, 'state'))
@@ -414,6 +417,144 @@ def queue_initialize(api, args):
         with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
             stream.write('workers=' + json.dumps(list(range(min(16, pending)))) + '\n')
     print(f'REFERENCE_QUEUE pending_chunks={pending} threads={plan["threads"]}', flush=True)
+
+
+def queue_reconcile(api, queue_id, plan):
+    """Release only slots whose numerical jobs have finished, regardless of sibling jobs."""
+    import re
+    state, _ = queue_read(api, queue_path(queue_id, 'state'))
+    for run, allocation in state.get('allocations', {}).items():
+        if allocation.get('status') == 'completed':
+            continue
+        jobs = api.request('GET', f'/actions/runs/{run}/jobs?per_page=100')['jobs']
+        workers = {int(match.group(1)):job for job in jobs
+                   if (match := re.fullmatch(r'references worker (\d+)', job['name']))}
+        completed = {slot:workers[slot] for slot in allocation['slots']
+                     if slot in workers and workers[slot]['status'] == 'completed'}
+        # Failed jobs may have an uploaded result that missed the online checkpoint.
+        failed = {slot for slot, job in completed.items() if job['conclusion'] != 'success'
+                  and state['slots'].get(str(slot), {}).get('run') == run}
+        if failed:
+            queue_recover(api, plan, run, workers=failed)
+        if completed:
+            def release(current):
+                for slot in completed:
+                    owned = current['slots'].get(str(slot), {})
+                    if owned.get('run') != run:
+                        continue
+                    owner = f'{run}:{slot}'
+                    for task in [task for task, claimant in current['claims'].items() if claimant == owner]:
+                        del current['claims'][task]
+                        if task not in current['pending'] and task not in current['finished']:
+                            current['pending'].insert(0, task)
+                    del current['slots'][str(slot)]
+                if set(completed) == set(allocation['slots']):
+                    current['allocations'][run]['status'] = 'completed'
+            queue_change(api, queue_id, release)
+        if (run == state.get('legacy_run') and workers and
+                all(job['status'] == 'completed' for job in workers.values())):
+            legacy = api.request('GET', '/actions/runs/' + run)
+            if legacy['status'] != 'completed':
+                # Stop only the obsolete publisher/finalizer after every numerical job ends.
+                api.request('POST', f'/actions/runs/{run}/cancel')
+                print('REFERENCE_LEGACY_CONTROLLER_STOP_REQUESTED ' + run, flush=True)
+
+
+def queue_initialize(api, args):
+    plan = queue_plan(api, args.queue_id)
+    run = str(os.environ['GITHUB_RUN_ID'])
+    role = os.getenv('QUEUE_ROLE', 'pool')
+    dispatch = os.getenv('ALLOCATION_ID', '')
+    def upgrade(state):
+        if state.get('scheduler_version') == 2:
+            return
+        old = state.get('active_run')
+        state.update(scheduler_version=2, slots={}, allocations={}, dispatches={},
+                     legacy_run=old, status='running')
+        if old:
+            state['allocations'][old] = dict(slots=list(range(16)), status='active')
+            state['slots'] = {str(slot):dict(run=old) for slot in range(16)}
+    queue_change(api, args.queue_id, upgrade)
+    queue_reconcile(api, args.queue_id, plan)
+    def allocate(state):
+        state['active_run'] = run
+        if state['status'] not in ('running', 'continuation_pending', 'ready'):
+            return []
+        state['status'] = 'running'
+        if role == 'controller':
+            return []
+        if run in state['allocations']:
+            return [slot for slot in state['allocations'][run]['slots']
+                    if state['slots'].get(str(slot), {}).get('run') == run]
+        if role == 'workers':
+            requested = state['dispatches'].get(dispatch)
+            if requested is None:
+                raise ValueError('Missing reference allocation reservation')
+            if requested.get('run') and requested['run'] != run:
+                return []
+            slots = requested['slots']
+            if any(state['slots'].get(str(slot), {}).get('dispatch') != dispatch and
+                   state['slots'].get(str(slot), {}).get('run') != run for slot in slots):
+                raise ValueError('Reference worker slot reservation changed')
+            requested.update(run=run, status='started')
+        else:
+            slots = [slot for slot in range(16) if str(slot) not in state['slots']][:len(state['pending'])]
+        for slot in slots:
+            state['slots'][str(slot)] = dict(run=run)
+        state['allocations'][run] = dict(slots=slots, status='active')
+        return slots
+    slots = queue_change(api, args.queue_id, allocate)
+    if os.getenv('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+            stream.write('workers=' + json.dumps(slots) + '\n')
+    print(f'REFERENCE_ALLOCATION run={run} role={role} slots={slots}', flush=True)
+
+
+def queue_refill(api, args, plan):
+    import time
+    import uuid
+    queue_reconcile(api, args.queue_id, plan)
+    def reserve(state):
+        if state['status'] != 'running':
+            return []
+        free = [slot for slot in range(16) if str(slot) not in state['slots']][:len(state['pending'])]
+        if free:
+            identity = uuid.uuid4().hex
+            state['dispatches'][identity] = dict(slots=free, status='requested', last_attempt=0)
+            for slot in free:
+                state['slots'][str(slot)] = dict(dispatch=identity)
+        eligible = []
+        for identity, request in state['dispatches'].items():
+            if request['status'] == 'requested' and time.time() - request['last_attempt'] >= 180:
+                request['last_attempt'] = time.time()
+                eligible.append(identity)
+        return eligible
+    for identity in queue_change(api, args.queue_id, reserve):
+        api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
+            ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
+                budget_minutes=str(int(args.budget_seconds / 60)), profile='full',
+                queue_role='workers', allocation_id=identity)))
+        print('REFERENCE_REPLACEMENT_DISPATCHED ' + identity, flush=True)
+
+
+def queue_next_controller(api, args):
+    run = str(os.environ['GITHUB_RUN_ID'])
+    def reserve(state):
+        if state['status'] != 'running' or not (state['pending'] or state['claims']):
+            return False
+        if state.get('controller_successor_for') == run:
+            return False
+        state['controller_successor_for'] = run
+        return True
+    if queue_change(api, args.queue_id, reserve):
+        try:
+            api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
+                ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
+                    budget_minutes=str(int(args.budget_seconds / 60)), profile='full', queue_role='controller')))
+        except BaseException:
+            queue_change(api, args.queue_id, lambda state: state.pop('controller_successor_for', None))
+            raise
+        print('REFERENCE_CONTROLLER_CONTINUATION_DISPATCHED', flush=True)
 
 
 def queue_settings(api, args):
@@ -564,6 +705,19 @@ def queue_monitor(api, args, once=False):
     seen, stats = receipt.get('seen', {}), receipt.get('stats', {})
     deadline = time.monotonic() + args.budget_seconds
     while True:
+        if not once:
+            try:
+                queue_refill(api, args, plan)
+            except (APIError, OSError, RuntimeError) as error:
+                print(f'REFERENCE_REFILL_RETRY error={type(error).__name__}', flush=True)
+            state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
+            legacy = state.get('legacy_run')
+            if legacy and api.request('GET', '/actions/runs/' + legacy)['status'] != 'completed':
+                print('REFERENCE_REFILL_ACTIVE previous publisher finishing', flush=True)
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(30)
+                continue
         try:
             changed = queue_publish(api, plan, args.directory, seen)
             for task, packet, sha in changed:
@@ -593,14 +747,23 @@ def queue_monitor(api, args, once=False):
         if once or (not state['pending'] and not state['claims']) or time.monotonic() >= deadline:
             break
         time.sleep(45)
+    if not once:
+        state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
+        if state['pending'] or state['claims']:
+            queue_next_controller(api, args)
+        else:
+            queue_change(api, args.queue_id, lambda current: current.update(
+                status='completed_with_failures' if totals['failed'] else 'completed'))
 
 
-def queue_recover(api, plan, run):
+def queue_recover(api, plan, run, workers=None):
     """Recover saved worker packets before returning interrupted claims to the queue."""
     tasks = {task['id']:task for task in plan['tasks']}
     artifacts = api.request('GET', f'/actions/runs/{run}/artifacts?per_page=100')['artifacts']
     for artifact in artifacts:
         if artifact['expired'] or not artifact['name'].startswith('reference-queue-worker-'):
+            continue
+        if workers is not None and int(artifact['name'].rsplit('-', 1)[1]) not in workers:
             continue
         with zipfile.ZipFile(io.BytesIO(api.archive(artifact['id']))) as archive:
             for entry in archive.infolist():
@@ -610,6 +773,7 @@ def queue_recover(api, plan, run):
                 saved = json.loads(archive.read(entry))
                 task = tasks[task_id]
                 current, sha = queue_packet(api, plan['queue_id'], task)
+                original = json.dumps(current, sort_keys=True)
                 if saved.get('task_id') != task_id:
                     raise ValueError('Invalid worker reference artifact')
                 allowed = {j['reference_id']:j for j in task['jobs']}
@@ -619,34 +783,17 @@ def queue_recover(api, plan, run):
                     if identity in current['records'] and current['records'][identity] != record:
                         raise ValueError('Conflicting saved reference evidence')
                     current['records'][identity] = record
-                current['active'] = None
-                queue_write(api, queue_path(plan['queue_id'], 'task', task_id), current, sha)
+                if current.get('owner', '').startswith(run + ':'):
+                    current['active'] = None
+                if json.dumps(current, sort_keys=True) != original:
+                    queue_write(api, queue_path(plan['queue_id'], 'task', task_id), current, sha)
 
 
 def queue_finish(api, args):
     plan = queue_plan(api, args.queue_id)
-    queue_recover(api, plan, str(os.environ['GITHUB_RUN_ID']))
-    queue_monitor(api, args, once=True)
-    run = str(os.environ['GITHUB_RUN_ID'])
-    def finish(state):
-        if state['active_run'] != run:
-            raise ValueError('Reference allocation changed during finalization')
-        remaining = bool(state['pending'] or state['claims'])
-        advanced = len(state['finished']) > state.get('finished_before_run', 0)
-        state['stalled_allocations'] = 0 if advanced else state.get('stalled_allocations', 0) + 1
-        progress, _ = queue_read(api, queue_path(args.queue_id, 'progress'))
-        state['status'] = 'continuation_pending' if remaining else (
-            'completed_with_failures' if progress['failed'] else 'completed')
-        if remaining and state['stalled_allocations'] >= 2:
-            state['status'] = 'needs_attention'
-            return False
-        return remaining
-    remaining = queue_change(api, args.queue_id, finish)
-    if remaining:
-        api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
-            ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
-                budget_minutes=str(int(args.budget_seconds / 60)), profile='full')))
-        print('REFERENCE_CONTINUATION_DISPATCHED ' + args.queue_id, flush=True)
+    queue_reconcile(api, args.queue_id, plan)
+    if os.getenv('QUEUE_ROLE', 'pool') != 'workers':
+        queue_next_controller(api, args)
 
 
 def queue_main():

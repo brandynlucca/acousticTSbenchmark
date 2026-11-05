@@ -21,6 +21,12 @@ on:
       timing_run_id:
         type: string
         default: ''
+      queue_role:
+        type: string
+        default: pool
+      allocation_id:
+        type: string
+        default: ''
       queue_id:
         type: string
         default: ''
@@ -43,6 +49,12 @@ on:
         description: Optional active or completed timing run to supply with references
         type: string
         default: ''
+      queue_role:
+        type: string
+        default: pool
+      allocation_id:
+        type: string
+        default: ''
       queue_id:
         type: string
         default: ''
@@ -50,9 +62,6 @@ on:
 permissions:
   contents: write
   actions: write
-concurrency:
-  group: reference-queue-${{ inputs.queue_id || github.run_id }}
-  cancel-in-progress: false
 jobs:
   configuration:
     if: ${{ inputs.queue_id == '' }}
@@ -263,6 +272,9 @@ jobs:
     if: ${{ inputs.queue_id != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: reference-queue-initialize-${{ inputs.queue_id }}
+      cancel-in-progress: false
     env:
       GITHUB_TOKEN: ${{ github.token }}
       QUEUE_ID: ${{ inputs.queue_id }}
@@ -272,6 +284,8 @@ jobs:
       MKL_NUM_THREADS: '1'
       JULIA_NUM_THREADS: '4'
       QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+      QUEUE_ROLE: ${{ inputs.queue_role }}
+      ALLOCATION_ID: ${{ inputs.allocation_id }}
     outputs:
       workers: ${{ steps.queue.outputs.workers }}
     steps:
@@ -288,6 +302,9 @@ jobs:
     if: ${{ needs.queue.outputs.workers != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    concurrency:
+      group: reference-worker-${{ inputs.queue_id }}-${{ matrix.worker }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 16
@@ -302,6 +319,8 @@ jobs:
       MKL_NUM_THREADS: '1'
       JULIA_NUM_THREADS: '4'
       QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+      QUEUE_ROLE: ${{ inputs.queue_role }}
+      ALLOCATION_ID: ${{ inputs.allocation_id }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -349,6 +368,12 @@ jobs:
       MKL_NUM_THREADS: '1'
       JULIA_NUM_THREADS: '4'
       QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+      QUEUE_ROLE: ${{ inputs.queue_role }}
+      ALLOCATION_ID: ${{ inputs.allocation_id }}
+    if: ${{ inputs.queue_role != 'workers' }}
+    concurrency:
+      group: reference-publisher-${{ inputs.queue_id }}
+      cancel-in-progress: false
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -374,6 +399,8 @@ jobs:
       MKL_NUM_THREADS: '1'
       JULIA_NUM_THREADS: '4'
       QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+      QUEUE_ROLE: ${{ inputs.queue_role }}
+      ALLOCATION_ID: ${{ inputs.allocation_id }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
