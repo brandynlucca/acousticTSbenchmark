@@ -112,7 +112,7 @@ const semimajor=document.getElementById('semimajor'),aspect=document.getElementB
 const sizeOptions=[.001,.01,.07,.1,.5];
 function referenceCurves(){
  const unique=new Map();
- for(const row of [...localReferenceCurves,...sharedReferenceCurves,...(data.reference_curves||[]),...externalReferenceCurves]){
+ for(const row of [...localReferenceCurves,...(data.reference_curves||[]),...externalReferenceCurves,...sharedReferenceCurves]){
   if(!row||typeof row.physical_id!=='string'||typeof row.reference_id!=='string'||!Number.isFinite(row.ts_db)||!Number.isFinite(row.semimajor_m)||row.semimajor_m<=0||!Number.isFinite(row.aspect_ratio)||!Number.isFinite(row.incidence_deg)||!Number.isFinite(row.frequency_hz))continue;
   unique.set(row.physical_id,row);
  }
@@ -121,7 +121,6 @@ function referenceCurves(){
 function matchedReferenceRows(input){
  const references=new Map(referenceCurves().map(reference=>[reference.physical_id,reference]));
  return input.map(row=>{
-  if(row.reference_id&&Number.isFinite(row.reference_ts_db)&&Number.isFinite(row.delta_ts_db))return row;
   const reference=references.get(row.physical_id);
   if(!reference)return row;
   return {...row,reference_id:reference.reference_id,reference_ts_db:reference.ts_db,
