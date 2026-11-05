@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import json
 import math
@@ -41,13 +42,43 @@ def fingerprint(value):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
-def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+def _windows_file_lock(error):
+    if os.name != "nt" or not isinstance(error, PermissionError):
+        return False
+    code = getattr(error, "winerror", None)
+    return code in (5, 32, 33) or (code is None and error.errno in (errno.EACCES, errno.EPERM))
+
+
+def read_json(path, *, timeout_seconds=5.0):
+    """Read a complete snapshot, retrying only temporary Windows access conflicts."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        except PermissionError as error:
+            remaining = deadline - time.monotonic()
+            if not _windows_file_lock(error) or remaining <= 0:
+                raise
+            time.sleep(min(0.05, remaining))
 
 
 def physical_identity(problem):
     return fingerprint({key: (float(problem[key]) if problem[key] is not None and key != "boundary"
                               else problem[key]) for key in PHYSICAL_FIELDS})
+
+
+def _replace_json_file(temporary, path, *, timeout_seconds=5.0):
+    """Retain atomic replacement while tolerating short Windows reader locks."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as error:
+            remaining = deadline - time.monotonic()
+            if not _windows_file_lock(error) or remaining <= 0:
+                raise
+            time.sleep(min(0.05, remaining))
 
 
 def atomic_json(path, value):
@@ -59,7 +90,7 @@ def atomic_json(path, value):
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    _replace_json_file(temporary, path)
 
 
 def positive(value, name):

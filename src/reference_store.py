@@ -277,5 +277,400 @@ def main():
         publish(api, payload)
 
 
+"""Pending-only queue additions for the existing reference_store runner."""
+
+def queue_path(queue_id, kind, task=None):
+    import re
+    if not re.fullmatch(r'[a-zA-Z0-9-]{1,64}', queue_id):
+        raise ValueError('Invalid reference queue ID')
+    if kind not in ('plan', 'state', 'progress', 'task'):
+        raise ValueError('Invalid reference queue document')
+    if kind == 'task' and not re.fullmatch(r'[a-f0-9]{24}', task or ''):
+        raise ValueError('Invalid reference task ID')
+    return f'reference-queue-{queue_id}-{kind}' + (f'-{task}' if task else '') + '.json'
+
+
+def queue_read(api, path):
+    from parallel_campaign import get_document
+    return get_document(api, path)
+
+
+def queue_write(api, path, value, expected):
+    """Compare-and-swap one compressed document without listing the whole branch."""
+    import random
+    import time
+    from parallel_campaign import pack, DocumentConflict
+    raw = json.dumps(pack(value), separators=(',', ':')).encode()
+    body = dict(message=f'Checkpoint {path}', branch='benchmark-data',
+                content=base64.b64encode(raw).decode())
+    if expected is not None:
+        body['sha'] = expected
+    for attempt in range(16):
+        try:
+            return api.request('PUT', '/contents/' + path, body)['content']['sha']
+        except APIError as error:
+            if error.status not in (409, 422, 502, 503, 504):
+                raise
+            previous, sha = queue_read(api, path)
+            if previous == value:
+                return sha
+            if sha != expected:
+                raise DocumentConflict('Reference queue changed concurrently') from error
+            time.sleep(min(8, .25 * 2 ** min(attempt, 5)) + random.random())
+    raise RuntimeError('Reference checkpoint remains pending after publication retries')
+
+
+def queue_change(api, queue_id, change):
+    import random
+    import time
+    from parallel_campaign import DocumentConflict
+    path = queue_path(queue_id, 'state')
+    for attempt in range(64):
+        state, sha = queue_read(api, path)
+        if state is None:
+            raise ValueError('Reference queue is missing')
+        result = change(state)
+        try:
+            queue_write(api, path, state, sha)
+            return result
+        except DocumentConflict:
+            time.sleep(random.uniform(.2, min(5, 1 + attempt / 4)))
+    raise RuntimeError('Reference queue remains busy')
+
+
+def queue_claim(api, queue_id, owner, previous=None):
+    def change(state):
+        if state['status'] != 'running' or state['active_run'] != owner.split(':')[0]:
+            return None
+        if previous is not None:
+            if state['claims'].get(previous) != owner:
+                raise ValueError('Reference claim ownership changed')
+            del state['claims'][previous]
+            if previous not in state['finished']:
+                state['finished'].append(previous)
+        current = next((task for task, worker in state['claims'].items() if worker == owner), None)
+        if current:
+            return current
+        if not state['pending']:
+            return None
+        task = state['pending'].pop(0)
+        state['claims'][task] = owner
+        return task
+    return queue_change(api, queue_id, change)
+
+
+def queue_plan(api, queue_id):
+    from benchmark import fingerprint, physical_identity
+    plan, _ = queue_read(api, queue_path(queue_id, 'plan'))
+    if not plan or plan['queue_id'] != queue_id or plan['threads'] != 4:
+        raise ValueError('Missing or invalid reference transfer manifest')
+    identities = set()
+    task_ids = set()
+    for task in plan['tasks']:
+        if (task['id'] in task_ids or not 1 <= len(task['jobs']) <= 8 or
+                not 600 <= task['case_timeout_seconds'] <= 1800):
+            raise ValueError('Invalid reference chunk')
+        task_ids.add(task['id'])
+        for job in task['jobs']:
+            if (job['reference_id'] != fingerprint(job['signature']) or
+                    job['physical_id'] != physical_identity(job) or
+                    job['physical_id'] != physical_identity(job['signature']['physical']) or
+                    job['source_sha'] != plan['source_sha'] or
+                    job['signature']['source_sha'] != job['source_sha'] or
+                    job['signature']['policy'] != job['policy'] or
+                    job['signature']['method'] != job['method'] or
+                    job['signature']['controls'] != job['controls'] or
+                    job['controls']['mode_threads'] != plan['threads'] or
+                    job['reference_id'] in identities):
+                raise ValueError('Invalid or duplicate transferred reference request')
+            identities.add(job['reference_id'])
+    return plan
+
+
+def queue_initialize(api, args):
+    plan = queue_plan(api, args.queue_id)
+    run = str(os.environ['GITHUB_RUN_ID'])
+    current, _ = queue_read(api, queue_path(args.queue_id, 'state'))
+    if current.get('active_run') and current['active_run'] != run:
+        old = api.request('GET', '/actions/runs/' + current['active_run'])
+        if old['status'] != 'completed':
+            raise ValueError('A previous reference allocation is still active')
+        queue_recover(api, plan, current['active_run'])
+    def start(state):
+        previous = state.get('active_run')
+        if previous and previous != run:
+            old = api.request('GET', '/actions/runs/' + previous)
+            if old['status'] != 'completed':
+                raise ValueError('A previous reference allocation is still active')
+        if previous != run:
+            # Interrupted tasks retain per-frequency evidence in their checkpoints.
+            state['pending'] = list(state['claims']) + state['pending']
+            state['claims'] = {}
+            state['finished_before_run'] = len(state['finished'])
+        state.update(status='running', active_run=run)
+        return len(state['pending'])
+    pending = queue_change(api, args.queue_id, start)
+    if os.getenv('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+            stream.write('workers=' + json.dumps(list(range(min(16, pending)))) + '\n')
+    print(f'REFERENCE_QUEUE pending_chunks={pending} threads={plan["threads"]}', flush=True)
+
+
+def queue_settings(api, args):
+    plan = queue_plan(api, args.queue_id)
+    atomic_json(args.output, plan['sources_lock'])
+    from references import source_digest
+    for name, expected in plan['adapter_hashes'].items():
+        if source_digest(ROOT / 'src' / name) != expected:
+            raise ValueError(f'Transferred reference adapter changed: {name}')
+
+
+def queue_packet(api, queue_id, task):
+    packet, sha = queue_read(api, queue_path(queue_id, 'task', task['id']))
+    packet = packet or dict(task_id=task['id'], records={}, skipped=[], active=None)
+    allowed = {job['reference_id']: job for job in task['jobs']}
+    if (packet['task_id'] != task['id'] or not set(packet['records']) <= set(allowed) or
+            not set(packet['skipped']) <= set(allowed)):
+        raise ValueError('Reference checkpoint belongs to another task')
+    for identity, record in packet['records'].items():
+        if record.get('qualified') and not valid_cached(record, allowed[identity]):
+            raise ValueError('Invalid qualified reference checkpoint')
+    return packet, sha
+
+
+def queue_shared(api):
+    from parallel_campaign import _document_bytes
+    from reference_curves import _validated
+    raw, _ = _document_bytes(api, 'qualified-reference-curves.json')
+    return _validated(json.loads(raw)['reference_curves']) if raw else {}
+
+
+def queue_worker(api, args):
+    import time
+    from references import _run_batch, reference_record, julia_provenance
+    plan = queue_plan(api, args.queue_id)
+    runtime = read_json(args.runtime)
+    if (runtime['source_shas']['acousticscattering'] != plan['source_sha'] or
+            runtime['availability']['acousticscattering']['status'] != 'ready'):
+        raise ValueError('Prepared reference runtime differs from the transferred queue')
+    tasks = {task['id']: task for task in plan['tasks']}
+    owner = f'{os.environ["GITHUB_RUN_ID"]}:{args.worker}'
+    deadline = time.time() + args.budget_seconds
+    provenance = dict(source_sha=plan['source_sha'], threads=4, blas_threads=1,
+        environment_fingerprint=runtime.get('environment_fingerprint'),
+        environment_compatibility=julia_provenance(runtime),
+        github_run_id=os.environ['GITHUB_RUN_ID'], reference_queue=args.queue_id)
+    args.directory.mkdir(parents=True, exist_ok=True)
+    shared = queue_shared(api)
+    task_id = queue_claim(api, args.queue_id, owner)
+    previous = None
+    while task_id:
+        task = tasks[task_id]
+        timeout = task['case_timeout_seconds']
+        if deadline - time.time() < timeout + 60:
+            break
+        packet, sha = queue_packet(api, args.queue_id, task)
+        packet['owner'] = owner
+        by_id = {job['reference_id']: job for job in task['jobs']}
+        packet['skipped'] = sorted(set(packet['skipped']) | {
+            job['reference_id'] for job in task['jobs'] if job['physical_id'] in shared})
+        last_progress = 0
+
+        def checkpoint():
+            nonlocal sha
+            packet['updated_at'] = utc_now()
+            atomic_json(args.directory / (task_id + '.json'), packet)
+            sha = queue_write(api, queue_path(args.queue_id, 'task', task_id), packet, sha)
+
+        def accept(job, evidence):
+            record = reference_record(job, evidence, provenance)
+            packet['records'][job['reference_id']] = record
+            packet['active'] = None
+            checkpoint()
+            print(f'REFERENCE_SAVED worker={args.worker} a={job["semimajor_m"]} '
+                  f'ar={job["aspect_ratio"]} boundary={job["boundary"]} '
+                  f'angle={job["incidence_deg"]} f={job["frequency_hz"]} '
+                  f'status={record["status"]} qualified={record["qualified"]}', flush=True)
+
+        def progress(active):
+            nonlocal last_progress
+            job = by_id[active['reference_id']]
+            packet['active'] = dict(active, frequency_hz=job['frequency_hz'],
+                semimajor_m=job['semimajor_m'], aspect_ratio=job['aspect_ratio'],
+                boundary=job['boundary'], incidence_deg=job['incidence_deg'])
+            print('REFERENCE_ACTIVE ' + json.dumps(packet['active'], separators=(',', ':')), flush=True)
+            if time.monotonic() - last_progress >= 30:
+                checkpoint()
+                last_progress = time.monotonic()
+
+        checkpoint()
+        while True:
+            todo = [job for job in task['jobs'] if job['reference_id'] not in packet['records']
+                    and job['reference_id'] not in packet['skipped']]
+            if not todo or deadline - time.time() < timeout + 60:
+                break
+            completed = _run_batch(todo, runtime, args.directory, 4, deadline - 60, timeout,
+                accept, progress, attempts_dir=args.directory / 'attempts')
+            if not completed:
+                break
+        packet['active'] = None
+        checkpoint()
+        todo = [j for j in task['jobs'] if j['reference_id'] not in packet['records']
+                and j['reference_id'] not in packet['skipped']]
+        if todo:
+            break
+        previous = task_id
+        task_id = queue_claim(api, args.queue_id, owner, previous=previous)
+    print(f'REFERENCE_WORKER_STOP worker={args.worker} pending_chunk={task_id}', flush=True)
+
+
+def queue_publish(api, plan, directory, seen):
+    from publish_progress import _progress_tree
+    from reference_curves import curves_from_records, publish_shared_curves
+    from concurrent.futures import ThreadPoolExecutor
+    _, _, tree = _progress_tree(api)
+    changed = [(task, tree.get(queue_path(plan['queue_id'], 'task', task['id']), {}).get('sha'))
+               for task in plan['tasks']]
+    changed = [(task, sha) for task, sha in changed if sha and seen.get(task['id']) != sha]
+    def read(pair):
+        task, sha = pair
+        packet, actual = queue_packet(api, plan['queue_id'], task)
+        return task, packet, actual
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        packets = list(pool.map(read, changed))
+    jobs, records = [], []
+    for task, packet, sha in packets:
+        for job in task['jobs']:
+            record = packet['records'].get(job['reference_id'])
+            if record and record['qualified']:
+                jobs.append(job)
+                records.append(record)
+                atomic_json(directory / (job['reference_id'] + '.json'), record)
+    if jobs:
+        publish_cache(api, jobs, directory)
+        publish_shared_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
+    for task, packet, sha in packets:
+        seen[task['id']] = sha
+    print(f'REFERENCE_PUBLISHED qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
+    return packets
+
+
+def queue_monitor(api, args, once=False):
+    import time
+    plan = queue_plan(api, args.queue_id)
+    args.directory.mkdir(parents=True, exist_ok=True)
+    receipt_path = args.directory / 'publication-receipts.json'
+    receipt = read_json(receipt_path) if receipt_path.exists() else {}
+    seen, stats = receipt.get('seen', {}), receipt.get('stats', {})
+    deadline = time.monotonic() + args.budget_seconds
+    while True:
+        try:
+            changed = queue_publish(api, plan, args.directory, seen)
+            for task, packet, sha in changed:
+                stats[task['id']] = dict(qualified=sum(r['qualified'] for r in packet['records'].values()),
+                    failed=sum(not r['qualified'] for r in packet['records'].values()),
+                    skipped=len(set(packet['skipped']) - set(packet['records'])),
+                    active=packet['active'], owner=packet.get('owner'))
+            atomic_json(receipt_path, dict(seen=seen, stats=stats))
+        except (APIError, OSError, RuntimeError) as error:
+            if once:
+                raise
+            print(f'REFERENCE_PUBLICATION_RETRY error={type(error).__name__}', flush=True)
+        state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
+        totals = {key:sum(s[key] for s in stats.values()) for key in ('qualified','failed','skipped')}
+        totals['planned'] = sum(len(t['jobs']) for t in plan['tasks'])
+        totals['remaining'] = totals['planned'] - sum(totals[key] for key in ('qualified','failed','skipped'))
+        totals.update(updated_at=utc_now(), queue_id=args.queue_id,
+            active=[dict(value['active'], worker=value['owner']) for task_id, value in stats.items()
+                    if value['active'] and task_id in state['claims']])
+        progress_path = queue_path(args.queue_id, 'progress')
+        _, progress_sha = queue_read(api, progress_path)
+        queue_write(api, progress_path, totals, progress_sha)
+        print('REFERENCE_POINTS ' + json.dumps(totals, separators=(',', ':')), flush=True)
+        print(f'REFERENCE_QUEUE_PROGRESS finished_chunks={len(state["finished"])} '
+              f'total_chunks={len(plan["tasks"])} active_workers={len(state["claims"])} '
+              f'pending_chunks={len(state["pending"])}', flush=True)
+        if once or (not state['pending'] and not state['claims']) or time.monotonic() >= deadline:
+            break
+        time.sleep(45)
+
+
+def queue_recover(api, plan, run):
+    """Recover saved worker packets before returning interrupted claims to the queue."""
+    tasks = {task['id']:task for task in plan['tasks']}
+    artifacts = api.request('GET', f'/actions/runs/{run}/artifacts?per_page=100')['artifacts']
+    for artifact in artifacts:
+        if artifact['expired'] or not artifact['name'].startswith('reference-queue-worker-'):
+            continue
+        with zipfile.ZipFile(io.BytesIO(api.archive(artifact['id']))) as archive:
+            for entry in archive.infolist():
+                task_id = PurePosixPath(entry.filename).stem
+                if task_id not in tasks or entry.file_size > MAX_RECORD_BYTES * 16:
+                    continue
+                saved = json.loads(archive.read(entry))
+                task = tasks[task_id]
+                current, sha = queue_packet(api, plan['queue_id'], task)
+                if saved.get('task_id') != task_id:
+                    raise ValueError('Invalid worker reference artifact')
+                allowed = {j['reference_id']:j for j in task['jobs']}
+                for identity, record in saved['records'].items():
+                    if identity not in allowed or (record.get('qualified') and not valid_cached(record, allowed[identity])):
+                        raise ValueError('Invalid saved reference evidence')
+                    if identity in current['records'] and current['records'][identity] != record:
+                        raise ValueError('Conflicting saved reference evidence')
+                    current['records'][identity] = record
+                current['active'] = None
+                queue_write(api, queue_path(plan['queue_id'], 'task', task_id), current, sha)
+
+
+def queue_finish(api, args):
+    plan = queue_plan(api, args.queue_id)
+    queue_recover(api, plan, str(os.environ['GITHUB_RUN_ID']))
+    queue_monitor(api, args, once=True)
+    run = str(os.environ['GITHUB_RUN_ID'])
+    def finish(state):
+        if state['active_run'] != run:
+            raise ValueError('Reference allocation changed during finalization')
+        remaining = bool(state['pending'] or state['claims'])
+        advanced = len(state['finished']) > state.get('finished_before_run', 0)
+        state['stalled_allocations'] = 0 if advanced else state.get('stalled_allocations', 0) + 1
+        progress, _ = queue_read(api, queue_path(args.queue_id, 'progress'))
+        state['status'] = 'continuation_pending' if remaining else (
+            'completed_with_failures' if progress['failed'] else 'completed')
+        if remaining and state['stalled_allocations'] >= 2:
+            state['status'] = 'needs_attention'
+            return False
+        return remaining
+    remaining = queue_change(api, args.queue_id, finish)
+    if remaining:
+        api.request('POST', '/actions/workflows/references.yml/dispatches', dict(
+            ref=os.environ['GITHUB_REF_NAME'], inputs=dict(queue_id=args.queue_id,
+                budget_minutes=str(int(args.budget_seconds / 60)), profile='full')))
+        print('REFERENCE_CONTINUATION_DISPATCHED ' + args.queue_id, flush=True)
+
+
+def queue_main():
+    parser = argparse.ArgumentParser(description='Continue only transferred missing reference work')
+    parser.add_argument('action', choices=['queue-init', 'queue-settings', 'queue-worker', 'queue-monitor', 'queue-finish'])
+    parser.add_argument('--queue-id', required=True)
+    parser.add_argument('--repository', default=os.getenv('GITHUB_REPOSITORY'))
+    parser.add_argument('--worker', type=int, default=0)
+    parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--directory', type=Path)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--budget-seconds', type=float, default=14400)
+    args = parser.parse_args()
+    if not 600 <= args.budget_seconds <= 18000:
+        parser.error('Reference queue budget must be between 600 and 18000 seconds')
+    from parallel_campaign import LiveGitHub
+    api = LiveGitHub(args.repository, os.environ.get('GITHUB_TOKEN'), 300)
+    actions = {'queue-init':queue_initialize, 'queue-settings':queue_settings,
+               'queue-worker':queue_worker, 'queue-monitor':queue_monitor, 'queue-finish':queue_finish}
+    actions[args.action](api, args)
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1].startswith("queue-"):
+        queue_main()
+    else:
+        main()

@@ -1,6 +1,29 @@
 # Persistent reference calculations. Import and compilation occur once per batch.
 include(joinpath(@__DIR__, "worker_julia.jl"))
 
+function reference_rename(temporary, path; timeout_seconds=5.0,
+                          rename_file=Base.Filesystem.rename, windows=Sys.iswindows())
+    started = time_ns()
+    while true
+        try
+            rename_file(temporary, path)
+            return path
+        catch exception
+            remaining = timeout_seconds - (time_ns() - started) / 1e9
+            retryable = windows && exception isa Base.IOError &&
+                exception.code in (Base.UV_EACCES, Base.UV_EPERM, Base.UV_EBUSY)
+            retryable && remaining > 0 || rethrow()
+            sleep(min(.05, remaining))
+        end
+    end
+end
+
+function reference_failure(exception, phase, trace=catch_backtrace())
+    status = exception isa Union{Base.IOError,SystemError} ? "worker_error" : "numerical_error"
+    Dict{String,Any}("status" => status,
+                     "message" => sprint(showerror, exception, trace), "phase" => phase)
+end
+
 function reference_save(path, value)
     mkpath(dirname(path))
     temporary = path * ".tmp"
@@ -8,10 +31,10 @@ function reference_save(path, value)
         JSON3.write(io, json_safe(value))
         flush(io)
     end
-    Base.Filesystem.rename(temporary, path)
+    reference_rename(temporary, path)
 end
 
-function reference_calculation(request; calculate=scattering_calculation, progress=phase -> nothing)
+function reference_calculation_pair(request, calculate, progress)
     controls = Dict(Symbol(k) => v for (k,v) in request["controls"])
     controls[:adaptive] === true || error("Reference spatial refinement must be enabled")
     controls[:target_tol] <= request["policy"]["spatial_tolerance_db"] || error("Spatial tolerance exceeds policy")
@@ -26,6 +49,31 @@ function reference_calculation(request; calculate=scattering_calculation, progre
     end
     # Python independently derives qualification from these retained results.
     Dict("status" => baseline.status, "baseline" => baseline, "expanded" => expanded)
+end
+
+function reference_calculation(request; calculate=scattering_calculation,
+                               progress=phase -> nothing, reuse_completed_modes=true)
+    calculation = () -> reference_calculation_pair(request, calculate, progress)
+    if reuse_completed_modes && calculate === scattering_calculation
+        return Base.invokelatest() do
+            if isdefined(AcousticScattering, :_with_mode_solution_reuse)
+                AcousticScattering._with_mode_solution_reuse() do
+                    evidence = calculation()
+                    cache = AcousticScattering._mode_solution_reuse_context()
+                    evidence["mode_reuse"] = Dict("hits" => cache.hits,
+                        "modes_reused" => cache.modes_reused, "retained_bytes" => cache.bytes,
+                        "limit_bytes" => cache.limit)
+                    println("REFERENCE_MODE_REUSE hits=", cache.hits,
+                        " modes=", cache.modes_reused, " retained_bytes=", cache.bytes)
+                    flush(stdout)
+                    evidence
+                end
+            else
+                calculation()
+            end
+        end
+    end
+    calculation()
 end
 
 function reference_batch(batch)
@@ -76,8 +124,7 @@ function reference_batch(batch)
             reference_calculation(request; progress)
         catch exception
             exception isa InterruptException && rethrow()
-            Dict("status" => "numerical_error", "message" => sprint(showerror, exception, catch_backtrace()),
-                 "phase" => active["phase"])
+            reference_failure(exception, active["phase"], catch_backtrace())
         end
         evidence["elapsed_seconds"] = time() - started
         evidence["warmup_seconds"] = warmup_seconds

@@ -14,7 +14,7 @@ import time
 import tomllib
 
 from benchmark import (BOUNDARIES, PHYSICAL_FIELDS, ROOT, atomic_json, build_cases,
-                       fingerprint, physical_identity, positive, read_json, utc_now)
+                       fingerprint, physical_identity, positive, read_json, utc_now, _windows_file_lock)
 
 
 POLICY = dict(version=1, spatial_tolerance_db=0.005, fourier_tolerance_db=0.005,
@@ -204,14 +204,28 @@ def _stop(process, job):
     process.wait(timeout=10)
 
 
+def _remove_reference_file(path, *, timeout_seconds=5.0):
+    """Remove an old snapshot after transient Windows readers release it."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError as error:
+            remaining = deadline - time.monotonic()
+            if not _windows_file_lock(error) or remaining <= 0:
+                raise
+            time.sleep(min(.05, remaining))
+
+
 def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, progress, *, attempts_dir=None):
     """Keep one Julia process warm while enforcing a deadline for each reference."""
     attempts_dir = Path(attempts_dir) if attempts_dir is not None else work / "reference-attempts"
     request = work / "reference-batch.json"
     marker = work / "reference-active.json"
-    marker.unlink(missing_ok=True)
+    _remove_reference_file(marker)
     for item in jobs:
-        (attempts_dir / (item["reference_id"] + ".json")).unlink(missing_ok=True)
+        _remove_reference_file(attempts_dir / (item["reference_id"] + ".json"))
     started = time.time()
     atomic_json(request, dict(cases=jobs, threads=threads, deadline_epoch=deadline, started_epoch=started,
                              case_timeout_seconds=case_timeout, work_directory=str(work),
@@ -224,7 +238,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
     env.update(JULIA_NUM_THREADS=str(threads), OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1",
                MKL_NUM_THREADS="1", VECLIB_MAXIMUM_THREADS="1")
     gate = work / "reference-launch.ready"
-    gate.unlink(missing_ok=True)
+    _remove_reference_file(gate)
     owner = None
     if os.name == "nt":
         from process_control import WindowsJob
@@ -235,6 +249,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
     collected = set()
     active = dict(reference_id=jobs[0]["reference_id"], started_epoch=started, phase="importing")
     next_result = 0
+    marker_denied_since = None
 
     def collect():
         nonlocal next_result
@@ -258,11 +273,26 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
                 gate.touch()
             while True:
                 collect()
-                if marker.exists():
-                    updated = read_json(marker)
-                    if updated != active:
-                        active = updated
-                        progress(active)
+                try:
+                    # Keep supervising worker deadlines while its marker is briefly locked.
+                    updated = read_json(marker, timeout_seconds=0)
+                except FileNotFoundError:
+                    marker_denied_since = None
+                    updated = None
+                except PermissionError as error:
+                    if not _windows_file_lock(error):
+                        raise
+                    now = time.monotonic()
+                    if marker_denied_since is None:
+                        marker_denied_since = now
+                    if now - marker_denied_since >= 5:
+                        raise
+                    updated = None
+                else:
+                    marker_denied_since = None
+                if updated is not None and updated != active:
+                    active = updated
+                    progress(active)
                 if process.poll() is not None:
                     collect()  # The final result can be committed just before process exit.
                     break
@@ -294,7 +324,7 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
             _stop(process, owner)
         if owner is not None:
             owner.close()
-        gate.unlink(missing_ok=True)
+        _remove_reference_file(gate)
     return collected
 
 

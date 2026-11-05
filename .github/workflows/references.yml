@@ -1,5 +1,5 @@
 name: Cached numerical references
-run-name: ${{ inputs.timing_run_id != '' && format('References for benchmark {0}', inputs.timing_run_id) || format('Cached numerical references ({0})', inputs.profile) }}
+run-name: ${{ inputs.queue_id != '' && format('Remaining references {0}', inputs.queue_id) || format('Cached numerical references ({0})', inputs.profile) }}
 on:
   workflow_call:
     inputs:
@@ -21,6 +21,9 @@ on:
       timing_run_id:
         type: string
         default: ''
+      queue_id:
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       profile:
@@ -29,7 +32,7 @@ on:
         options: [pilot, full]
         default: pilot
       budget_minutes:
-        description: Calculation minutes per runner (two parallel runners)
+        description: Calculation minutes per runner, queue 10 to 300 or configured matrix 10 to 120
         type: number
         default: 15
       case_limit:
@@ -40,11 +43,19 @@ on:
         description: Optional active or completed timing run to supply with references
         type: string
         default: ''
+      queue_id:
+        type: string
+        default: ''
+        description: Existing pending reference queue ID, blank for the configured matrix
 permissions:
   contents: write
-  actions: read
+  actions: write
+concurrency:
+  group: reference-queue-${{ inputs.queue_id || github.run_id }}
+  cancel-in-progress: false
 jobs:
   configuration:
+    if: ${{ inputs.queue_id == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -84,6 +95,7 @@ jobs:
                   output.write(key + '=' + (json.dumps(value, separators=(',', ':')) if isinstance(value, dict) else value) + '\n')
           PY
   reference:
+    if: ${{ inputs.queue_id == '' }}
     name: references (${{ matrix.shard }})
     runs-on: ubuntu-latest
     needs: configuration
@@ -247,3 +259,126 @@ jobs:
     uses: ./.github/workflows/attach-references.yml
     with:
       run_id: ${{ inputs.timing_run_id }}
+  queue:
+    if: ${{ inputs.queue_id != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      QUEUE_ID: ${{ inputs.queue_id }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      JULIA_NUM_THREADS: '4'
+      QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+    outputs:
+      workers: ${{ steps.queue.outputs.workers }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - id: queue
+      name: Resume only transferred missing references
+      run: python src/reference_store.py queue-init --queue-id "$QUEUE_ID"
+  queue-worker:
+    name: references worker ${{ matrix.worker }}
+    needs: queue
+    if: ${{ needs.queue.outputs.workers != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        worker: ${{ fromJSON(needs.queue.outputs.workers) }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      QUEUE_ID: ${{ inputs.queue_id }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      JULIA_NUM_THREADS: '4'
+      QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Restore exact transferred source and adapter settings
+      run: python src/reference_store.py queue-settings --queue-id "$QUEUE_ID" --output "$RUNNER_TEMP/reference-sources.json"
+    - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
+      with:
+        version: 1.12.1
+    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
+      with:
+        path: '~/.julia/artifacts
+
+          ~/.julia/packages
+
+          ~/.julia/registries'
+        key: reference-queue-${{ runner.os }}-${{ hashFiles('src/setup_julia.jl', 'src/worker_reference.jl') }}-3f3129935e20
+    - name: Prepare reference runtime once per worker
+      timeout-minutes: 35
+      run: python src/prepare.py --directory "$RUNNER_TEMP/reference-env" --software acousticscattering --sources-lock "$RUNNER_TEMP/reference-sources.json"
+    - name: Claim remaining frequency chunks continuously
+      env:
+        SLOT: ${{ matrix.worker }}
+      run: python src/reference_store.py queue-worker --queue-id "$QUEUE_ID" --worker "$SLOT" --runtime "$RUNNER_TEMP/reference-env/runtime.json"
+        --directory "$RUNNER_TEMP/reference-results" --budget-seconds "$((QUEUE_BUDGET * 60))"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: ${{ always() }}
+      with:
+        name: reference-queue-worker-${{ matrix.worker }}
+        path: '${{ runner.temp }}/reference-results/*.json
+
+          ${{ runner.temp }}/reference-results/reference-worker.log'
+        retention-days: 30
+  queue-progress:
+    needs: queue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      QUEUE_ID: ${{ inputs.queue_id }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      JULIA_NUM_THREADS: '4'
+      QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Publish saved qualified references during calculation
+      run: python src/reference_store.py queue-monitor --queue-id "$QUEUE_ID" --directory "$RUNNER_TEMP/reference-publication"
+        --budget-seconds "$((QUEUE_BUDGET * 60))"
+  queue-finish:
+    needs:
+    - queue
+    - queue-worker
+    - queue-progress
+    if: ${{ always() && !cancelled() && needs.queue.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      QUEUE_ID: ${{ inputs.queue_id }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      JULIA_NUM_THREADS: '4'
+      QUEUE_BUDGET: ${{ inputs.budget_minutes }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+    - name: Recover saved references and continue unfinished work
+      run: python src/reference_store.py queue-finish --queue-id "$QUEUE_ID" --directory "$RUNNER_TEMP/reference-publication"
+        --budget-seconds "$((QUEUE_BUDGET * 60))"
