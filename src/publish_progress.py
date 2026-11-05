@@ -41,6 +41,8 @@ MAX_RETAINED_BYTES = 512 * 1024 * 1024
 MAX_REFERENCE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+# Five-repetition datasets can exceed the transport limit after decompression.
+MAX_DECODED_SNAPSHOT_BYTES = 256 * 1024 * 1024
 SNAPSHOT_COMPRESSION_THRESHOLD = 64 * 1024
 SNAPSHOT_GUARD_FIELDS = ("run_id", "run_attempt", "platform", "semimajor_m", "published_at", "state", "status")
 _SNAPSHOT_GUARDS = OrderedDict()
@@ -542,8 +544,8 @@ def snapshot_filename(platform, semimajor=None):
 def encode_snapshot(payload):
     """Keep small snapshots readable and compress large snapshots losslessly."""
     serialized = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    if len(serialized) > MAX_SNAPSHOT_BYTES:
-        raise ValueError("Progress snapshot exceeds the supported size")
+    if len(serialized) > MAX_DECODED_SNAPSHOT_BYTES:
+        raise ValueError("Decoded progress snapshot exceeds the supported size")
     if len(serialized) <= SNAPSHOT_COMPRESSION_THRESHOLD:
         return dict(payload)
     envelope = {key: payload.get(key) for key in SNAPSHOT_GUARD_FIELDS}
@@ -563,14 +565,14 @@ def decode_snapshot(value):
     expected = value.get("decoded_bytes")
     encoded = value.get("data")
     if (value.get("encoding") != "gzip-base64" or type(expected) is not int
-            or not 0 < expected <= MAX_SNAPSHOT_BYTES or not isinstance(encoded, str)
+            or not 0 < expected <= MAX_DECODED_SNAPSHOT_BYTES or not isinstance(encoded, str)
             or len(encoded) > 4 * ((MAX_SNAPSHOT_BYTES + 2) // 3)):
         raise ValueError("Invalid compressed progress snapshot")
     compressed = base64.b64decode(encoded, validate=True)
     with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
         decoded = stream.read(expected + 1)
     if len(decoded) != expected:
-        raise ValueError("Decoded progress snapshot has an invalid size")
+        raise ValueError("Invalid compressed progress snapshot decoded size")
     result = json.loads(decoded)
     if (not isinstance(result, dict) or result.get("schema_version") != 1
             or any(result.get(key) != value.get(key) for key in SNAPSHOT_GUARD_FIELDS)):

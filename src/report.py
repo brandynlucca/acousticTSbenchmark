@@ -538,9 +538,9 @@ if(repository){
  }
  async function decodeSnapshot(value){
   if(value?.schema_version!==2)return value;
-  const limit=64*1024*1024;
-  if(value.encoding!=='gzip-base64'||typeof value.data!=='string'||value.data.length>Math.ceil(limit/3)*4||
-     !Number.isInteger(value.decoded_bytes)||value.decoded_bytes<1||value.decoded_bytes>limit)throw new Error('Invalid compressed progress data');
+  const encodedLimit=64*1024*1024,decodedLimit=256*1024*1024;
+  if(value.encoding!=='gzip-base64'||typeof value.data!=='string'||value.data.length>Math.ceil(encodedLimit/3)*4||
+     !Number.isInteger(value.decoded_bytes)||value.decoded_bytes<1||value.decoded_bytes>decodedLimit)throw new Error('Invalid compressed progress data');
   const binary=atob(value.data),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
   const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
   const chunks=[];let size=0;

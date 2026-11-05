@@ -37,7 +37,7 @@ DOCUMENT_PART_BYTES = 4 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
-CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py', 'src/dataset.py',
+CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py', 'src/dataset.py', 'src/report.py',
                     'tests/test_parallel_campaign.py', 'tests/test_publish_progress.py'}
 
 
