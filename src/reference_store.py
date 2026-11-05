@@ -732,14 +732,26 @@ def queue_refill(api, args, plan):
         print('REFERENCE_REPLACEMENT_DISPATCHED ' + identity, flush=True)
 
 
+def queue_begin_controller(api, args):
+    """Record ownership only after the serialized publisher job actually starts."""
+    run = str(os.environ['GITHUB_RUN_ID'])
+    queue_change(api, args.queue_id, lambda state: state.update(
+        controller_run=run, controller_started_at=utc_now()))
+    print('REFERENCE_CONTROLLER_STARTED ' + run, flush=True)
+
+
 def queue_next_controller(api, args):
     run = str(os.environ['GITHUB_RUN_ID'])
     def reserve(state):
         if state['status'] != 'running' or not (state['pending'] or state['claims']):
             return False
-        if state.get('controller_successor_for') == run:
+        if state.get('controller_run') != run:
+            return False
+        successors = state.setdefault('controller_successors', {})
+        if run in successors or state.get('controller_successor_for') == run:
             return False
         state['controller_successor_for'] = run
+        successors[run] = dict(requested_at=utc_now())
         return True
     if queue_change(api, args.queue_id, reserve):
         try:
@@ -748,7 +760,11 @@ def queue_next_controller(api, args):
                 ref=state.get('controller_ref', os.environ['GITHUB_REF_NAME']), inputs=dict(queue_id=args.queue_id,
                     budget_minutes=str(int(args.budget_seconds / 60)), profile='full', queue_role='controller')))
         except BaseException:
-            queue_change(api, args.queue_id, lambda state: state.pop('controller_successor_for', None))
+            def release(state):
+                state.get('controller_successors', {}).pop(run, None)
+                if state.get('controller_successor_for') == run:
+                    state.pop('controller_successor_for', None)
+            queue_change(api, args.queue_id, release)
             raise
         print('REFERENCE_CONTROLLER_CONTINUATION_DISPATCHED', flush=True)
 
@@ -971,6 +987,8 @@ def queue_publish(api, plan, directory, seen):
 def queue_monitor(api, args, once=False):
     import time
     plan = queue_plan(api, args.queue_id)
+    if not once:
+        queue_begin_controller(api, args)
     args.directory.mkdir(parents=True, exist_ok=True)
     receipt_path = args.directory / 'publication-receipts.json'
     receipt = read_json(receipt_path) if receipt_path.exists() else {}
@@ -1080,6 +1098,19 @@ def queue_recover(api, plan, run, workers=None):
 def queue_finish(api, args):
     if os.getenv('QUEUE_ROLE', 'pool') == 'workers':
         print('REFERENCE_WORKER_ALLOCATION_FINISHED controller handles recovery', flush=True)
+        return
+    run = str(os.environ['GITHUB_RUN_ID'])
+    jobs = api.request('GET', f'/actions/runs/{run}/jobs?per_page=100')['jobs']
+    publisher = next((job for job in jobs if job['name'] == 'queue-progress'), None)
+    # Cancellation of a pending job does not make the whole workflow cancelled.
+    # A superseded publisher must never create another pending publisher.
+    if (publisher is None or publisher['status'] != 'completed' or
+            publisher.get('conclusion') not in ('success', 'failure', 'timed_out')):
+        print('REFERENCE_CONTROLLER_FINALIZER_SKIPPED publisher_not_completed_or_cancelled', flush=True)
+        return
+    state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
+    if state.get('controller_run') != run:
+        print('REFERENCE_CONTROLLER_FINALIZER_SKIPPED publisher_never_started_or_superseded', flush=True)
         return
     plan = queue_plan(api, args.queue_id)
     queue_reconcile(api, args.queue_id, plan)
