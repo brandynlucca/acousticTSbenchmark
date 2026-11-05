@@ -88,7 +88,9 @@ function referenceCurves(){
 }
 function matchedReferenceRows(input){
  const references=new Map(referenceCurves().map(reference=>[reference.physical_id,reference]));
+ const sharedIds=new Set(sharedReferenceCurves.map(reference=>reference.physical_id));
  return input.map(row=>{
+  if(row.reference_id&&Number.isFinite(row.reference_ts_db)&&Number.isFinite(row.delta_ts_db)&&!sharedIds.has(row.physical_id))return row;
   const reference=references.get(row.physical_id);
   if(!reference)return row;
   return {...row,reference_id:reference.reference_id,reference_ts_db:reference.ts_db,

@@ -918,6 +918,21 @@ def queue_worker(api, args):
     print(f'REFERENCE_WORKER_STOP worker={args.worker} pending_chunk={task_id}', flush=True)
 
 
+def queue_merge_curves(api, curves):
+    from reference_curves import publish_shared_curves
+    for attempt in range(4):
+        selected = queue_shared(api)
+        missing = [curve for curve in curves if curve['physical_id'] not in selected]
+        if not missing:
+            return 0
+        try:
+            return publish_shared_curves(api, missing)
+        except ValueError as error:
+            if str(error) != 'Conflicting qualified TS references' or attempt == 3:
+                raise
+    raise RuntimeError('Reference selection changed during publication')
+
+
 def queue_publish(api, plan, directory, seen):
     from publish_progress import _progress_tree
     from reference_curves import curves_from_records, publish_shared_curves
@@ -946,7 +961,7 @@ def queue_publish(api, plan, directory, seen):
         print(f'REFERENCE_PUBLISHING qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
         publish_cache(api, jobs, directory)
         print('REFERENCE_EVIDENCE_SAVED publishing shared curves', flush=True)
-        publish_shared_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
+        queue_merge_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
     for task, packet, sha in packets:
         seen[task['id']] = sha
     print(f'REFERENCE_PUBLISHED qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
