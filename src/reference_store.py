@@ -666,6 +666,10 @@ def queue_initialize(api, args):
             queue_reconcile(api, args.queue_id, plan)
         except (APIError, OSError, RuntimeError) as error:
             print(f'REFERENCE_INITIAL_RECONCILIATION_DEFERRED error={type(error).__name__}', flush=True)
+        pointer = dict(schema_version=1, queue_id=args.queue_id)
+        previous, sha = queue_read(api, 'reference-queue-active.json')
+        if previous != pointer:
+            queue_write(api, 'reference-queue-active.json', pointer, sha)
     def allocate(state):
         state['active_run'] = run
         if state['status'] not in ('running', 'continuation_pending', 'ready'):
@@ -778,6 +782,38 @@ def queue_shared(api):
     return _validated(json.loads(raw)['reference_curves']) if raw else {}
 
 
+def queue_timing_line(active, worker, now=None):
+    import time
+    now = time.time() if now is None else now
+    elapsed = max(0., now - active['started_epoch'])
+    clock = f'{int(elapsed)//3600:02d}:{int(elapsed)//60%60:02d}:{int(elapsed)%60:02d}'
+    return (f'REFERENCE_RUNNING worker={worker} a={active["semimajor_m"]} m '
+            f'ar={active["aspect_ratio"]} boundary={active["boundary"]} '
+            f'angle={active["incidence_deg"]} deg f={active["frequency_hz"]/1000:.2f} kHz '
+            f'phase={active["phase"]} elapsed_seconds={elapsed:.2f} elapsed={clock}')
+
+
+def queue_heartbeat(packet, worker):
+    import threading
+    from contextlib import contextmanager
+    @contextmanager
+    def run():
+        stop = threading.Event()
+        def report():
+            while not stop.wait(30):
+                active = packet.get('active')
+                if active:
+                    print(queue_timing_line(active, worker), flush=True)
+        thread = threading.Thread(target=report, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+    return run()
+
+
 def queue_worker(api, args):
     import time
     from references import _run_batch, reference_record, julia_provenance
@@ -843,7 +879,9 @@ def queue_worker(api, args):
             print(f'REFERENCE_SAVED worker={args.worker} a={job["semimajor_m"]} '
                   f'ar={job["aspect_ratio"]} boundary={job["boundary"]} '
                   f'angle={job["incidence_deg"]} f={job["frequency_hz"]} '
-                  f'status={record["status"]} qualified={record["qualified"]}', flush=True)
+                  f'status={record["status"]} qualified={record["qualified"]} '
+                  f'reference_seconds={evidence.get("elapsed_seconds")} '
+                  f'warmup_seconds={evidence.get("warmup_seconds")}', flush=True)
 
         def progress(active):
             nonlocal last_progress
@@ -851,7 +889,7 @@ def queue_worker(api, args):
             packet['active'] = dict(active, frequency_hz=job['frequency_hz'],
                 semimajor_m=job['semimajor_m'], aspect_ratio=job['aspect_ratio'],
                 boundary=job['boundary'], incidence_deg=job['incidence_deg'])
-            print('REFERENCE_ACTIVE ' + json.dumps(packet['active'], separators=(',', ':')), flush=True)
+            print(queue_timing_line(packet['active'], args.worker), flush=True)
             if time.monotonic() - last_progress >= 30:
                 checkpoint()
                 last_progress = time.monotonic()
@@ -862,8 +900,9 @@ def queue_worker(api, args):
                     and job['reference_id'] not in packet['skipped']]
             if not todo or deadline - time.time() < timeout + 60:
                 break
-            completed = _run_batch(todo, runtime, args.directory, 4, deadline - 60, timeout,
-                accept, progress, attempts_dir=args.directory / 'attempts')
+            with queue_heartbeat(packet, args.worker):
+                completed = _run_batch(todo, runtime, args.directory, 4, deadline - 60, timeout,
+                    accept, progress, attempts_dir=args.directory / 'attempts')
             if not completed:
                 break
         packet['active'] = None
@@ -966,12 +1005,15 @@ def queue_monitor(api, args, once=False):
         totals['planned'] = sum(len(t['jobs']) for t in plan['tasks'])
         totals['remaining'] = totals['planned'] - sum(totals[key] for key in ('qualified','failed','skipped'))
         totals.update(updated_at=utc_now(), queue_id=args.queue_id,
-            active=[dict(value['active'], worker=value['owner']) for task_id, value in stats.items()
+            active=[dict(value['active'], worker=value['owner'],
+                         elapsed_seconds=max(0.,time.time()-value['active']['started_epoch'])) for task_id, value in stats.items()
                     if value['active'] and task_id in state['claims']])
         progress_path = queue_path(args.queue_id, 'progress')
         _, progress_sha = queue_read(api, progress_path)
         queue_write(api, progress_path, totals, progress_sha)
         print('REFERENCE_POINTS ' + json.dumps(totals, separators=(',', ':')), flush=True)
+        for active in totals['active']:
+            print(queue_timing_line(active, active['worker']), flush=True)
         print(f'REFERENCE_QUEUE_PROGRESS finished_chunks={len(state["finished"])} '
               f'total_chunks={len(plan["tasks"])} active_workers={len(state["claims"])} '
               f'pending_chunks={len(state["pending"])}', flush=True)

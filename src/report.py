@@ -55,6 +55,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
 <section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
+<section id="reference-live" hidden><h2>Active reference calculations</h2><p id="reference-live-status" class="note"></p><div class="coverage"><table><thead><tr><th>Worker</th><th>a (m)</th><th>Aspect ratio</th><th>Boundary</th><th>Incidence (°)</th><th>Frequency (kHz)</th><th>Phase</th><th>Elapsed (s)</th><th>Elapsed (HH:MM:SS)</th></tr></thead><tbody id="reference-live-rows"></tbody></table></div><p class="note">All active reference geometries appear here. Elapsed wall time includes setup for the first frequency in a batch, warmup, spatial refinement, and Fourier confirmation. Publication follows calculation. Reference time differs from the warmed prediction timing used for software benchmarks.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
@@ -66,6 +67,37 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <script>
 let data=JSON.parse(document.getElementById('data').textContent), rows=data.rows;
 let externalReferenceCurves=[],localReferenceCurves=[],sharedReferenceCurves=[];
+let referenceQueueProgress=null;
+function referenceClock(seconds){const whole=Math.max(0,Math.floor(seconds));return [Math.floor(whole/3600),Math.floor(whole/60)%60,whole%60].map(v=>String(v).padStart(2,'0')).join(':');}
+function renderReferenceTiming(){
+ const section=document.getElementById('reference-live'),body=document.getElementById('reference-live-rows');
+ if(!referenceQueueProgress)return;
+ section.hidden=false;body.replaceChildren();
+ const stamp=Date.parse(referenceQueueProgress.updated_at),age=(Date.now()-stamp)/1000;
+ document.getElementById('reference-live-status').textContent=`${referenceQueueProgress.qualified??0} qualified · ${referenceQueueProgress.remaining??0} pending · ${referenceQueueProgress.failed??0} failed · Updated ${Number.isFinite(stamp)?new Date(stamp).toLocaleTimeString():'unavailable'}${age>300?' · Update delayed. Listed phases reflect the last checkpoint.':''}`;
+ const phases={importing:'Importing',starting:'Starting',warming_up:'Warmup',solving:'Baseline and spatial refinement',checking_fourier:'Fourier confirmation',recorded:'Saved'};
+ for(const active of referenceQueueProgress.active||[]){
+  if(!Number.isFinite(active.started_epoch))continue;
+  const elapsed=Math.max(0,Date.now()/1000-active.started_epoch),row=document.createElement('tr');
+  const worker=String(active.worker||'').split(':').at(-1);
+  const values=[worker,active.semimajor_m,active.aspect_ratio,boundaryLabels[active.boundary]||active.boundary,active.incidence_deg,Number(active.frequency_hz/1000).toFixed(2),phases[active.phase]||active.phase,elapsed.toFixed(2),referenceClock(elapsed)];
+  for(const value of values){const cell=document.createElement('td');cell.textContent=value??'Unavailable';row.append(cell);}
+  body.append(row);
+ }
+}
+async function decodeReferenceProgress(value){
+ if(value?.encoding!=='gzip-base64'||typeof value.data!=='string'||value.data.length>4*1024*1024)throw new Error('Invalid reference progress');
+ const bytes=Uint8Array.from(atob(value.data),c=>c.charCodeAt(0));
+ const reader=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+ const chunks=[];let size=0;
+ try{while(true){const chunk=await reader.read();if(chunk.done)break;size+=chunk.value.length;if(size>2*1024*1024)throw new Error('Reference progress exceeds limit');chunks.push(chunk.value);}}
+ finally{await reader.cancel();reader.releaseLock();}
+ const buffer=await new Blob(chunks).arrayBuffer(),digest=await crypto.subtle.digest('SHA-256',buffer);
+ const hash=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('');
+ if(hash!==value.sha256)throw new Error('Incomplete reference progress');
+ return JSON.parse(new TextDecoder().decode(buffer));
+}
+setInterval(renderReferenceTiming,1000);
 const repository=data.repository;
 if(repository)document.getElementById('dataset-link').href=`https://github.com/${repository}/releases/tag/benchmark-dataset`;
 if(repository)document.getElementById('local-reference-link').href=`https://github.com/${repository}/blob/benchmark-data/local-reference-records.json`;
@@ -560,6 +592,16 @@ if(repository){
   if(Date.now()-lastLocalReferenceCheck<120000)return false;
   lastLocalReferenceCheck=Date.now();let changed=false;
   try{
+   const base=`https://raw.githubusercontent.com/${repository}/benchmark-data/`;
+   const pointer=await fetchJSON(base+'reference-queue-active.json?t='+Date.now());
+   const selected=pointer.value?.encoding?await decodeReferenceProgress(pointer.value):pointer.value;
+   const queue=selected?.queue_id;
+   if(pointer.ok&&typeof queue==='string'&&/^[a-zA-Z0-9-]{1,64}$/.test(queue)){
+    const response=await fetchJSON(base+`reference-queue-${queue}-progress.json?t=${Date.now()}`);
+    if(response.ok){const progress=await decodeReferenceProgress(response.value);if(progress.queue_id===queue){referenceQueueProgress=progress;renderReferenceTiming();}}
+   }
+  }catch(e){}
+  try{
    const shared=await fetchJSON(`https://raw.githubusercontent.com/${repository}/benchmark-data/qualified-reference-curves.json?t=${Date.now()}`);
    if(shared.ok&&shared.value?.schema_version===1&&Array.isArray(shared.value.reference_curves)){sharedReferenceCurves=shared.value.reference_curves.map(row=>({...row,origin:'local_qualified'}));changed=true;}
   }catch(e){}
@@ -672,4 +714,5 @@ if __name__ == "__main__":
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     render_report(output, [], dict(state="waiting", recorded=0, planned=0), args.repository)
+
 
