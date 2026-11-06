@@ -20,6 +20,221 @@ PIN = '3f3129935e20a28b466c306b58d4354e301eba39'
 BRANCH = 'reference-group-parallel-probe-20261105'
 REPO = 'brandynlucca/acousticTSbenchmark'
 
+CACHE_JS = r'''
+const path = require('path');
+const cache = require(path.join(process.env.RUNNER_TEMP, 'node_modules', '@actions/cache'));
+const [action, key, filename] = process.argv.slice(2);
+(async () => {
+  if (action === 'save') {
+    await cache.saveCache([filename], key);
+  } else {
+    const hit = await cache.restoreCache([filename], key, []);
+    if (hit !== key) process.exitCode = 3;
+  }
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
+'''
+
+FULL_JULIA = r'''
+using AcousticScattering, LinearAlgebra, JSON3, Serialization, SHA
+const AS=AcousticScattering
+BLAS.set_num_threads(1)
+Threads.nthreads()==4 || error("Expected four Julia threads")
+include(joinpath(ENV["GITHUB_WORKSPACE"],"src","worker_reference.jl"))
+const role, output_path = ARGS
+const work=ENV["RUNNER_TEMP"]
+const cache_helper=joinpath(work,"reference-group-cache.js")
+const prefix="reference-group-"*ENV["GITHUB_RUN_ID"]*"-"*ENV["GITHUB_RUN_ATTEMPT"]
+const cutoff=time()+2100
+const wave=Ref(0)
+const events=Any[]
+const source_hashes=Dict(p=>bytes2hex(sha256(read(joinpath(dirname(pathof(AS)),p)))) for p in
+    ("solvers/coupled/coupled.jl","solvers/bem/axisymmetric.jl","solvers/bem/ring_kernel.jl"))
+
+function transfer(action,key,filename)
+    sink=IOBuffer()
+    process=run(pipeline(ignorestatus(`node $cache_helper $action $key $filename`),stdout=sink,stderr=sink))
+    process.exitcode==0 && return true
+    action=="restore" && process.exitcode==3 && return false
+    error("Reference transfer failed: "*String(take!(sink)))
+end
+function await_transfer(key,filename)
+    while time()<cutoff
+        transfer("restore",key,filename) && return
+        sleep(2)
+    end
+    error("Reference transfer deadline reached")
+end
+function checkpoint(extra=(;))
+    open(output_path*".tmp","w") do io
+        JSON3.write(io,json_safe((;role,source_hashes,events,extra...)))
+    end
+    mv(output_path*".tmp",output_path;force=true)
+end
+function request_at(frequency)
+    Dict{String,Any}("boundary"=>"gas","semimajor_m"=>.07,"semiminor_m"=>.07/1.01,
+        "frequency_hz"=>frequency,"incidence_deg"=>90.,"medium_density_kg_m3"=>1026.8,
+        "medium_sound_speed_m_s"=>1477.3,"target_density_kg_m3"=>1.24,
+        "target_sound_speed_m_s"=>345.,
+        "controls"=>Dict("adaptive"=>true,"target_tol"=>.005,"max_refinements"=>8,
+            "rtol"=>1e-6,"quadrature_extra"=>0,"chief_points"=>8,
+            "boundary_order"=>5,"order"=>6,"mode_threads"=>4),
+        "policy"=>Dict("spatial_tolerance_db"=>.005,"mode_increment"=>8))
+end
+
+function distributed_level(request)
+    wave[]+=1
+    id=wave[]
+    id<=64 || error("Unexpected refinement request count")
+    modes=get(request,:modes,0:request.m_max)
+    groups=UnitRange{Int}[]
+    for m in modes
+        if isempty(groups) || m-first(last(groups))>=16
+            push!(groups,m:m)
+        else
+            groups[end]=first(last(groups)):m
+        end
+    end
+    get(request,:operator_spans,nothing)===nothing || (groups=request.operator_spans)
+    fields=get(request,:fields,nothing)
+    fields===nothing && (fields=Vector{AS._SpheroidSurfaceMode}(undef,request.m_max+1))
+    bare=(; (k=>v for (k,v) in pairs(request) if !(k in (:reports,:fields,:modes,:operator_spans)))...)
+    started=time()
+    counts=Int[]
+    for worker in 1:2
+        assigned=groups[worker:2:end]
+        selected=[m for m in modes if any(m in span for span in assigned)]
+        push!(counts,length(selected))
+        part=merge(bare,(;modes=selected,operator_spans=assigned))
+        filename=joinpath(work,"reference-group-request-$worker.bin")
+        serialize(filename,(;wave=id,source_hashes,stop=false,request=part))
+        transfer("save","$prefix-request-$worker-$id",filename)
+    end
+    println("FREQUENCY_GROUPS_START f_khz=",request.k*1477.3/(2pi*1000),
+        " wave=",id," nr=",request.nr," nt=",request.nt," nb=",request.nb,
+        " modes=",counts," groups=",length(groups))
+    flush(stdout)
+    received=Int[]
+    worker_seconds=Float64[]
+    for worker in 1:2
+        filename=joinpath(work,"reference-group-response-$worker.bin")
+        await_transfer("$prefix-response-$worker-$id",filename)
+        response=deserialize(filename)
+        response.wave==id && response.source_hashes==source_hashes || error("Invalid worker response identity")
+        for (m,field) in response.fields
+            m in received && error("Duplicate mode response")
+            push!(received,m)
+            fields[m+1]=field
+        end
+        request.reports===nothing || append!(request.reports.systems,response.systems)
+        push!(worker_seconds,response.seconds)
+    end
+    sort(received)==sort(collect(modes)) || error("Missing distributed Fourier modes")
+    push!(events,(;wave=id,frequency_hz=request.k*1477.3/(2pi),nr=request.nr,nt=request.nt,
+        nb=request.nb,modes=collect(modes),groups=[collect(s) for s in groups],
+        wall_seconds=time()-started,worker_seconds))
+    checkpoint()
+    println("FREQUENCY_GROUPS_DONE wave=",id," elapsed_seconds=",round(time()-started;digits=2))
+    flush(stdout)
+    fields
+end
+
+function install_dispatcher()
+    filename=joinpath(dirname(pathof(AS)),"solvers","coupled","coupled.jl")
+    source=read(filename,String)
+    a=first(findfirst("function _spheroid_fembem_level(",source))
+    b=first(findnext("function _spheroid_fembem_level_setup(",source,a+1))-1
+    code=source[a:b]
+    marker="    batch=get(task_local_storage(), :acousticscattering_fembem_batch, nothing)"
+    count(marker,code)==1 || error("Pinned dispatcher boundary changed")
+    code=replace(code,marker=>"    dispatcher=get(task_local_storage(), :reference_group_dispatcher, nothing)\n    dispatcher===nothing || return dispatcher(request)\n"*marker)
+    Base.include_string(AS,code,"reference_group_dispatcher.jl")
+end
+
+function finish_workers()
+    id=wave[]+1
+    for worker in 1:2
+        filename=joinpath(work,"reference-group-request-$worker.bin")
+        serialize(filename,(;wave=id,source_hashes,stop=true))
+        transfer("save","$prefix-request-$worker-$id",filename)
+    end
+end
+
+function worker_loop()
+    worker=parse(Int,string(last(role)))
+    cache=AS._ModeSolutionReuse(16*1024^2)
+    task_local_storage(:acousticscattering_mode_solution_reuse,cache) do
+        for id in 1:65
+            input=joinpath(work,"reference-group-request-$worker.bin")
+            await_transfer("$prefix-request-$worker-$id",input)
+            packet=deserialize(input)
+            packet.wave==id && packet.source_hashes==source_hashes || error("Invalid coordinator request identity")
+            packet.stop && break
+            request=packet.request
+            (;body,boundary,k,nr,nt,nb,order,boundary_order)=request
+            options=Base.structdiff(request,(;body,boundary,k,nr,nt,nb,order,boundary_order))
+            reports=AS._SolveReports()
+            started=time()
+            selected=Pair{Int,AS._SpheroidSurfaceMode}[]
+            println("FREQUENCY_GROUP_WORKER_START worker=",worker," wave=",id,
+                " f_khz=",k*1477.3/(2pi*1000)," modes=",length(request.modes))
+            flush(stdout)
+            if !isempty(request.modes)
+                result=AS._spheroid_fembem_level(body,boundary,k,nr,nt,nb,order,boundary_order;
+                    options...,reports)
+                append!(selected,[m=>result[m+1] for m in request.modes])
+            end
+            seconds=time()-started
+            output=joinpath(work,"reference-group-response-$worker.bin")
+            serialize(output,(;wave=id,source_hashes,fields=selected,systems=reports.systems,seconds))
+            transfer("save","$prefix-response-$worker-$id",output)
+            push!(events,(;wave=id,frequency_hz=k*1477.3/(2pi),seconds,modes=collect(request.modes),
+                cache_bytes=cache.bytes,cache_hits=cache.hits,modes_reused=cache.modes_reused))
+            checkpoint()
+            println("FREQUENCY_GROUP_WORKER_DONE worker=",worker," wave=",id,
+                " elapsed_seconds=",round(seconds;digits=2))
+            flush(stdout)
+        end
+    end
+end
+
+function assert_qualified(evidence)
+    evidence["status"]=="ok" || error("Baseline failed spatial qualification")
+    baseline,expanded=evidence["baseline"],evidence["expanded"]
+    expanded===nothing && error("Missing independent Fourier extension")
+    expanded.status=="ok" || error("Expanded solution failed spatial qualification")
+    delta=abs(baseline.ts_db-expanded.ts_db)
+    isfinite(delta) && delta<=.005 || error("Fourier qualification failed")
+    delta
+end
+
+if role=="coordinator"
+    install_dispatcher()
+    controls=Dict(Symbol(k)=>v for (k,v) in request_at(20000.)["controls"])
+    original=Base.invokelatest(reference_calculation,request_at(20000.))
+    assert_qualified(original)
+    smoke=task_local_storage(:reference_group_dispatcher,distributed_level) do
+        Base.invokelatest(reference_calculation,request_at(20000.))
+    end
+    assert_qualified(smoke)
+    relative=abs(smoke["baseline"].amplitude-original["baseline"].amplitude)/abs(original["baseline"].amplitude)
+    relative<=1e-11 || error("Full adaptive smoke comparison failed")
+    println("FULL_ADAPTIVE_SMOKE_PASSED relative_complex=",relative)
+    flush(stdout)
+    started=time()
+    evidence=task_local_storage(:reference_group_dispatcher,distributed_level) do
+        Base.invokelatest(reference_calculation,request_at(299000.))
+    end
+    elapsed=time()-started
+    delta=assert_qualified(evidence)
+    checkpoint((;evidence,elapsed_seconds=elapsed,fourier_delta_db=delta,smoke_relative_complex=relative))
+    finish_workers()
+    println("FULL_FREQUENCY_QUALIFIED f_khz=299 elapsed_seconds=",round(elapsed;digits=2)," fourier_delta_db=",delta)
+    flush(stdout)
+else
+    worker_loop()
+end
+'''
+
 JULIA = r'''
 using AcousticScattering, LinearAlgebra, JSON3, SHA
 const AS = AcousticScattering
@@ -102,7 +317,7 @@ end
 '''
 
 
-def emit_workflow():
+def emit_workflow(full=False):
     import yaml
     checkout = {'uses': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'}
     upload = 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'
@@ -139,9 +354,37 @@ def emit_workflow():
             {'if':'always()','uses':upload,'with':{'name':'reference-group-comparison',
                 'path':'${{ runner.temp }}/reference-group-results/reference-group-comparison.json\n${{ runner.temp }}/reference-group-results/reference-group-comparison.md',
                 'if-no-files-found':'warn','retention-days':14}}]}
+    if full:
+        wf['run-name']='Reference full-frequency distribution: adaptive qualification'
+        wf['env']['ACTIONS_CACHE_SERVICE_V2']='true'
+        wf['env']['SEGMENT_DOWNLOAD_TIMEOUT_MINS']='2'
+        group=wf['jobs']['group']
+        group['strategy']['matrix']['role']=['coordinator','worker1','worker2']
+        group['timeout-minutes']=48
+        group['env']={'GROUP_ROLE':'${{ matrix.role }}'}
+        for step in group['steps']:
+            if step.get('name')=='Prepare pinned numerical environment':
+                step['run'] += '\nnpm install --prefix "$RUNNER_TEMP" --no-audit --no-fund @actions/cache@4.0.0'
+            if step.get('name')=='Measure unchanged Fourier refinement requests':
+                step.clear()
+                step.update(name='Complete adaptive frequency through shared worker jobs',
+                    uses='actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea',
+                    **{'timeout-minutes':37,'with':{'script':
+                        "await exec.exec('python', ['src/reference_group_probe.py', 'compute', '--role', process.env.GROUP_ROLE, '--full']);"}})
+            if step.get('name')=='Retain numerical traces and timing evidence':
+                step['with'].update(name='reference-full-${{ matrix.role }}',
+                    path='${{ runner.temp }}/reference-full-*.json\n${{ runner.temp }}/reference-full-*.log')
+        report=wf['jobs']['compare']
+        report['name']='Combined full-frequency qualification and elapsed time'
+        report['steps'][1]['with']['pattern']='reference-full-*'
+        report['steps'][2]['run']='python src/reference_group_probe.py compare-full --directory "$RUNNER_TEMP/reference-group-results"'
+        report['steps'][3]['with'].update(name='reference-full-comparison',
+            path='${{ runner.temp }}/reference-group-results/reference-full-comparison.json\n${{ runner.temp }}/reference-group-results/reference-full-comparison.md')
     target=WORK/'reference_group_parallel.yml'
     target.write_text(yaml.safe_dump(wf,sort_keys=False),encoding='utf-8')
     (WORK/'reference_group_parallel.jl').write_text(JULIA,encoding='utf-8')
+    (WORK/'reference_group_parallel_full.jl').write_text(FULL_JULIA,encoding='utf-8')
+    (WORK/'reference_group_parallel_cache.js').write_text(CACHE_JS,encoding='utf-8')
     return target
 
 
@@ -154,7 +397,7 @@ def pin():
     (temporary/'reference-group-start.json').write_text(json.dumps({'epoch':time.time(),'pin':PIN}))
 
 
-def compute(role):
+def compute(role,full=False):
     import psutil
     temporary=Path(os.environ['RUNNER_TEMP'])
     runtime=json.loads((temporary/'reference-env/runtime.json').read_text())
@@ -166,24 +409,30 @@ def compute(role):
     command=[x for x in runtime['executables']['acousticscattering'] if not x.startswith('--threads=')]
     command += ['--threads=4','--heap-size-hint=3072M']
     script=temporary/'reference-group-probe.jl'
-    script.write_text(JULIA)
-    output=temporary/f'reference-group-{role}.json'
+    script.write_text(FULL_JULIA if full else JULIA)
+    if full:
+        (temporary/'reference-group-cache.js').write_text(CACHE_JS)
+        assert os.environ.get('ACTIONS_RUNTIME_TOKEN'), 'Actions runtime credentials unavailable'
+    stem='reference-full' if full else 'reference-group'
+    output=temporary/f'{stem}-{role}.json'
     command += [str(script),role,str(output)]
     env=os.environ.copy()
     env.update(runtime.get('env',{}))
     before=time.time()
     peak=cpu=0.0
-    with (temporary/f'reference-group-{role}.log').open('w') as log:
+    seen=0
+    log_path=temporary/f'{stem}-{role}.log'
+    with log_path.open('w') as log:
         process=subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT)
         observer=psutil.Process(process.pid)
         heartbeat=0.0
         while process.poll() is None:
             now=time.time()
-            if now-before>840:
+            if now-before>(2160 if full else 840):
                 process.terminate()
                 try: process.wait(10)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
-                raise RuntimeError('Bounded pilot reached 14-minute compute limit')
+                raise RuntimeError('Bounded pilot reached compute limit')
             try:
                 peak=max(peak,observer.memory_info().rss)
                 times=observer.cpu_times()
@@ -194,11 +443,15 @@ def compute(role):
                 print(f'GROUP_HEARTBEAT role={role} elapsed_seconds={now-before:.1f} cpu_seconds={cpu:.1f} peak_MiB={peak/2**20:.1f}',flush=True)
                 if output.exists():
                     saved=json.loads(output.read_text())
-                    print('GROUP_PROGRESS role='+role+' completed_blocks='+str(len(saved['rows'])),flush=True)
+                    print('GROUP_PROGRESS role='+role+' completed_blocks='+str(len(saved.get('rows',saved.get('events',[])))),flush=True)
+                if full:
+                    contents=log_path.read_text(errors='replace')
+                    print(contents[seen:][-8000:],flush=True)
+                    seen=len(contents)
                 heartbeat=now
             time.sleep(1)
         process_seconds=time.time()-before
-    print((temporary/f'reference-group-{role}.log').read_text(),flush=True)
+    print(log_path.read_text()[seen:],flush=True)
     if process.returncode:
         raise RuntimeError(f'Numerical pilot failed with exit {process.returncode}')
     value=json.loads(output.read_text())
@@ -286,6 +539,50 @@ def compare(directory):
     return result
 
 
+def compare_full(directory):
+    directory=Path(directory)
+    data={role:json.loads((directory/f'reference-full-{role}.json').read_text())
+          for role in ['coordinator','worker1','worker2']}
+    coordinator=data['coordinator']
+    assert all(d['source_hashes']==coordinator['source_hashes'] for d in data.values())
+    evidence=coordinator['evidence']
+    checks=[]
+    for name in ['baseline','expanded']:
+        stage=evidence[name]
+        report=stage['diagnostics']['solver_report']
+        assert stage['status']=='ok' and report.get('converged',True)
+        refinement=report['refinement']
+        assert refinement['converged'] and math.isfinite(refinement['change_db']) and refinement['change_db']<=.005
+        checks.append({'stage':name,'ts_db':stage['ts_db'],'spatial_change_db':refinement['change_db'],
+                       'm_max':report['solver_options']['m_max'],'amplitude':stage['amplitude']})
+    assert coordinator['fourier_delta_db']<=.005 and coordinator['smoke_relative_complex']<=1e-11
+    actual=[e for e in coordinator['events'] if abs(e['frequency_hz']-299000)<.01]
+    result={'qualified':True,'source_sha':PIN,'case':{'a_m':.07,'aspect_ratio':1.01,'angle_deg':90.,'frequency_hz':299000.,'boundary':'gas'},
+        'elapsed_seconds':coordinator['elapsed_seconds'],'stages':checks,
+        'fourier_delta_db':coordinator['fourier_delta_db'],
+        'full_adaptive_smoke_relative_complex':coordinator['smoke_relative_complex'],
+        'refinement_waves':len(actual),'wave_wall_seconds':sum(e['wall_seconds'] for e in actual),
+        'critical_worker_compute_seconds':sum(max(e['worker_seconds']) for e in actual),
+        'runners':{role:{key:d[key] for key in ['cpu_model','peak_rss_MiB','setup_seconds','process_seconds']} for role,d in data.items()},
+        'publication':'Diagnostic evidence only. No dashboard/reference record changed by the pilot.'}
+    (directory/'reference-full-comparison.json').write_text(json.dumps(result,indent=2)+'\n')
+    lines=['Complete adaptive reference distribution','',
+        'Gas, a=0.07 m, aspect ratio 1.01, 90 degrees, 299 kHz.','',
+        f"Qualified frequency elapsed time: {result['elapsed_seconds']:.2f} s.",
+        f"Fourier TS change: {result['fourier_delta_db']:.9g} dB.",
+        f"Complete 20 kHz serial/distributed relative complex difference: {result['full_adaptive_smoke_relative_complex']:.3e}.",'',
+        '| Stage | Spatial TS change (dB) | Maximum Fourier index |','| --- | ---: | ---: |']
+    lines += [f"| {r['stage']} | {r['spatial_change_db']:.9g} | {r['m_max']} |" for r in checks]
+    lines += ['',f"Adaptive waves: {len(actual)}. Critical worker computation: {result['critical_worker_compute_seconds']:.2f} s.",
+        'Full-frequency speedup requires a matched serial timing. Existing 30-minute timeout evidence provides a separate historical comparison.','',result['publication'],'']
+    report='\n'.join(lines)
+    (directory/'reference-full-comparison.md').write_text(report)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as stream: stream.write(report)
+    print(report)
+    return result
+
+
 def api_client():
     spec=importlib.util.spec_from_file_location('reference_queue_driver',WORK/'reference_queue_migration.py')
     module=importlib.util.module_from_spec(spec)
@@ -293,9 +590,9 @@ def api_client():
     return module.api
 
 
-def deploy():
+def deploy(full=False):
     api=api_client()
-    workflow=emit_workflow()
+    workflow=emit_workflow(full)
     receipt_path=WORK/'reference_group_parallel_deployment.json'
     previous=json.loads(receipt_path.read_text()) if receipt_path.exists() else None
     head=api('git/ref/heads/'+(BRANCH if previous else 'main'))['object']['sha']
@@ -317,7 +614,7 @@ def deploy():
         api('git/refs/heads/'+BRANCH,{'sha':commit['sha'],'force':False},method='PATCH')
     else:
         api('git/refs',{'ref':'refs/heads/'+BRANCH,'sha':commit['sha']},method='POST')
-    receipt={'branch':BRANCH,'commit':commit['sha'],'base':head,'source_pin':PIN,'files':list(files),'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    receipt={'branch':BRANCH,'commit':commit['sha'],'base':head,'source_pin':PIN,'files':list(files),'full':full,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
     (WORK/'reference_group_parallel_deployment.json').write_text(json.dumps(receipt,indent=2)+'\n')
     api('actions/workflows/references.yml/dispatches',{'ref':BRANCH},method='POST')
     print(json.dumps(receipt,indent=2))
@@ -341,18 +638,20 @@ def collect():
     artifacts=api(f"actions/runs/{run['id']}/artifacts?per_page=100")['artifacts']
     saved=[]
     for artifact in artifacts:
-        if not artifact['name'].startswith('reference-group'):
+        if not artifact['name'].startswith(('reference-group','reference-full')):
             continue
         raw=api(f"actions/artifacts/{artifact['id']}/zip",raw=True)
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             for member in archive.infolist():
                 name=Path(member.filename).name
-                if name!=member.filename or not name.startswith('reference-group-') or not name.endswith(('.json','.md','.log')):
+                if name!=member.filename or not name.startswith(('reference-group-','reference-full-')) or not name.endswith(('.json','.md','.log')):
                     continue
                 (WORK/name).write_bytes(archive.read(member))
                 saved.append(name)
     print(json.dumps({'run':run['html_url'],'status':run['status'],'saved':saved},indent=2))
-    if all((WORK/f'reference-group-{role}.json').exists() for role in ['baseline','worker1','worker2']):
+    if 'reference-full-coordinator.json' in saved:
+        compare_full(WORK)
+    elif all((WORK/f'reference-group-{role}.json').exists() for role in ['baseline','worker1','worker2']):
         result=compare(WORK)
         jobs=api(f"actions/runs/{run['id']}/jobs?per_page=20")['jobs']
         (WORK/'reference_group_parallel_job_times.json').write_text(json.dumps({'created_at':run['created_at'],'jobs':[
@@ -371,20 +670,26 @@ def validate():
     subprocess.run(['julia','--startup-file=no','-e',
         'e=Meta.parseall(read(ARGS[1],String)); @assert e.head==:toplevel; @assert all(x->!(x isa Expr && x.head in (:error,:incomplete)),e.args); println(:passed)',
         str(WORK/'reference_group_parallel.jl')],check=True)
+    subprocess.run(['julia','--startup-file=no','-e',
+        'e=Meta.parseall(read(ARGS[1],String)); @assert e.head==:toplevel; @assert all(x->!(x isa Expr && x.head in (:error,:incomplete)),e.args); println(:passed)',
+        str(WORK/'reference_group_parallel_full.jl')],check=True)
+    subprocess.run(['node','--check',str(WORK/'reference_group_parallel_cache.js')],check=True)
     print('Python, workflow generation, Julia syntax and complex trace comparisons passed')
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['generate','pin','compute','compare','deploy','status','collect','validate'])
-    parser.add_argument('--role',choices=['baseline','worker1','worker2'])
+    parser.add_argument('action',choices=['generate','pin','compute','compare','compare-full','deploy','status','collect','validate'])
+    parser.add_argument('--role',choices=['baseline','worker1','worker2','coordinator'])
     parser.add_argument('--directory')
+    parser.add_argument('--full',action='store_true')
     args=parser.parse_args()
-    if args.action=='generate': print(emit_workflow())
+    if args.action=='generate': print(emit_workflow(args.full))
     elif args.action=='pin': pin()
-    elif args.action=='compute': compute(args.role)
+    elif args.action=='compute': compute(args.role,args.full)
     elif args.action=='compare': compare(args.directory)
-    elif args.action=='deploy': deploy()
+    elif args.action=='compare-full': compare_full(args.directory)
+    elif args.action=='deploy': deploy(args.full)
     elif args.action=='collect': collect()
     elif args.action=='validate': validate()
     else: status()

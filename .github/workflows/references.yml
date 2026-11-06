@@ -1,5 +1,5 @@
 name: Reference Fourier-group pilot
-run-name: 'Reference group distribution: bounded accuracy and elapsed-time pilot'
+run-name: 'Reference full-frequency distribution: adaptive qualification'
 'on':
   workflow_dispatch: {}
 permissions:
@@ -10,17 +10,19 @@ env:
   MKL_NUM_THREADS: '1'
   JULIA_NUM_THREADS: '4'
   PYTHONDONTWRITEBYTECODE: '1'
+  ACTIONS_CACHE_SERVICE_V2: 'true'
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
 jobs:
   group:
     name: '${{ matrix.role }}: 299 kHz coupled FEM-BEM'
     runs-on: ubuntu-24.04
-    timeout-minutes: 28
+    timeout-minutes: 48
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         role:
-        - baseline
+        - coordinator
         - worker1
         - worker2
     steps:
@@ -49,22 +51,29 @@ jobs:
       run: 'python -m pip install psutil==7.2.2
 
         python src/prepare.py --directory "$RUNNER_TEMP/reference-env" --software
-        acousticscattering'
-    - name: Measure unchanged Fourier refinement requests
-      timeout-minutes: 15
-      run: python src/reference_group_probe.py compute --role "${{ matrix.role }}"
+        acousticscattering
+
+        npm install --prefix "$RUNNER_TEMP" --no-audit --no-fund @actions/cache@4.0.0'
+    - name: Complete adaptive frequency through shared worker jobs
+      uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+      timeout-minutes: 37
+      with:
+        script: await exec.exec('python', ['src/reference_group_probe.py', 'compute',
+          '--role', process.env.GROUP_ROLE, '--full']);
     - name: Retain numerical traces and timing evidence
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: reference-groups-${{ matrix.role }}
-        path: '${{ runner.temp }}/reference-group-*.json
+        name: reference-full-${{ matrix.role }}
+        path: '${{ runner.temp }}/reference-full-*.json
 
-          ${{ runner.temp }}/reference-group-*.log'
+          ${{ runner.temp }}/reference-full-*.log'
         if-no-files-found: error
         retention-days: 14
+    env:
+      GROUP_ROLE: ${{ matrix.role }}
   compare:
-    name: Combined accuracy, elapsed time and memory report
+    name: Combined full-frequency qualification and elapsed time
     runs-on: ubuntu-24.04
     needs: group
     if: always()
@@ -73,17 +82,17 @@ jobs:
     - *id001
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        pattern: reference-groups-*
+        pattern: reference-full-*
         path: ${{ runner.temp }}/reference-group-results
         merge-multiple: true
     - name: Compare every trace and account for runner overhead
-      run: python src/reference_group_probe.py compare --directory "$RUNNER_TEMP/reference-group-results"
+      run: python src/reference_group_probe.py compare-full --directory "$RUNNER_TEMP/reference-group-results"
     - if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: reference-group-comparison
-        path: '${{ runner.temp }}/reference-group-results/reference-group-comparison.json
+        name: reference-full-comparison
+        path: '${{ runner.temp }}/reference-group-results/reference-full-comparison.json
 
-          ${{ runner.temp }}/reference-group-results/reference-group-comparison.md'
+          ${{ runner.temp }}/reference-group-results/reference-full-comparison.md'
         if-no-files-found: warn
         retention-days: 14
