@@ -411,17 +411,18 @@ jobs:
       run: python src/reference_store.py queue-finish --queue-id "$QUEUE_ID" --directory "$RUNNER_TEMP/reference-publication"
         --budget-seconds "$((QUEUE_BUDGET * 60))"
   group:
-    name: '${{ matrix.role }}: 299 kHz coupled FEM-BEM'
+    name: '${{ matrix.role }}: 3 x 4 threads, 299 kHz coupled FEM-BEM'
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 4
       matrix:
         role:
         - coordinator
         - worker1
         - worker2
+        - worker3
     steps:
     - &id001
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -476,6 +477,7 @@ jobs:
       ACTIONS_CACHE_SERVICE_V2: 'true'
       SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
       GROUP_ROLE: ${{ matrix.role }}
+      GROUP_WORKERS: '3'
     if: ${{ inputs.fourier_group_pilot && inputs.queue_id == '' && inputs.timing_run_id
       == '' }}
     permissions:
@@ -494,8 +496,17 @@ jobs:
         pattern: reference-full-*
         path: ${{ runner.temp }}/reference-group-results
         merge-multiple: true
+    - name: Read completed two-worker evidence
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        pattern: reference-full-*
+        run-id: '42138971436'
+        github-token: ${{ github.token }}
+        path: ${{ runner.temp }}/reference-prior
+        merge-multiple: true
     - name: Compare every trace and account for runner overhead
       run: python src/reference_group_probe.py compare-full --directory "$RUNNER_TEMP/reference-group-results"
+        --previous-directory "$RUNNER_TEMP/reference-prior"
     - if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
@@ -515,3 +526,4 @@ jobs:
       SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
     permissions:
       contents: read
+      actions: read

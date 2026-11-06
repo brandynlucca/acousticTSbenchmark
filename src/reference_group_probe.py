@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -19,6 +20,57 @@ WORK = Path(__file__).resolve().parent
 PIN = '3f3129935e20a28b466c306b58d4354e301eba39'
 BRANCH = 'reference-group-parallel-probe-20261105'
 REPO = 'brandynlucca/acousticTSbenchmark'
+QUEUE_WORKFLOW_COMMIT = 'f1131ea8788a15b26d52e6ec65608dbe9dbfa446'
+
+
+def combined_workflow(production, pilot):
+    """Retain queue behavior and isolate optional numerical pilot jobs."""
+    import copy
+    import yaml
+    original = yaml.safe_load(production)
+    prefix, jobs = production.split('\njobs:\n', 1)
+    input_marker = '  workflow_dispatch:\n    inputs:\n'
+    assert prefix.count(input_marker) == 1
+    prefix = prefix.replace(input_marker, input_marker +
+        '      fourier_group_pilot:\n'
+        '        description: Run the bounded Fourier-group diagnostic instead of the queue\n'
+        '        type: boolean\n'
+        '        default: false\n', 1)
+    run_name = original['run-name'].strip()[3:-2].strip()
+    replacement = ("run-name: ${{ inputs.fourier_group_pilot && "
+        "'Reference Fourier-group diagnostic' || (" + run_name + ') }}')
+    prefix, count = re.subn(r'^run-name:.*$', replacement, prefix, count=1, flags=re.M)
+    assert count == 1
+    for name, job in original['jobs'].items():
+        condition = job.get('if')
+        assert condition, 'Every production job requires an explicit gate'
+        inner = condition.strip()
+        if inner.startswith('${{'):
+            inner = inner[3:-2].strip()
+        gated = '${{ !inputs.fourier_group_pilot && (' + inner + ') }}'
+        pattern = r'(^  ' + re.escape(name) + r':\n.*?^    if: )[^\n]*'
+        jobs, count = re.subn(pattern, lambda match: match.group(1) + gated,
+                            jobs, count=1, flags=re.M | re.S)
+        assert count == 1, name
+    pilot_jobs = copy.deepcopy(pilot['jobs'])
+    for name, job in pilot_jobs.items():
+        assert name not in original['jobs']
+        condition = "inputs.fourier_group_pilot && inputs.queue_id == '' && inputs.timing_run_id == ''"
+        if name == 'compare':
+            condition = "always() && " + condition + " && needs.group.result != 'skipped'"
+        job['if'] = '${{ ' + condition + ' }}'
+        job['env'] = {**pilot.get('env', {}), **job.get('env', {})}
+        job['permissions'] = {'contents': 'read'}
+    appended = yaml.safe_dump({'jobs': pilot_jobs}, sort_keys=False).split('jobs:\n', 1)[1]
+    candidate = prefix + '\njobs:\n' + jobs.rstrip() + '\n' + appended
+    parsed = yaml.safe_load(candidate)
+    assert set(parsed['jobs']) == set(original['jobs']) | set(pilot_jobs)
+    for name, job in original['jobs'].items():
+        preserved = dict(parsed['jobs'][name])
+        preserved['if'] = job['if']
+        assert preserved == job, name
+    assert "<<'REFERENCE_QUEUE'\n" in candidate
+    return candidate
 
 CACHE_JS = r'''
 const path = require('path');
@@ -41,6 +93,8 @@ BLAS.set_num_threads(1)
 Threads.nthreads()==4 || error("Expected four Julia threads")
 include(joinpath(ENV["GITHUB_WORKSPACE"],"src","worker_reference.jl"))
 const role, output_path = ARGS
+const worker_count=parse(Int,get(ENV,"GROUP_WORKERS","2"))
+2<=worker_count<=4 || error("Expected two to four computational workers")
 const work=ENV["RUNNER_TEMP"]
 const cache_helper=joinpath(work,"reference-group-cache.js")
 const prefix="reference-group-"*ENV["GITHUB_RUN_ID"]*"-"*ENV["GITHUB_RUN_ATTEMPT"]
@@ -66,7 +120,7 @@ function await_transfer(key,filename)
 end
 function checkpoint(extra=(;))
     open(output_path*".tmp","w") do io
-        JSON3.write(io,json_safe((;role,source_hashes,events,extra...)))
+        JSON3.write(io,json_safe((;role,worker_count,source_hashes,events,extra...)))
     end
     mv(output_path*".tmp",output_path;force=true)
 end
@@ -100,8 +154,8 @@ function distributed_level(request)
     bare=(; (k=>v for (k,v) in pairs(request) if !(k in (:reports,:fields,:modes,:operator_spans)))...)
     started=time()
     counts=Int[]
-    for worker in 1:2
-        assigned=groups[worker:2:end]
+    for worker in 1:worker_count
+        assigned=groups[worker:worker_count:end]
         selected=[m for m in modes if any(m in span for span in assigned)]
         push!(counts,length(selected))
         part=merge(bare,(;modes=selected,operator_spans=assigned))
@@ -115,7 +169,7 @@ function distributed_level(request)
     flush(stdout)
     received=Int[]
     worker_seconds=Float64[]
-    for worker in 1:2
+    for worker in 1:worker_count
         filename=joinpath(work,"reference-group-response-$worker.bin")
         await_transfer("$prefix-response-$worker-$id",filename)
         response=deserialize(filename)
@@ -152,7 +206,7 @@ end
 
 function finish_workers()
     id=wave[]+1
-    for worker in 1:2
+    for worker in 1:worker_count
         filename=joinpath(work,"reference-group-request-$worker.bin")
         serialize(filename,(;wave=id,source_hashes,stop=true))
         transfer("save","$prefix-request-$worker-$id",filename)
@@ -204,6 +258,10 @@ function assert_qualified(evidence)
     expanded.status=="ok" || error("Expanded solution failed spatial qualification")
     delta=abs(baseline.ts_db-expanded.ts_db)
     isfinite(delta) && delta<=.005 || error("Fourier qualification failed")
+    relative=abs(baseline.amplitude-expanded.amplitude)/max(abs(baseline.amplitude),abs(expanded.amplitude),1e-10)
+    isfinite(relative) && relative<=.001 || error("Complex Fourier qualification failed")
+    baseline.diagnostics["solver_report"].solver_options.m_max+8==
+        expanded.diagnostics["solver_report"].solver_options.m_max || error("Incorrect Fourier extension")
     delta
 end
 
@@ -317,7 +375,9 @@ end
 '''
 
 
-def emit_workflow(full=False):
+def emit_workflow(full=False, workers=2):
+    assert 2 <= workers <= 4
+    assert full or workers == 2, 'Worker-count comparison requires the full adaptive solve'
     import yaml
     checkout = {'uses': 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'}
     upload = 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'
@@ -359,9 +419,11 @@ def emit_workflow(full=False):
         wf['env']['ACTIONS_CACHE_SERVICE_V2']='true'
         wf['env']['SEGMENT_DOWNLOAD_TIMEOUT_MINS']='2'
         group=wf['jobs']['group']
-        group['strategy']['matrix']['role']=['coordinator','worker1','worker2']
+        group['strategy']['matrix']['role']=['coordinator']+[f'worker{i}' for i in range(1,workers+1)]
+        group['strategy']['max-parallel']=workers+1
         group['timeout-minutes']=48
-        group['env']={'GROUP_ROLE':'${{ matrix.role }}'}
+        group['env']={'GROUP_ROLE':'${{ matrix.role }}','GROUP_WORKERS':str(workers)}
+        group['name']=f'${{{{ matrix.role }}}}: {workers} x 4 threads, 299 kHz coupled FEM-BEM'
         for step in group['steps']:
             if step.get('name')=='Prepare pinned numerical environment':
                 step['run'] += '\nnpm install --prefix "$RUNNER_TEMP" --no-audit --no-fund @actions/cache@4.0.0'
@@ -380,8 +442,25 @@ def emit_workflow(full=False):
         report['steps'][2]['run']='python src/reference_group_probe.py compare-full --directory "$RUNNER_TEMP/reference-group-results"'
         report['steps'][3]['with'].update(name='reference-full-comparison',
             path='${{ runner.temp }}/reference-group-results/reference-full-comparison.json\n${{ runner.temp }}/reference-group-results/reference-full-comparison.md')
+        if workers != 2:
+            report['steps'][2]['run'] += ' --previous-directory "$RUNNER_TEMP/reference-prior"'
+            report['steps'].insert(2, {'name':'Read completed two-worker evidence',
+                'uses':'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+                'with':{'pattern':'reference-full-*','run-id':'42138971436',
+                    'github-token':'${{ github.token }}','path':'${{ runner.temp }}/reference-prior',
+                    'merge-multiple':True}})
     target=WORK/'reference_group_parallel.yml'
-    target.write_text(yaml.safe_dump(wf,sort_keys=False),encoding='utf-8')
+    production = (WORK/'reference_group_parallel_production.yml').read_text(encoding='utf-8')
+    combined=combined_workflow(production, wf)
+    if full and workers != 2:
+        # Cross-run comparison reads retained evidence without rerunning the baseline.
+        position=combined.index('  compare:\n')
+        head,tail=combined[:position],combined[position:]
+        assert tail.count('    permissions:\n      contents: read\n')==1
+        tail=tail.replace('    permissions:\n      contents: read\n',
+            '    permissions:\n      contents: read\n      actions: read\n',1)
+        combined=head+tail
+    target.write_text(combined, encoding='utf-8')
     (WORK/'reference_group_parallel.jl').write_text(JULIA,encoding='utf-8')
     (WORK/'reference_group_parallel_full.jl').write_text(FULL_JULIA,encoding='utf-8')
     (WORK/'reference_group_parallel_cache.js').write_text(CACHE_JS,encoding='utf-8')
@@ -539,11 +618,13 @@ def compare(directory):
     return result
 
 
-def compare_full(directory):
+def compare_full(directory, previous_directory=None):
     directory=Path(directory)
+    coordinator=json.loads((directory/'reference-full-coordinator.json').read_text())
+    workers=int(coordinator.get('worker_count',2))
     data={role:json.loads((directory/f'reference-full-{role}.json').read_text())
-          for role in ['coordinator','worker1','worker2']}
-    coordinator=data['coordinator']
+          for role in ['coordinator']+[f'worker{i}' for i in range(1,workers+1)]}
+    assert all(int(d.get('worker_count',2))==workers for d in data.values())
     assert all(d['source_hashes']==coordinator['source_hashes'] for d in data.values())
     evidence=coordinator['evidence']
     checks=[]
@@ -561,17 +642,55 @@ def compare_full(directory):
     assert math.isfinite(relative_complex) and relative_complex<=.001
     assert checks[1]['m_max']==checks[0]['m_max']+8
     actual=[e for e in coordinator['events'] if abs(e['frequency_hz']-299000)<.01]
+    assert all(len(e['worker_seconds'])==workers for e in actual)
     result={'qualified':True,'source_sha':PIN,'case':{'a_m':.07,'aspect_ratio':1.01,'angle_deg':90.,'frequency_hz':299000.,'boundary':'gas'},
+        'computational_workers':workers,'threads_per_worker':4,'computational_threads':4*workers,
         'elapsed_seconds':coordinator['elapsed_seconds'],'stages':checks,
         'fourier_delta_db':coordinator['fourier_delta_db'],
+        'fourier_relative_complex':relative_complex,
         'full_adaptive_smoke_relative_complex':coordinator['smoke_relative_complex'],
         'refinement_waves':len(actual),'wave_wall_seconds':sum(e['wall_seconds'] for e in actual),
         'critical_worker_compute_seconds':sum(max(e['worker_seconds']) for e in actual),
         'runners':{role:{key:d[key] for key in ['cpu_model','peak_rss_MiB','setup_seconds','process_seconds']} for role,d in data.items()},
         'publication':'Diagnostic evidence only. No dashboard/reference record changed by the pilot.'}
+    if previous_directory:
+        previous_directory=Path(previous_directory)
+        previous_prefix=('reference-full-2workers-' if
+            (previous_directory/'reference-full-2workers-coordinator.json').exists() else 'reference-full-')
+        previous=json.loads((previous_directory/(previous_prefix+'coordinator.json')).read_text())
+        assert previous['source_hashes']==coordinator['source_hashes']
+        comparisons=[]
+        for name in ('baseline','expanded'):
+            left=previous['evidence'][name]
+            right=evidence[name]
+            a=complex(left['amplitude']['real'],left['amplitude']['imag'])
+            b=complex(right['amplitude']['real'],right['amplitude']['imag'])
+            relative=abs(a-b)/max(abs(a),abs(b),1e-10)
+            delta=right['ts_db']-left['ts_db']
+            old_refinement=left['diagnostics']['solver_report']['refinement']
+            new_refinement=right['diagnostics']['solver_report']['refinement']
+            meshes_equal=all(old_refinement.get(key)==new_refinement.get(key)
+                for key in ('mode_n_r','mode_n_theta','mode_n_boundary','mode_refinements'))
+            assert meshes_equal, 'Adaptive meshes changed during worker-count comparison'
+            assert math.isfinite(relative) and relative<=.001 and abs(delta)<=.005
+            comparisons.append(dict(stage=name,delta_ts_db=delta,relative_complex_difference=relative,
+                                    adaptive_meshes_equal=meshes_equal))
+        old_workers=int(previous.get('worker_count',2))
+        old_runners={f'worker{i}':json.loads((previous_directory/(previous_prefix+f'worker{i}.json')).read_text())
+                     for i in range(1,old_workers+1)}
+        old_seconds=previous['elapsed_seconds']
+        result['previous_worker_comparison']=dict(
+            previous_workers=old_workers,previous_elapsed_seconds=old_seconds,
+            current_elapsed_seconds=result['elapsed_seconds'],
+            elapsed_reduction_percent=100*(1-result['elapsed_seconds']/old_seconds),
+            numerical_comparisons=comparisons,
+            previous_worker_cpu_models={role:d['cpu_model'] for role,d in old_runners.items()},
+            current_worker_cpu_models={role:d['cpu_model'] for role,d in data.items() if role!='coordinator'},
+            limitation='Different runner allocations prevent attribution of the elapsed-time change solely to worker count.')
     (directory/'reference-full-comparison.json').write_text(json.dumps(result,indent=2)+'\n')
     lines=['Complete adaptive reference distribution','',
         'Gas, a=0.07 m, aspect ratio 1.01, 90 degrees, 299 kHz.','',
+        f'Computational workers: {workers}, with four threads per worker and {workers*4} computational threads.',
         f"Qualified frequency elapsed time: {result['elapsed_seconds']:.2f} s.",
         f"Fourier TS change: {result['fourier_delta_db']:.9g} dB.",
         f"Complete 20 kHz serial/distributed relative complex difference: {result['full_adaptive_smoke_relative_complex']:.3e}.",'',
@@ -579,12 +698,151 @@ def compare_full(directory):
     lines += [f"| {r['stage']} | {r['spatial_change_db']:.9g} | {r['m_max']} |" for r in checks]
     lines += ['',f"Adaptive waves: {len(actual)}. Critical worker computation: {result['critical_worker_compute_seconds']:.2f} s.",
         'Full-frequency speedup requires a matched serial timing. Existing 30-minute timeout evidence provides a separate historical comparison.','',result['publication'],'']
+    if previous_directory:
+        difference=result['previous_worker_comparison']
+        lines += [f"Previous {old_workers}-worker elapsed time: {old_seconds:.2f} s.",
+            f"Observed elapsed-time reduction: {difference['elapsed_reduction_percent']:.2f}%.",
+            difference['limitation'],'']
     report='\n'.join(lines)
     (directory/'reference-full-comparison.md').write_text(report)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as stream: stream.write(report)
     print(report)
     return result
+
+
+def prepare_record():
+    report=compare_full(WORK)
+    coordinator=json.loads((WORK/'reference-full-coordinator.json').read_text())
+    plan=json.loads((WORK/'reference_queue_plan.json').read_text())
+    matches=[j for task in plan['tasks'] for j in task['jobs']
+             if j['semimajor_m']==.07 and abs(j['aspect_ratio']-1.01)<1e-12
+             and j['incidence_deg']==90 and j['boundary']=='gas' and j['frequency_hz']==299000]
+    assert len(matches)==1
+    job=json.loads(json.dumps(matches[0]))
+    assert job['source_sha']==PIN
+    api=api_client()
+    runs=api('actions/workflows/references.yml/runs?branch='+BRANCH+'&event=workflow_dispatch&per_page=1')['workflow_runs']
+    run=runs[0]
+    assert run['status']=='completed'
+    jobs=api(f"actions/runs/{run['id']}/jobs?per_page=30")['jobs']
+    numerical=[j for j in jobs if j['name'].split(':')[0] in ('coordinator','worker1','worker2')]
+    assert len(numerical)==3 and all(j['conclusion']=='success' for j in numerical)
+    source=api('contents/src/reference_group_probe.py?ref='+run['head_sha'])
+    adapter_hash=hashlib.sha256(base64.b64decode(source['content'])).hexdigest()
+    sys.path.insert(0,r'C:\Users\Brandyn\GitHub\acousticTSbenchmark\src')
+    import references
+    from benchmark import fingerprint
+    adapters={}
+    for filename in ['references.py','worker_reference.jl','worker_julia.jl']:
+        content=api('contents/src/'+filename+'?ref='+run['head_sha'])
+        adapters[filename]=hashlib.sha256(base64.b64decode(content['content'])).hexdigest()
+    adapters['reference_group_probe.py']=adapter_hash
+    job['signature']['adapters']=adapters
+    job['reference_id']=fingerprint(job['signature'])
+    evidence=coordinator['evidence']
+    evidence.update(elapsed_seconds=coordinator['elapsed_seconds'],runtime_version='1.12.1',
+        julia_threads=4,blas_threads=1,distributed_worker_jobs=2)
+    provenance={'kind':'distributed_reference_pilot','run_url':run['html_url'],
+        'execution_source_sha':run['head_sha'],'execution_adapter_sha256':adapter_hash,
+        'numerical_source_sha256':coordinator['source_hashes'],
+        'serial_distributed_smoke_relative_complex':coordinator['smoke_relative_complex'],
+        'worker_jobs':report['runners'],'standard_reference_policy':True}
+    record=references.reference_record(job,evidence,provenance)
+    assert record['qualified'] and references.valid_cached(record,job)
+    old=json.loads((WORK/'reference_performance_full_accelerated2_299000_pass2verified.json').read_text())
+    previous=old['result']['values']['expanded']
+    amplitude=complex(record['amplitude_real_m'],record['amplitude_imag_m'])
+    previous_amplitude=complex(*previous['amplitude'])
+    comparison={'ts_difference_db':record['ts_db']-previous['ts_db'],
+        'relative_complex_difference':abs(amplitude-previous_amplitude)/abs(previous_amplitude)}
+    # Cross-implementation agreement uses the existing physical reference policy.
+    # The earlier Windows result used different numerical sources, so an extra
+    # machine-level identity threshold does not characterize distribution error.
+    for stage in ('baseline','expanded'):
+        fresh=coordinator['evidence'][stage]['diagnostics']['solver_report']['refinement']
+        prior=old['result']['values'][stage]['refinement']
+        for key in ('mode_n_r','mode_n_theta','mode_n_boundary','mode_refinements'):
+            assert fresh.get(key)==prior.get(key),(stage,key)
+    comparison['per_mode_meshes_equal']=True
+    assert abs(comparison['ts_difference_db'])<=job['policy']['spatial_tolerance_db'],comparison
+    assert comparison['relative_complex_difference']<=job['policy']['relative_complex_tolerance'],comparison
+    record['provenance']['earlier_converged_comparison']=comparison
+    (WORK/(job['reference_id']+'.json')).write_text(json.dumps(record,separators=(',',':'),allow_nan=False)+'\n')
+    (WORK/'reference_group_parallel_qualified_job.json').write_text(json.dumps(job,indent=2)+'\n')
+    receipt={'reference_id':job['reference_id'],'physical_id':job['physical_id'],
+        'qualified':True,'qualification':record['qualification'],'earlier_comparison':comparison,
+        'run_url':run['html_url'],'elapsed_seconds':coordinator['elapsed_seconds']}
+    (WORK/'reference_group_parallel_qualification.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    print(json.dumps(receipt,indent=2))
+
+
+def publish_record():
+    sys.path.insert(0,r'C:\Users\Brandyn\GitHub\acousticTSbenchmark\src')
+    import reference_curves as curves
+    import reference_store
+    import references
+    from publish_progress import GitHub, APIError
+    job=json.loads((WORK/'reference_group_parallel_qualified_job.json').read_text())
+    record=json.loads((WORK/(job['reference_id']+'.json')).read_text())
+    assert references.valid_cached(record,job)
+    token=subprocess.run(['gh','auth','token'],capture_output=True,check=True,text=True).stdout.strip()
+    api=GitHub(REPO,token)
+    def shared():
+        entry=api.request('GET','/contents/qualified-reference-curves.json?ref=benchmark-data')
+        if entry.get('encoding')!='base64' or not entry.get('content'):
+            entry=api.request('GET','/git/blobs/'+entry['sha'])
+        payload=json.loads(base64.b64decode(entry['content']))
+        return curves._validated(payload['reference_curves'])
+    before=shared()
+    physical=job['physical_id']
+    receipt={'reference_id':job['reference_id'],'physical_id':physical,
+        'count_before':len(before),'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if physical in before:
+        receipt.update(status='existing_qualified_reference_preserved',selected_reference_id=before[physical]['reference_id'])
+    else:
+        receipt['full_records_saved']=reference_store.publish_cache(api,[job],WORK,branch='reference-data')
+        addition=curves.curves_from_records([job],{job['reference_id']:record})
+        assert len(addition)==1
+        try:
+            receipt['new_curves']=curves.publish_shared_curves(api,addition)
+        except ValueError:
+            fresh=shared()
+            if physical not in fresh: raise
+            receipt['concurrent_qualified_reference_preserved']=True
+        after=shared()
+        assert physical in after and set(before)<=set(after)
+        receipt.update(status='qualified_reference_visible',count_after=len(after),selected_reference_id=after[physical]['reference_id'])
+    (WORK/'reference_group_parallel_publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    print(json.dumps(receipt,indent=2))
+
+
+def fix_remote_report():
+    api=api_client()
+    head=api('git/ref/heads/'+BRANCH)['object']['sha']
+    original=api('contents/src/reference_group_probe.py?ref='+head)
+    source=base64.b64decode(original['content']).decode()
+    before="assert stage['status']=='ok' and report.get('converged',True)"
+    assert source.count(before)==1
+    source=source.replace(before,before+' is not False',1)
+    marker="    assert coordinator['fourier_delta_db']<=.005 and coordinator['smoke_relative_complex']<=1e-11\n"
+    assert source.count(marker)==1
+    extra="""    amplitudes=[complex(r['amplitude']['real'],r['amplitude']['imag']) for r in checks]
+    relative_complex=abs(amplitudes[0]-amplitudes[1])/max(abs(amplitudes[0]),abs(amplitudes[1]),1e-10)
+    assert math.isfinite(relative_complex) and relative_complex<=.001
+    assert checks[1]['m_max']==checks[0]['m_max']+8
+"""
+    source=source.replace(marker,marker+extra,1)
+    namespace={'__name__':'reference_report_check','__file__':str(WORK/'reference_group_parallel.py')}
+    exec(compile(source,'reference_group_report_candidate.py','exec'),namespace)
+    namespace['compare_full'](WORK)
+    result=api('contents/src/reference_group_probe.py',dict(branch=BRANCH,sha=original['sha'],
+        message='Match the reference report to production convergence validation',
+        content=base64.b64encode(source.encode()).decode()),method='PUT')
+    receipt={'before':head,'commit':result['commit']['sha'],'file':'src/reference_group_probe.py',
+        'validation':'Saved complete frequency passed, no numerical calculation repeated'}
+    (WORK/'reference_group_parallel_report_fix.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    print(json.dumps(receipt,indent=2))
 
 
 def api_client():
@@ -594,14 +852,64 @@ def api_client():
     return module.api
 
 
-def deploy(full=False):
+def repair_workflow(publish=False):
+    import yaml
+    api = api_client()
+    head = api('git/ref/heads/' + BRANCH)['object']['sha']
+    assert head == '4dd2ad1a886dde15fa9c4f47ddbf57c299bb2594', 'Diagnostic branch changed'
+    path = '.github/workflows/references.yml'
+    production_blob = api('contents/' + path + '?ref=' + QUEUE_WORKFLOW_COMMIT)
+    pilot_blob = api('contents/' + path + '?ref=' + head)
+    production = base64.b64decode(production_blob['content']).decode()
+    pilot = base64.b64decode(pilot_blob['content']).decode()
+    candidate = combined_workflow(production, yaml.safe_load(pilot))
+    (WORK/'reference_group_parallel_production.yml').write_text(production, encoding='utf-8')
+    (WORK/'reference_group_parallel_workflow_repair.yml').write_text(candidate, encoding='utf-8')
+
+    # Exercise the original cache-identity test against the proposed workflow.
+    import unittest
+    from unittest.mock import patch
+    tests = Path(r'C:\Users\Brandyn\GitHub\acousticTSbenchmark\tests')
+    sys.path.insert(0, str(tests))
+    import test_references
+    read_text = Path.read_text
+    workflow_path = tests.parent / path
+    def proposed_text(target, *args, **kwargs):
+        if target == workflow_path:
+            return candidate
+        return read_text(target, *args, **kwargs)
+    suite = unittest.TestSuite([test_references.ReferenceTests(
+        'test_workflow_reference_queue_completes_sweeps_without_changing_cache_keys')])
+    with patch.object(Path, 'read_text', proposed_text):
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+    assert result.wasSuccessful()
+    receipt = {'before': head, 'restored_from': QUEUE_WORKFLOW_COMMIT,
+        'file': path, 'validation': 'Original scheduling and cache-identity regression passed',
+        'production_jobs_preserved': list(yaml.safe_load(production)['jobs']),
+        'pilot_default': False, 'numerical_jobs_dispatched': 0}
+    if publish:
+        changed = api('contents/' + path, dict(branch=BRANCH, sha=pilot_blob['sha'],
+            message='Preserve reference queue behavior alongside the opt-in Fourier pilot',
+            content=base64.b64encode(candidate.encode()).decode()), method='PUT')
+        receipt['commit'] = changed['commit']['sha']
+        diff = api('compare/' + head + '...' + receipt['commit'])
+        assert [entry['filename'] for entry in diff['files']] == [path]
+    (WORK/'reference_group_parallel_workflow_repair.json').write_text(
+        json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+    print(json.dumps(receipt, indent=2))
+
+
+def deploy(full=False,workers=2):
     api=api_client()
-    workflow=emit_workflow(full)
+    workflow=emit_workflow(full,workers)
     receipt_path=WORK/'reference_group_parallel_deployment.json'
     previous=json.loads(receipt_path.read_text()) if receipt_path.exists() else None
     head=api('git/ref/heads/'+(BRANCH if previous else 'main'))['object']['sha']
     if previous:
-        assert head==previous['commit'], 'Diagnostic branch changed unexpectedly'
+        expected=previous['commit']
+        if 'workers' not in previous:
+            expected=json.loads((WORK/'reference_group_parallel_workflow_repair.json').read_text())['commit']
+        assert head==expected, 'Diagnostic branch changed unexpectedly'
     base=api('git/commits/'+head)
     files={'.github/workflows/references.yml':workflow,'src/reference_group_probe.py':Path(__file__)}
     entries=[]
@@ -610,7 +918,7 @@ def deploy(full=False):
         blob=api('git/blobs',{'content':content,'encoding':'utf-8'},method='POST')
         entries.append({'path':name,'mode':'100644','type':'blob','sha':blob['sha']})
     tree=api('git/trees',{'base_tree':base['tree']['sha'],'tree':entries},method='POST')
-    commit=api('git/commits',{'message':'Probe independent reference Fourier groups without publishing data','tree':tree['sha'],'parents':[head]},method='POST')
+    commit=api('git/commits',{'message':f'Compare {workers} four-thread reference workers with retained two-worker evidence','tree':tree['sha'],'parents':[head]},method='POST')
     diff=api('compare/'+head+'...'+commit['sha'])
     changed={f['filename'] for f in diff['files']}
     assert changed and changed<=set(files)
@@ -618,9 +926,11 @@ def deploy(full=False):
         api('git/refs/heads/'+BRANCH,{'sha':commit['sha'],'force':False},method='PATCH')
     else:
         api('git/refs',{'ref':'refs/heads/'+BRANCH,'sha':commit['sha']},method='POST')
-    receipt={'branch':BRANCH,'commit':commit['sha'],'base':head,'source_pin':PIN,'files':list(files),'full':full,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    receipt={'branch':BRANCH,'commit':commit['sha'],'base':head,'source_pin':PIN,'files':list(files),
+        'full':full,'workers':workers,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
     (WORK/'reference_group_parallel_deployment.json').write_text(json.dumps(receipt,indent=2)+'\n')
-    api('actions/workflows/references.yml/dispatches',{'ref':BRANCH},method='POST')
+    api('actions/workflows/references.yml/dispatches',
+        {'ref':BRANCH,'inputs':{'fourier_group_pilot':True}},method='POST')
     print(json.dumps(receipt,indent=2))
 
 
@@ -640,6 +950,14 @@ def collect():
     runs=api('actions/workflows/references.yml/runs?branch='+BRANCH+'&event=workflow_dispatch&per_page=1')['workflow_runs']
     run=only_run=runs[0]
     artifacts=api(f"actions/runs/{run['id']}/artifacts?per_page=100")['artifacts']
+    existing=WORK/'reference-full-coordinator.json'
+    if existing.exists() and int(json.loads(existing.read_text()).get('worker_count',2))==2:
+        for role in ('coordinator','worker1','worker2','comparison'):
+            for suffix in ('.json','.log','.md'):
+                original=WORK/('reference-full-'+role+suffix)
+                saved=WORK/('reference-full-2workers-'+role+suffix)
+                if original.exists() and not saved.exists():
+                    saved.write_bytes(original.read_bytes())
     saved=[]
     for artifact in artifacts:
         if not artifact['name'].startswith(('reference-group','reference-full')):
@@ -654,7 +972,7 @@ def collect():
                 saved.append(name)
     print(json.dumps({'run':run['html_url'],'status':run['status'],'saved':saved},indent=2))
     if 'reference-full-coordinator.json' in saved:
-        compare_full(WORK)
+        compare_full(WORK,WORK if (WORK/'reference-full-2workers-coordinator.json').exists() else None)
     elif all((WORK/f'reference-group-{role}.json').exists() for role in ['baseline','worker1','worker2']):
         result=compare(WORK)
         jobs=api(f"actions/runs/{run['id']}/jobs?per_page=20")['jobs']
@@ -662,8 +980,8 @@ def collect():
             {key:j.get(key) for key in ['name','started_at','completed_at','status','conclusion','steps']} for j in jobs]},indent=2)+'\n')
 
 
-def validate():
-    emit_workflow()
+def validate(full=False,workers=2):
+    emit_workflow(full,workers)
     compile(Path(__file__).read_text(),str(__file__),'exec')
     assert relative_vectors([[1.,0.]],[[1.,0.]])==0
     assert relative_vectors([[1.,0.]],[[0.,1.]])>1
@@ -683,17 +1001,24 @@ def validate():
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['generate','pin','compute','compare','compare-full','deploy','status','collect','validate'])
-    parser.add_argument('--role',choices=['baseline','worker1','worker2','coordinator'])
+    parser.add_argument('action',choices=['generate','pin','compute','compare','compare-full','deploy','status','collect','validate','prepare-record','publish-record','fix-report','repair-workflow'])
+    parser.add_argument('--role',choices=['baseline','worker1','worker2','worker3','worker4','coordinator'])
     parser.add_argument('--directory')
+    parser.add_argument('--previous-directory')
+    parser.add_argument('--workers',type=int,choices=[2,3,4],default=2)
     parser.add_argument('--full',action='store_true')
+    parser.add_argument('--publish',action='store_true')
     args=parser.parse_args()
-    if args.action=='generate': print(emit_workflow(args.full))
+    if args.action=='generate': print(emit_workflow(args.full,args.workers))
     elif args.action=='pin': pin()
     elif args.action=='compute': compute(args.role,args.full)
     elif args.action=='compare': compare(args.directory)
-    elif args.action=='compare-full': compare_full(args.directory)
-    elif args.action=='deploy': deploy(args.full)
+    elif args.action=='compare-full': compare_full(args.directory,args.previous_directory)
+    elif args.action=='deploy': deploy(args.full,args.workers)
     elif args.action=='collect': collect()
-    elif args.action=='validate': validate()
+    elif args.action=='validate': validate(args.full,args.workers)
+    elif args.action=='prepare-record': prepare_record()
+    elif args.action=='publish-record': publish_record()
+    elif args.action=='fix-report': fix_remote_report()
+    elif args.action=='repair-workflow': repair_workflow(args.publish)
     else: status()
