@@ -4,6 +4,7 @@ import base64
 import datetime
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+import zipfile
 
 WORK = Path(__file__).resolve().parent
 PIN = '3f3129935e20a28b466c306b58d4354e301eba39'
@@ -158,7 +160,7 @@ def compute(role):
     runtime=json.loads((temporary/'reference-env/runtime.json').read_text())
     assert runtime['source_shas']['acousticscattering']==PIN
     problem=runtime.get('availability',{}).get('acousticscattering')
-    if problem:
+    if problem and problem.get('status')!='ready':
         raise RuntimeError(f'Numerical environment unavailable: {problem}')
     source=Path(runtime['source_paths']['acousticscattering'])
     command=[x for x in runtime['executables']['acousticscattering'] if not x.startswith('--threads=')]
@@ -294,7 +296,11 @@ def api_client():
 def deploy():
     api=api_client()
     workflow=emit_workflow()
-    head=api('git/ref/heads/main')['object']['sha']
+    receipt_path=WORK/'reference_group_parallel_deployment.json'
+    previous=json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+    head=api('git/ref/heads/'+(BRANCH if previous else 'main'))['object']['sha']
+    if previous:
+        assert head==previous['commit'], 'Diagnostic branch changed unexpectedly'
     base=api('git/commits/'+head)
     files={'.github/workflows/references.yml':workflow,'src/reference_group_probe.py':Path(__file__)}
     entries=[]
@@ -305,8 +311,12 @@ def deploy():
     tree=api('git/trees',{'base_tree':base['tree']['sha'],'tree':entries},method='POST')
     commit=api('git/commits',{'message':'Probe independent reference Fourier groups without publishing data','tree':tree['sha'],'parents':[head]},method='POST')
     diff=api('compare/'+head+'...'+commit['sha'])
-    assert {f['filename'] for f in diff['files']}==set(files)
-    api('git/refs',{'ref':'refs/heads/'+BRANCH,'sha':commit['sha']},method='POST')
+    changed={f['filename'] for f in diff['files']}
+    assert changed and changed<=set(files)
+    if previous:
+        api('git/refs/heads/'+BRANCH,{'sha':commit['sha'],'force':False},method='PATCH')
+    else:
+        api('git/refs',{'ref':'refs/heads/'+BRANCH,'sha':commit['sha']},method='POST')
     receipt={'branch':BRANCH,'commit':commit['sha'],'base':head,'source_pin':PIN,'files':list(files),'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
     (WORK/'reference_group_parallel_deployment.json').write_text(json.dumps(receipt,indent=2)+'\n')
     api('actions/workflows/references.yml/dispatches',{'ref':BRANCH},method='POST')
@@ -320,13 +330,53 @@ def status():
         print(json.dumps({key:run[key] for key in ['id','html_url','status','conclusion','created_at']}))
         jobs=api(f"actions/runs/{run['id']}/jobs?per_page=20")['jobs']
         print(json.dumps([{'id':j['id'],'name':j['name'],'status':j['status'],'conclusion':j['conclusion'],
-            'steps':[{'name':s['name'],'status':s['status'],'conclusion':s['conclusion']} for s in j.get('steps',[]) if s['status']!='queued']} for j in jobs],indent=2))
+            'steps':[{'name':s['name'],'status':s['status'],'conclusion':s['conclusion']} for s in j.get('steps',[]) if s['status']=='in_progress' or s.get('conclusion')=='failure']} for j in jobs],indent=2))
     (WORK/'reference_group_parallel_runs.json').write_text(json.dumps(runs,indent=2)+'\n')
+
+
+def collect():
+    api=api_client()
+    runs=api('actions/workflows/references.yml/runs?branch='+BRANCH+'&event=workflow_dispatch&per_page=1')['workflow_runs']
+    run=only_run=runs[0]
+    artifacts=api(f"actions/runs/{run['id']}/artifacts?per_page=100")['artifacts']
+    saved=[]
+    for artifact in artifacts:
+        if not artifact['name'].startswith('reference-group'):
+            continue
+        raw=api(f"actions/artifacts/{artifact['id']}/zip",raw=True)
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            for member in archive.infolist():
+                name=Path(member.filename).name
+                if name!=member.filename or not name.startswith('reference-group-') or not name.endswith(('.json','.md','.log')):
+                    continue
+                (WORK/name).write_bytes(archive.read(member))
+                saved.append(name)
+    print(json.dumps({'run':run['html_url'],'status':run['status'],'saved':saved},indent=2))
+    if all((WORK/f'reference-group-{role}.json').exists() for role in ['baseline','worker1','worker2']):
+        result=compare(WORK)
+        jobs=api(f"actions/runs/{run['id']}/jobs?per_page=20")['jobs']
+        (WORK/'reference_group_parallel_job_times.json').write_text(json.dumps({'created_at':run['created_at'],'jobs':[
+            {key:j.get(key) for key in ['name','started_at','completed_at','status','conclusion','steps']} for j in jobs]},indent=2)+'\n')
+
+
+def validate():
+    emit_workflow()
+    compile(Path(__file__).read_text(),str(__file__),'exec')
+    assert relative_vectors([[1.,0.]],[[1.,0.]])==0
+    assert relative_vectors([[1.,0.]],[[0.,1.]])>1
+    for a,b in [([[float('nan'),0]],[[1,0]]),([[1,0]],[]),([[1,0]],[[float('inf'),0]])]:
+        try: relative_vectors(a,b)
+        except AssertionError: pass
+        else: raise AssertionError('Invalid trace was accepted')
+    subprocess.run(['julia','--startup-file=no','-e',
+        'e=Meta.parseall(read(ARGS[1],String)); @assert e.head==:toplevel; @assert all(x->!(x isa Expr && x.head in (:error,:incomplete)),e.args); println(:passed)',
+        str(WORK/'reference_group_parallel.jl')],check=True)
+    print('Python, workflow generation, Julia syntax and complex trace comparisons passed')
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['generate','pin','compute','compare','deploy','status'])
+    parser.add_argument('action',choices=['generate','pin','compute','compare','deploy','status','collect','validate'])
     parser.add_argument('--role',choices=['baseline','worker1','worker2'])
     parser.add_argument('--directory')
     args=parser.parse_args()
@@ -335,4 +385,6 @@ if __name__=='__main__':
     elif args.action=='compute': compute(args.role)
     elif args.action=='compare': compare(args.directory)
     elif args.action=='deploy': deploy()
+    elif args.action=='collect': collect()
+    elif args.action=='validate': validate()
     else: status()
