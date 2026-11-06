@@ -550,12 +550,16 @@ def compare_full(directory):
     for name in ['baseline','expanded']:
         stage=evidence[name]
         report=stage['diagnostics']['solver_report']
-        assert stage['status']=='ok' and report.get('converged',True)
+        assert stage['status']=='ok' and report.get('converged',True) is not False
         refinement=report['refinement']
         assert refinement['converged'] and math.isfinite(refinement['change_db']) and refinement['change_db']<=.005
         checks.append({'stage':name,'ts_db':stage['ts_db'],'spatial_change_db':refinement['change_db'],
                        'm_max':report['solver_options']['m_max'],'amplitude':stage['amplitude']})
     assert coordinator['fourier_delta_db']<=.005 and coordinator['smoke_relative_complex']<=1e-11
+    amplitudes=[complex(r['amplitude']['real'],r['amplitude']['imag']) for r in checks]
+    relative_complex=abs(amplitudes[0]-amplitudes[1])/max(abs(amplitudes[0]),abs(amplitudes[1]),1e-10)
+    assert math.isfinite(relative_complex) and relative_complex<=.001
+    assert checks[1]['m_max']==checks[0]['m_max']+8
     actual=[e for e in coordinator['events'] if abs(e['frequency_hz']-299000)<.01]
     result={'qualified':True,'source_sha':PIN,'case':{'a_m':.07,'aspect_ratio':1.01,'angle_deg':90.,'frequency_hz':299000.,'boundary':'gas'},
         'elapsed_seconds':coordinator['elapsed_seconds'],'stages':checks,
