@@ -1,7 +1,7 @@
 name: Advance benchmark series
 on:
   workflow_run:
-    workflows: [Dense spheroid timings]
+    workflows: [Dense spheroid timings, Parallel spheroid spectra]
     types: [completed]
   workflow_dispatch:
     inputs:

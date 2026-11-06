@@ -40,6 +40,8 @@ def receipt_run_ids(state):
 
 def validate_state(state, repository):
     """Reject altered repositories, nonsequential receipts, and unresolved parents."""
+    if isinstance(state, dict) and state.get("schema_version") == 2:
+        return validate_parallel_state(state, repository)
     if (not isinstance(state, dict) or state.get("schema_version") != 1 or
             state.get("repository") != repository or
             state.get("status") not in {"active", "paused", "blocked", "complete"} or
@@ -295,9 +297,218 @@ def recover_intent(api, state, sha):
     return record_receipt(api, state, sha, matches[0], intent["inputs"])
 
 
+PARALLEL_WORKFLOW = ".github/workflows/parallel-spectra.yml"
+PARALLEL_INPUTS = {"mode", "software", "semimajor_axes", "baseline_runs", "aspect_ratios",
+    "incidences_deg", "boundaries", "frequency_start_khz", "frequency_end_khz",
+    "frequency_interval_khz", "additional_repetitions", "max_parallel", "automatic_continue",
+    "timing_budget_minutes", "campaign_id", "platform"}
+
+
+def validate_parallel_state(state, repository):
+    if (state.get("schema_version") != 2 or state.get("repository") != repository or
+            state.get("status") not in {"active", "paused", "blocked", "complete"} or
+            not isinstance(state.get("requests"), list) or not 1 <= len(state["requests"]) <= 100 or
+            not isinstance(state.get("dispatched"), dict)):
+        raise ValueError("Invalid parallel sequence metadata")
+    keys, runs, missing = set(), set(), False
+    for request in state["requests"]:
+        if (not isinstance(request, dict) or not isinstance(request.get("key"), str) or
+                not re.fullmatch(r"[a-z0-9_-]{1,80}", request["key"]) or request["key"] in keys or
+                not isinstance(request.get("source_ref"), str) or
+                not re.fullmatch(r"[a-f0-9]{40}", request["source_ref"]) or
+                not isinstance(request.get("dispatch_ref"), str) or
+                not re.fullmatch(r"[A-Za-z0-9_.-]+", request["dispatch_ref"]) or
+                not isinstance(request.get("inputs"), dict)):
+            raise ValueError("Invalid parallel sequence request")
+        keys.add(request["key"])
+        inputs = request["inputs"]
+        if (set(inputs) - PARALLEL_INPUTS or any(not isinstance(value, str) for value in inputs.values()) or
+                inputs.get("platform") not in PLATFORMS or
+                not inputs.get("max_parallel", "16").isdigit() or
+                not 1 <= int(inputs.get("max_parallel", "16")) <= 16):
+            raise ValueError("Invalid parallel workflow inputs")
+        campaign = inputs.get("campaign_id", "")
+        if campaign:
+            if (not re.fullmatch(r"[1-9][0-9]*", campaign) or
+                    set(inputs) - {"campaign_id", "platform", "max_parallel"}):
+                raise ValueError("Resume inputs must retain the immutable campaign selection")
+        elif (inputs.get("mode") not in {"repeat", "extend", "refresh"} or
+                inputs.get("software") not in SOFTWARE or not inputs.get("semimajor_axes") or
+                any(size.strip() not in {"0.001", "0.01", "0.07", "0.1", "0.5"}
+                    for size in inputs["semimajor_axes"].split(",")) or
+                not inputs.get("additional_repetitions", "1").isdigit() or
+                not 1 <= int(inputs.get("additional_repetitions", "1")) <= 20 or
+                inputs.get("automatic_continue") != "true"):
+            raise ValueError("New stages require an explicit continuing parallel selection")
+        receipt = state["dispatched"].get(request["key"])
+        if receipt is None:
+            missing = True
+            continue
+        if (missing or not isinstance(receipt, dict) or type(receipt.get("run_id")) is not int or
+                receipt["run_id"] < 1 or receipt["run_id"] in runs or
+                receipt.get("inputs") != inputs or receipt.get("source_ref") != request["source_ref"] or
+                receipt.get("campaign_id") != (campaign or str(receipt["run_id"]))):
+            raise ValueError("Parallel receipts must form an ordered prefix")
+        runs.add(receipt["run_id"])
+    if set(state["dispatched"]) - keys:
+        raise ValueError("Unexpected parallel dispatch receipt")
+    intent = state.get("dispatch_intent")
+    if intent is not None:
+        index = len(state["dispatched"])
+        if index >= len(state["requests"]) or not isinstance(intent, dict):
+            raise ValueError("Invalid parallel dispatch intent")
+        request = state["requests"][index]
+        if any(intent.get(key) != request[key] for key in ("key", "source_ref", "dispatch_ref", "inputs")):
+            raise ValueError("Parallel dispatch intent differs from the saved request")
+        try:
+            created = datetime.fromisoformat(intent["created_at"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Invalid parallel dispatch timestamp") from None
+        if created.utcoffset() is None:
+            raise ValueError("Parallel dispatch timestamp requires a UTC offset")
+
+
+def parallel_title(inputs):
+    campaign = inputs.get("campaign_id")
+    return (f"Continue spectra {campaign}" if campaign else
+            f"{inputs['mode']} {inputs['software']} {inputs['platform']} spectra, a={inputs['semimajor_axes']} m")
+
+
+def checked_parallel_run(api, run_id):
+    run = api.request("GET", f"/actions/runs/{run_id}")
+    if (run.get("id") != run_id or run.get("event") != "workflow_dispatch" or
+            run.get("path") != PARALLEL_WORKFLOW or
+            run.get("repository", {}).get("full_name") != api.repository or
+            run.get("head_repository", {}).get("full_name") != api.repository):
+        raise ValueError("Sequence run is not a parallel spectrum workflow in the expected repository")
+    return run
+
+
+def parallel_receipt(api, state, sha, identity):
+    intent = state["dispatch_intent"]
+    for delay in (0, 1, 2, 4, 8):
+        if delay:
+            time.sleep(delay)
+        run = checked_parallel_run(api, identity)
+        if run.get("head_sha") == intent["source_ref"] and run.get("display_title") == parallel_title(intent["inputs"]):
+            break
+    else:
+        return pause(api, state, sha, "Parallel dispatch metadata differs from the pinned request", "blocked")
+    campaign = intent["inputs"].get("campaign_id") or str(identity)
+    state["dispatched"][intent["key"]] = dict(run_id=identity, campaign_id=campaign,
+        inputs=dict(intent["inputs"]), source_ref=intent["source_ref"],
+        url=f"https://github.com/{api.repository}/actions/runs/{identity}")
+    state.pop("dispatch_intent")
+    state.pop("reason", None)
+    state.update(status="active", updated_at=utc_now())
+    save_queue(api, state, sha)
+    return dict(status="dispatched", key=intent["key"], run_id=identity, campaign_id=campaign)
+
+
+def recover_parallel_intent(api, state, sha):
+    intent = state["dispatch_intent"]
+    started = datetime.fromisoformat(intent["created_at"])
+    runs = api.request("GET", "/actions/workflows/parallel-spectra.yml/runs?event=workflow_dispatch&per_page=100")["workflow_runs"]
+    recorded = {receipt["run_id"] for receipt in state["dispatched"].values()}
+    matches = []
+    for run in runs:
+        created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+        if (started-timedelta(seconds=2) <= created <= started+timedelta(minutes=5) and
+                run.get("head_sha") == intent["source_ref"] and run.get("display_title") == parallel_title(intent["inputs"]) and
+                run.get("id") not in recorded and run.get("path") == PARALLEL_WORKFLOW):
+            matches.append(run["id"])
+    if len(matches) != 1:
+        return pause(api, state, sha, "Parallel dispatch receipt is uncertain. Resolve the saved intent before redispatch", "blocked")
+    return parallel_receipt(api, state, sha, matches[0])
+
+
+def parallel_state_document(api, campaign):
+    from parallel_campaign import filename, get_document
+    saved, _ = get_document(api, filename(campaign, "state"))
+    return saved
+
+
+def parallel_predecessor(api, state, sha):
+    request = state["requests"][len(state["dispatched"])-1]
+    receipt = state["dispatched"][request["key"]]
+    first = checked_parallel_run(api, receipt["run_id"])
+    if (first.get("head_sha") != request["source_ref"] or
+            first.get("display_title") != parallel_title(request["inputs"])):
+        return pause(api, state, sha, "Parallel predecessor source changed", "blocked")
+    if first.get("status") != "completed":
+        return dict(status="waiting", run_id=first["id"], run_status=first.get("status"))
+    if first.get("conclusion") == "cancelled":
+        return pause(api, state, sha, "Parallel predecessor was cancelled")
+    campaign = receipt["campaign_id"]
+    saved = parallel_state_document(api, campaign)
+    if (not isinstance(saved, dict) or saved.get("campaign_id") != campaign or
+            saved.get("controller_ref", request["source_ref"]) != request["source_ref"]):
+        return pause(api, state, sha, "Saved parallel campaign differs from the dispatched stage", "blocked")
+    waves = saved.get("waves", [])
+    if (not waves or not isinstance(waves, list) or
+            any(not isinstance(wave, dict) or type(wave.get("run_id")) is not int for wave in waves) or
+            receipt["run_id"] not in {wave["run_id"] for wave in waves}):
+        return pause(api, state, sha, "Parallel dispatch is absent from the saved campaign history", "blocked")
+    latest = checked_parallel_run(api, waves[-1]["run_id"])
+    if latest.get("head_sha") != request["source_ref"]:
+        return pause(api, state, sha, "Latest parallel wave uses a different controller", "blocked")
+    if latest.get("status") != "completed":
+        return dict(status="waiting", campaign_id=campaign, run_id=latest["id"], run_status=latest.get("status"))
+    if latest.get("conclusion") == "cancelled":
+        return pause(api, state, sha, "Latest parallel wave was cancelled")
+    status = saved.get("status")
+    if status in {"paused", "blocked", "publication_blocked"}:
+        return pause(api, state, sha, f"Parallel campaign {campaign} requires review: {status}",
+                     "blocked" if status != "paused" else "paused")
+    if status in {"active", "publishing"}:
+        return dict(status="waiting", campaign_id=campaign, campaign_status=status, run_id=latest["id"])
+    if status != "complete":
+        return pause(api, state, sha, "Unknown parallel campaign status", "blocked")
+    if (saved.get("blocked") or saved.get("publication_pending") or
+            not isinstance(saved.get("completed"), list) or latest.get("conclusion") != "success"):
+        return pause(api, state, sha, "Parallel campaign completion lacks a successful final publication", "blocked")
+    if saved.get("next_platform_campaign"):
+        return pause(api, state, sha, "An existing platform continuation conflicts with the ordered sequence", "blocked")
+    return None
+
+
+def advance_parallel(api, state, sha):
+    if state.get("dispatch_intent") and state["status"] in {"active", "blocked"}:
+        return recover_parallel_intent(api, state, sha)
+    if state["status"] != "active":
+        return dict(status=state["status"], reason=state.get("reason"))
+    if state["dispatched"]:
+        waiting = parallel_predecessor(api, state, sha)
+        if waiting is not None:
+            return waiting
+    index = len(state["dispatched"])
+    if index == len(state["requests"]):
+        state.update(status="complete", updated_at=utc_now())
+        save_queue(api, state, sha)
+        api.request("PUT", f"/actions/workflows/{QUEUE_WORKFLOW}/disable")
+        return dict(status="complete", stages=index)
+    request = state["requests"][index]
+    scope = "heads" if request["dispatch_ref"] == "main" else "tags"
+    ref = api.request("GET", f"/git/ref/{scope}/{quote(request['dispatch_ref'], safe='')}")
+    if ref.get("object", {}).get("sha") != request["source_ref"] or ref["object"].get("type") != "commit":
+        return pause(api, state, sha, "Parallel dispatch ref differs from the pinned stage", "blocked")
+    state["dispatch_intent"] = dict(request, created_at=utc_now())
+    state["updated_at"] = utc_now()
+    sha = save_queue(api, state, sha)
+    result = api.request("POST", "/actions/workflows/parallel-spectra.yml/dispatches",
+        dict(ref=request["dispatch_ref"], inputs=request["inputs"], return_run_details=True))
+    identity = result.get("workflow_run_id") if isinstance(result, dict) else None
+    if type(identity) is not int or identity < 1:
+        return pause(api, state, sha, "Parallel workflow returned no verifiable dispatch receipt", "blocked")
+    return parallel_receipt(api, state, sha, identity)
+
+
+
 def advance(api):
     """Perform at most one dispatch and leave an active benchmark untouched."""
     state, sha = load_queue(api)
+    if state["schema_version"] == 2:
+        return advance_parallel(api, state, sha)
     if state.get("dispatch_intent") and state["status"] in {"active", "blocked"}:
         return recover_intent(api, state, sha)
     if state["status"] == "complete":

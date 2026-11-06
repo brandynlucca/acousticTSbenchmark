@@ -669,5 +669,243 @@ class SavedRefreshQueueTests(unittest.TestCase):
         self.assertEqual(len(api.dispatches()), 1)
 
 
+
+
+def parallel_state():
+    first = dict(key="echo-existing", source_ref="a" * 40, dispatch_ref="linux-pinned",
+        inputs=dict(mode="repeat", software="echosms", semimajor_axes="0.01",
+            additional_repetitions="4", platform="ubuntu-latest", max_parallel="16",
+            automatic_continue="true"))
+    second = dict(key="acousticts-macos", source_ref="b" * 40, dispatch_ref="platform-pinned",
+        inputs=dict(campaign_id="77", platform="macos-latest", max_parallel="16"))
+    return dict(schema_version=2, repository="owner/repo", status="active",
+                requests=[first, second], dispatched={})
+
+
+class FakeParallelAPI(FakeAPI):
+    def __init__(self, saved=None):
+        super().__init__(saved or parallel_state())
+        self.campaigns = {}
+
+    def run(self, identity, inputs=None):
+        return dict(super().run(identity), path=queue.PARALLEL_WORKFLOW,
+            display_title=queue.parallel_title(inputs) if inputs else "Original spectra")
+
+    def request(self, method, path, body=None):
+        if path == "/actions/workflows/parallel-spectra.yml/dispatches":
+            self.calls.append((method, path, copy.deepcopy(body)))
+            if self.dispatch_error and not self.accept_before_error:
+                raise self.dispatch_error
+            identity = self.next_run
+            self.next_run += 1
+            self.runs[identity] = dict(self.run(identity, body["inputs"]), status="queued",
+                                      conclusion=None, head_sha=self.ref_sha)
+            if self.dispatch_error:
+                raise self.dispatch_error
+            return {} if self.empty_receipt else dict(workflow_run_id=identity)
+        if path.startswith("/actions/workflows/parallel-spectra.yml/runs?"):
+            self.calls.append((method, path, copy.deepcopy(body)))
+            return dict(workflow_runs=list(self.runs.values()))
+        return super().request(method, path, body)
+
+    def finish_campaign(self, key, status="complete"):
+        receipt = self.state["dispatched"][key]
+        self.finish(receipt["run_id"])
+        self.campaigns[receipt["campaign_id"]] = dict(campaign_id=receipt["campaign_id"],
+            status=status, completed=["task"], blocked=[], waves=[dict(run_id=receipt["run_id"])],
+            controller_ref=receipt["source_ref"])
+        return self.campaigns[receipt["campaign_id"]]
+
+
+class ParallelQueueTests(unittest.TestCase):
+    def advance(self, api):
+        with patch.object(queue, "parallel_state_document",
+                          side_effect=lambda client, campaign: copy.deepcopy(client.campaigns.get(campaign))):
+            return queue.advance(api)
+
+    def ready(self):
+        api = FakeParallelAPI()
+        self.assertEqual(self.advance(api)["status"], "dispatched")
+        saved = api.finish_campaign("echo-existing")
+        return api, saved
+
+    def test_new_then_resumed_campaign_preserve_independent_pins(self):
+        api, saved = self.ready()
+        self.assertEqual(api.state["dispatched"]["echo-existing"]["campaign_id"], "101")
+        api.ref_sha = "b" * 40
+        self.assertEqual(self.advance(api)["campaign_id"], "77")
+        self.assertEqual(api.state["dispatched"]["acousticts-macos"]["source_ref"], "b" * 40)
+        self.assertEqual(api.dispatches()[1]["inputs"], dict(campaign_id="77", platform="macos-latest", max_parallel="16"))
+        self.assertEqual([item["ref"] for item in api.dispatches()], ["linux-pinned", "platform-pinned"])
+        api.finish_campaign("acousticts-macos")
+        self.assertEqual(self.advance(api)["status"], "complete")
+        self.assertTrue(api.disabled)
+        self.advance(api)
+        self.assertEqual(len(api.dispatches()), 2)
+
+    def test_active_run_and_duplicate_events_never_dispatch(self):
+        api = FakeParallelAPI()
+        self.advance(api)
+        for _ in range(3):
+            self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_saved_active_and_publishing_preserve_automatic_continuation(self):
+        for status in ("active", "publishing"):
+            api, saved = self.ready()
+            saved["status"] = status
+            for _ in range(2):
+                self.assertEqual(self.advance(api)["status"], "waiting")
+            self.assertEqual(len(api.dispatches()), 1)
+
+    def test_completion_waits_for_latest_continuation_to_close(self):
+        api, saved = self.ready()
+        api.runs[103] = dict(api.run(103, dict(campaign_id="101")), status="in_progress", conclusion=None)
+        saved["waves"].append(dict(run_id=103))
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+        api.finish(103)
+        api.ref_sha = "b" * 40
+        self.assertEqual(self.advance(api)["status"], "dispatched")
+
+    def test_saved_review_states_halt_without_continuation(self):
+        for status in ("paused", "blocked", "publication_blocked"):
+            api, saved = self.ready()
+            saved["status"] = status
+            expected = "paused" if status == "paused" else "blocked"
+            self.assertEqual(self.advance(api)["status"], expected)
+            self.assertEqual(self.advance(api)["status"], expected)
+            self.assertEqual(len(api.dispatches()), 1)
+
+    def test_cancellation_of_first_or_latest_wave_pauses(self):
+        for latest in (False, True):
+            api, saved = self.ready()
+            run_id = 101
+            if latest:
+                run_id = 103
+                api.runs[103] = api.run(103, dict(campaign_id="101"))
+                saved["waves"].append(dict(run_id=103))
+            api.finish(run_id, "cancelled")
+            self.assertEqual(self.advance(api)["status"], "paused")
+            self.assertEqual(len(api.dispatches()), 1)
+
+    def test_incomplete_publication_and_conflicting_platform_link_block(self):
+        changes = [dict(blocked=["task"]), dict(publication_pending=True),
+                   dict(completed=None), dict(status="unknown"),
+                   dict(next_platform_campaign=dict(campaign_id="90")),
+                   dict(next_platform_campaign=dict(campaign_id="90"), next_platform_dispatched="saved")]
+        for change in changes:
+            api, saved = self.ready()
+            saved.update(change)
+            self.assertEqual(self.advance(api)["status"], "blocked")
+            self.assertEqual(len(api.dispatches()), 1)
+        api, saved = self.ready()
+        api.finish(101, "failure")
+        self.assertEqual(self.advance(api)["status"], "blocked")
+
+    def test_state_identity_history_and_controller_are_checked(self):
+        changes = [dict(campaign_id="wrong"), dict(controller_ref="c" * 40),
+                   dict(waves=[]), dict(waves=[dict(run_id=999)]),
+                   dict(waves=[dict(run_id="101")])]
+        for change in changes:
+            api, saved = self.ready()
+            saved.update(change)
+            self.assertEqual(self.advance(api)["status"], "blocked")
+            self.assertEqual(len(api.dispatches()), 1)
+
+    def test_workflow_repository_source_and_title_are_checked(self):
+        for change in (dict(path=".github/workflows/benchmark.yml"),
+                       dict(repository=dict(full_name="foreign/repo")),
+                       dict(head_repository=dict(full_name="foreign/repo")),
+                       dict(event="push")):
+            api, saved = self.ready()
+            api.runs[101].update(change)
+            with self.assertRaises(ValueError):
+                self.advance(api)
+            self.assertEqual(len(api.dispatches()), 1)
+        for change in (dict(head_sha="c" * 40), dict(display_title="wrong platform")):
+            api, saved = self.ready()
+            api.runs[101].update(change)
+            self.assertEqual(self.advance(api)["status"], "blocked")
+
+    def test_wrong_dispatch_tag_blocks_before_post(self):
+        api = FakeParallelAPI()
+        api.ref_sha = "c" * 40
+        self.assertEqual(self.advance(api)["status"], "blocked")
+        self.assertFalse(api.dispatches())
+
+    def test_accepted_dispatch_timeout_recovers_without_duplicate(self):
+        api = FakeParallelAPI()
+        api.dispatch_error = TimeoutError("Response lost")
+        api.accept_before_error = True
+        with self.assertRaises(TimeoutError):
+            self.advance(api)
+        self.assertIn("dispatch_intent", api.state)
+        self.assertEqual(self.advance(api)["status"], "dispatched")
+        self.assertNotIn("dispatch_intent", api.state)
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+        writes = [index for index, call in enumerate(api.calls) if call[0] == "PUT"]
+        post = next(index for index, call in enumerate(api.calls) if call[0] == "POST")
+        self.assertLess(writes[0], post)
+
+    def test_missing_dispatch_receipt_recovers_without_duplicate(self):
+        api = FakeParallelAPI()
+        api.empty_receipt = True
+        self.assertEqual(self.advance(api)["status"], "blocked")
+        self.assertEqual(self.advance(api)["status"], "dispatched")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_uncertain_or_ambiguous_dispatch_never_reposts(self):
+        for accepted in (False, True):
+            api = FakeParallelAPI()
+            api.dispatch_error = TimeoutError("Uncertain dispatch")
+            api.accept_before_error = accepted
+            with self.assertRaises(TimeoutError):
+                self.advance(api)
+            if accepted:
+                api.runs[102] = dict(api.runs[101], id=102)
+            self.assertEqual(self.advance(api)["status"], "blocked")
+            self.assertEqual(self.advance(api)["status"], "blocked")
+            self.assertEqual(len(api.dispatches()), 1)
+
+    def test_resume_controls_and_tampered_intent_are_rejected(self):
+        for change in (dict(order="8"), dict(software="acousticts"), dict(mode="repeat")):
+            saved = parallel_state()
+            saved["requests"][1]["inputs"].update(change)
+            with self.assertRaises(ValueError):
+                queue.validate_state(saved, "owner/repo")
+        for change in (dict(source_ref="c" * 40), dict(inputs=dict(campaign_id="99"))):
+            saved = parallel_state()
+            saved["dispatch_intent"] = dict(saved["requests"][0], created_at=queue.utc_now())
+            saved["dispatch_intent"].update(change)
+            with self.assertRaises(ValueError):
+                queue.validate_state(saved, "owner/repo")
+
+    def test_ordered_receipts_and_metadata_are_validated(self):
+        api, saved = self.ready()
+        for change in (dict(source_ref="c" * 40), dict(campaign_id="102"), dict(run_id="101")):
+            altered = copy.deepcopy(api.state)
+            altered["dispatched"]["echo-existing"].update(change)
+            with self.assertRaises(ValueError):
+                queue.validate_state(altered, "owner/repo")
+        for change in (dict(source_ref=None), dict(dispatch_ref=None), dict(key="bad key")):
+            altered = parallel_state()
+            altered["requests"][0].update(change)
+            with self.assertRaises(ValueError):
+                queue.validate_state(altered, "owner/repo")
+        altered = parallel_state()
+        altered["dispatched"] = {"unknown": {}}
+        with self.assertRaises(ValueError):
+            queue.validate_state(altered, "owner/repo")
+
+    def test_queue_save_conflict_prevents_dispatch(self):
+        api = FakeParallelAPI()
+        with patch.object(queue, "save_queue", side_effect=RuntimeError("Concurrent update")):
+            with self.assertRaises(RuntimeError):
+                self.advance(api)
+        self.assertFalse(api.dispatches())
+
+
 if __name__ == "__main__":
     unittest.main()
