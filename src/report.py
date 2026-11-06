@@ -59,7 +59,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
-<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Mean total solve time (s)</th><th>Mean average solve time (s)</th><th>Mean RMSE ΔTS (dB)</th><th>Repetitions</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
+<h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Mean total solve time (s)</th><th>Mean average solve time (s)</th><th>Mean RMSE ΔTS (dB)</th><th title="Largest absolute difference across matched successful measurements">Max |ΔTS| (dB)</th><th>Repetitions</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
 <p class="note">Mean total solve time sums the mean for each physical case once. Mean average solve time divides that total by the number of timed cases. Totals remain partial until coverage is complete. Time ranges use complete successful repetitions. Repetitions counts successful measurements per case, shown as a range when unequal.</p>
 <p class="note" id="rmse-note">Mean RMSE averages the RMSE calculated separately for each repetition using its available matched predictions. Its min–max spans those repetition RMSE values. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. No matched reference means successful predictions exist but their exact reference cases are missing. No successful prediction means there is no completed successful result in this selection.</p>
 <script id="data" type="application/json">PAYLOAD</script>
@@ -180,7 +180,8 @@ function repetitionRMSE(group){
  const repetitions=new Map();
  for(const row of group){if(!repetitions.has(row.repetition))repetitions.set(row.repetition,[]);repetitions.get(row.repetition).push(row);}
  const values=[...repetitions.values()].map(comparisonSummary).filter(summary=>summary.count).map(summary=>summary.rmse);
- return {value:values.length?mean(values):null,values,count:comparisonSummary(group).count};
+ const summary=comparisonSummary(group);
+ return {value:values.length?mean(values):null,values,count:summary.count,maxAbs:summary.maxAbs};
 }
 function meanWithRange(value,range){
  const cell=document.createElement('span'),main=document.createElement('span');main.textContent=value;cell.append(main);
@@ -191,17 +192,18 @@ function meanWithRange(value,range){
 
 function median(values){values.sort((a,b)=>a-b);const n=values.length;return n%2?values[(n-1)/2]:(values[n/2-1]+values[n/2])/2;}
 function comparisonSummary(observations){
- const predictions=new Map();
+ const predictions=new Map();let maxAbs=null;
  for(const row of observations){
   if(!validValue(row,'delta_ts_db')||typeof row.reference_id!=='string'||!row.reference_id.length)continue;
+  maxAbs=Math.max(maxAbs??0,Math.abs(row.delta_ts_db));
   const key=row.physical_id||JSON.stringify([row.incidence_deg,row.frequency_hz]);
   if(!predictions.has(key))predictions.set(key,[]);predictions.get(key).push(row.delta_ts_db);
  }
  const differences=[...predictions.values()].map(median),count=differences.length;
- if(!count)return {count,rmse:null};
+ if(!count)return {count,rmse:null,maxAbs};
  const scale=differences.reduce((largest,value)=>Math.max(largest,Math.abs(value)),0);
  const rmse=scale?scale*Math.sqrt(differences.reduce((sum,value)=>sum+(value/scale)**2,0)/count):0;
- return {count,rmse};
+ return {count,rmse,maxAbs};
 }
 const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_bytes:'Additional RAM per prediction (MiB)',ts_db:'TS (dB)',delta_ts_db:'ΔTS (dB, software minus reference)'};
 function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
@@ -487,11 +489,12 @@ function render(){
   const successful=coverage?.success??good.length,other=coverage?.other_recorded??(group.length-good.length-pending.length);
   const remaining=completion?.pending??'Unknown';
   const comparison=repetitionRMSE(group),shownRMSE=comparison.count?formatted(comparison.value):(successful?'No matched reference':'No successful prediction');
+  const shownMax=comparison.maxAbs===null?shownRMSE:formatted(comparison.maxAbs);
   const tr=document.createElement('tr');tr.dataset.software=software;tr.dataset.boundary=boundary;
   const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
   const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
-  for(const value of [successful,other,remaining,meanWithRange(shownTotal,timing.passes),meanWithRange(shownAverage,timing.passes.map(total=>total/expectedCases)),comparison.count?meanWithRange(shownRMSE,comparison.values):shownRMSE,repetitions,comparison.count]){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=value;tr.append(td);}table.append(tr);
+  for(const value of [successful,other,remaining,meanWithRange(shownTotal,timing.passes),meanWithRange(shownAverage,timing.passes.map(total=>total/expectedCases)),comparison.count?meanWithRange(shownRMSE,comparison.values):shownRMSE,shownMax,repetitions,comparison.count]){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();

@@ -174,6 +174,30 @@ assert.equal(joined[3],original[3]);assert.equal(original[0].reference_id,undefi
 """
         subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
 
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise comparison errors")
+    def test_maximum_error_retains_repetition_extremes_and_valid_reference_checks(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        helpers = source[source.index("function mean("):source.index("const measures=")]
+        helpers += source[source.index("function validValue("):source.index("function timedFailure(")]
+        harness = r"""
+const assert=require('node:assert/strict');
+""" + helpers + r"""
+const row={status:'ok',reference_id:'reference',physical_id:'point',repetition:1,delta_ts_db:-9};
+const observations=[row,{...row,repetition:2,delta_ts_db:1},
+ {...row,physical_id:'second',delta_ts_db:2},
+ {...row,status:'pending',delta_ts_db:100},{...row,status:'numerical_error',delta_ts_db:200},
+ {...row,reference_id:'',delta_ts_db:300},{...row,delta_ts_db:null},{...row,delta_ts_db:Infinity}];
+const summary=comparisonSummary(observations);
+assert.equal(summary.count,2);assert.equal(summary.maxAbs,9);assert.equal(summary.rmse,Math.sqrt(10));
+assert.equal(repetitionRMSE(observations).maxAbs,9);
+assert.equal(comparisonSummary([{...row,delta_ts_db:0}]).maxAbs,0);
+assert.deepEqual(comparisonSummary([]),{count:0,rmse:null,maxAbs:null});
+assert.equal(comparisonSummary([{...row,reference_id:''}]).maxAbs,null);
+assert.equal(row.delta_ts_db,-9);
+"""
+        subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed to exercise spectral limits")
     def test_reference_display_follows_benchmark_range_and_future_extension(self):
         source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
