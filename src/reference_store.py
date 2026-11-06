@@ -553,6 +553,10 @@ def queue_plan(api, queue_id):
     plan, _ = queue_read(api, queue_path(queue_id, 'plan'))
     if not plan or plan['queue_id'] != queue_id or plan['threads'] != 4:
         raise ValueError('Missing or invalid reference transfer manifest')
+    audit = plan.get('audit_queue', False)
+    workers = plan.get('workers', 16)
+    if type(audit) is not bool or type(workers) is not int or not 1 <= workers <= 16:
+        raise ValueError('Invalid reference audit flag or worker count')
     identities = set()
     task_ids = set()
     for task in plan['tasks']:
@@ -574,6 +578,36 @@ def queue_plan(api, queue_id):
                     job['reference_id'] in identities):
                 raise ValueError('Invalid or duplicate transferred reference request')
             identities.add(job['reference_id'])
+    if audit:
+        import math
+        import re
+        jobs = [job for task in plan['tasks'] for job in task['jobs']]
+        originals = plan.get('audit_originals')
+        physical_ids = [job['physical_id'] for job in jobs]
+        if (not isinstance(originals, dict) or len(set(physical_ids)) != len(physical_ids) or
+                set(originals) != set(physical_ids)):
+            raise ValueError('Invalid reference audit original coverage')
+        finite = lambda value: type(value) in (int, float) and math.isfinite(value)
+        digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
+        for job in jobs:
+            original = originals[job['physical_id']]
+            if (not isinstance(original, dict) or not digest(original.get('reference_id')) or
+                    not digest(original.get('record_sha256')) or
+                    original['reference_id'] == job['reference_id'] or
+                    original.get('physical') != job['signature']['physical'] or
+                    not finite(original.get('ts_db')) or
+                    not finite(original.get('max_abs_delta_ts_db'))):
+                raise ValueError('Invalid original reference audit evidence')
+            measurements = original.get('measurements')
+            if (not isinstance(measurements, list) or not measurements or any(
+                    not isinstance(row, dict) or row.get('software') != 'acousticts' or
+                    row.get('status') != 'ok' or not finite(row.get('ts_db'))
+                    for row in measurements)):
+                raise ValueError('Invalid acousticTS audit measurements')
+            maximum = max(abs(row['ts_db'] - original['ts_db']) for row in measurements)
+            if (not math.isfinite(maximum) or maximum <= .005 or
+                    maximum != original['max_abs_delta_ts_db']):
+                raise ValueError('Invalid reference audit selection discrepancy')
     return plan
 
 
@@ -669,7 +703,7 @@ def queue_initialize(api, args):
             print(f'REFERENCE_INITIAL_RECONCILIATION_DEFERRED error={type(error).__name__}', flush=True)
         pointer = dict(schema_version=1, queue_id=args.queue_id)
         previous, sha = queue_read(api, 'reference-queue-active.json')
-        if previous != pointer:
+        if not plan.get('audit_queue', False) and previous != pointer:
             queue_write(api, 'reference-queue-active.json', pointer, sha)
     def allocate(state):
         state['active_run'] = run
@@ -693,7 +727,7 @@ def queue_initialize(api, args):
                 raise ValueError('Reference worker slot reservation changed')
             requested.update(run=run, status='started')
         else:
-            slots = [slot for slot in range(16) if str(slot) not in state['slots']][:len(state['pending'])]
+            slots = [slot for slot in range(plan.get('workers', 16)) if str(slot) not in state['slots']][:len(state['pending'])]
         for slot in slots:
             state['slots'][str(slot)] = dict(run=run)
         state['allocations'][run] = dict(slots=slots, status='active')
@@ -712,7 +746,7 @@ def queue_refill(api, args, plan):
     def reserve(state):
         if state['status'] != 'running':
             return []
-        free = [slot for slot in range(16) if str(slot) not in state['slots']][:len(state['pending'])]
+        free = [slot for slot in range(plan.get('workers', 16)) if str(slot) not in state['slots']][:len(state['pending'])]
         if free:
             identity = uuid.uuid4().hex
             state['dispatches'][identity] = dict(slots=free, status='requested', last_attempt=0)
@@ -779,7 +813,20 @@ def queue_settings(api, args):
             raise ValueError(f'Transferred reference adapter changed: {name}')
 
 
-def queue_packet(api, queue_id, task):
+def queue_audit_comparison(original, record):
+    qualified = record.get('qualified') is True
+    maximum = (max(abs(row['ts_db'] - record['ts_db']) for row in original['measurements'])
+               if qualified else None)
+    return dict(original_reference_id=original['reference_id'],
+        original_record_sha256=original['record_sha256'], original_ts_db=original['ts_db'],
+        measurement_count=len(original['measurements']),
+        max_abs_delta_ts_db_before=original['max_abs_delta_ts_db'],
+        reference_change_db=record['ts_db']-original['ts_db'] if qualified else None,
+        max_abs_delta_ts_db_after=maximum,
+        still_above_threshold=maximum > .005 if qualified else None)
+
+
+def queue_packet(api, queue_id, task, *, audit_originals=None):
     packet, sha = queue_read(api, queue_path(queue_id, 'task', task['id']))
     packet = packet or dict(task_id=task['id'], records={}, skipped=[], active=None)
     allowed = {job['reference_id']: job for job in task['jobs']}
@@ -789,6 +836,11 @@ def queue_packet(api, queue_id, task):
     for identity, record in packet['records'].items():
         if record.get('qualified') and not valid_cached(record, allowed[identity]):
             raise ValueError('Invalid qualified reference checkpoint')
+    if audit_originals is not None and (packet['skipped'] or any(
+            record.get('provenance', {}).get('reference_audit') != queue_audit_comparison(
+                audit_originals[allowed[identity]['physical_id']], record)
+            for identity, record in packet['records'].items())):
+        raise ValueError('Invalid reference audit checkpoint')
     return packet, sha
 
 
@@ -835,6 +887,7 @@ def queue_worker(api, args):
     import time
     from references import _run_batch, reference_record, julia_provenance
     plan = queue_plan(api, args.queue_id)
+    audit_originals = plan['audit_originals'] if plan.get('audit_queue', False) else None
     runtime = read_json(args.runtime)
     if (runtime['source_shas']['acousticscattering'] != plan['source_sha'] or
             runtime['availability']['acousticscattering']['status'] != 'ready'):
@@ -847,7 +900,7 @@ def queue_worker(api, args):
         environment_compatibility=julia_provenance(runtime),
         github_run_id=os.environ['GITHUB_RUN_ID'], reference_queue=args.queue_id)
     args.directory.mkdir(parents=True, exist_ok=True)
-    shared = queue_shared(api)
+    shared = queue_shared(api) if audit_originals is None else {}
     task_id = queue_claim(api, args.queue_id, owner)
     previous = None
     while task_id:
@@ -855,11 +908,12 @@ def queue_worker(api, args):
         timeout = task['case_timeout_seconds']
         if deadline - time.time() < timeout + 60:
             break
-        packet, sha = queue_packet(api, args.queue_id, task)
+        packet, sha = queue_packet(api, args.queue_id, task, audit_originals=audit_originals)
         packet['owner'] = owner
         by_id = {job['reference_id']: job for job in task['jobs']}
-        packet['skipped'] = sorted(set(packet['skipped']) | {
-            job['reference_id'] for job in task['jobs'] if job['physical_id'] in shared})
+        if audit_originals is None:
+            packet['skipped'] = sorted(set(packet['skipped']) | {
+                job['reference_id'] for job in task['jobs'] if job['physical_id'] in shared})
         last_progress = 0
         last_checkpoint = 0
 
@@ -877,7 +931,7 @@ def queue_worker(api, args):
                     last_checkpoint = time.monotonic()
                     return True
                 except DocumentConflict:
-                    remote, current_sha = queue_packet(api, args.queue_id, task)
+                    remote, current_sha = queue_packet(api, args.queue_id, task, audit_originals=audit_originals)
                     if remote.get('owner') not in (None, owner) or any(
                             packet['records'].get(key) != value for key, value in remote['records'].items()):
                         raise ValueError('Reference checkpoint changed ownership or evidence')
@@ -890,6 +944,9 @@ def queue_worker(api, args):
 
         def accept(job, evidence):
             record = reference_record(job, evidence, provenance)
+            if audit_originals is not None:
+                record['provenance'] = dict(provenance, reference_audit=queue_audit_comparison(
+                    audit_originals[job['physical_id']], record))
             packet['records'][job['reference_id']] = record
             packet['active'] = None
             checkpoint()
@@ -954,6 +1011,7 @@ def queue_publish(api, plan, directory, seen):
     from publish_progress import _progress_tree
     from reference_curves import curves_from_records, publish_shared_curves
     from concurrent.futures import ThreadPoolExecutor
+    audit_originals = plan['audit_originals'] if plan.get('audit_queue', False) else None
     _, _, tree = _progress_tree(api)
     changed = [(task, tree.get(queue_path(plan['queue_id'], 'task', task['id']), {}).get('sha'))
                for task in plan['tasks']]
@@ -962,7 +1020,7 @@ def queue_publish(api, plan, directory, seen):
         api.reference_git.prefetch([sha for task, sha in changed])
     def read(pair):
         task, sha = pair
-        packet, actual = queue_packet(api, plan['queue_id'], task)
+        packet, actual = queue_packet(api, plan['queue_id'], task, audit_originals=audit_originals)
         return task, packet, actual
     with ThreadPoolExecutor(max_workers=4) as pool:
         packets = list(pool.map(read, changed))
@@ -977,8 +1035,11 @@ def queue_publish(api, plan, directory, seen):
     if jobs:
         print(f'REFERENCE_PUBLISHING qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
         publish_cache(api, jobs, directory)
-        print('REFERENCE_EVIDENCE_SAVED publishing shared curves', flush=True)
-        queue_merge_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
+        if audit_originals is None:
+            print('REFERENCE_EVIDENCE_SAVED publishing shared curves', flush=True)
+            queue_merge_curves(api, curves_from_records(jobs, {r['reference_id']:r for r in records}))
+        else:
+            print('REFERENCE_AUDIT_EVIDENCE_SAVED shared selection unchanged', flush=True)
     for task, packet, sha in packets:
         seen[task['id']] = sha
     print(f'REFERENCE_PUBLISHED qualified_records={len(records)} changed_chunks={len(packets)}', flush=True)
@@ -1024,6 +1085,10 @@ def queue_monitor(api, args, once=False):
                     failed=sum(not r['qualified'] for r in packet['records'].values()),
                     skipped=len(set(packet['skipped']) - set(packet['records'])),
                     active=packet['active'], owner=packet.get('owner'))
+                if plan.get('audit_queue', False):
+                    stats[task['id']]['audit_discrepancies'] = sum(
+                        record['qualified'] and record['provenance']['reference_audit']['still_above_threshold']
+                        for record in packet['records'].values())
             atomic_json(receipt_path, dict(seen=seen, stats=stats))
         except (APIError, OSError, RuntimeError) as error:
             if once:
@@ -1036,6 +1101,10 @@ def queue_monitor(api, args, once=False):
             continue
         state, _ = queue_read(api, queue_path(args.queue_id, 'state'))
         totals = {key:sum(s[key] for s in stats.values()) for key in ('qualified','failed','skipped')}
+        if plan.get('audit_queue', False):
+            totals.update(audit_queue=True, audit_qualified=totals['qualified'],
+                audit_discrepancies=sum(s.get('audit_discrepancies', 0) for s in stats.values()),
+                shared_references_updated=0)
         totals['planned'] = sum(len(t['jobs']) for t in plan['tasks'])
         totals['remaining'] = totals['planned'] - sum(totals[key] for key in ('qualified','failed','skipped'))
         totals.update(updated_at=utc_now(), queue_id=args.queue_id,
@@ -1065,6 +1134,7 @@ def queue_monitor(api, args, once=False):
 
 def queue_recover(api, plan, run, workers=None):
     """Recover saved worker packets before returning interrupted claims to the queue."""
+    audit_originals = plan['audit_originals'] if plan.get('audit_queue', False) else None
     tasks = {task['id']:task for task in plan['tasks']}
     artifacts = api.request('GET', f'/actions/runs/{run}/artifacts?per_page=100')['artifacts']
     for artifact in artifacts:
@@ -1079,14 +1149,17 @@ def queue_recover(api, plan, run, workers=None):
                     continue
                 saved = json.loads(archive.read(entry))
                 task = tasks[task_id]
-                current, sha = queue_packet(api, plan['queue_id'], task)
+                current, sha = queue_packet(api, plan['queue_id'], task, audit_originals=audit_originals)
                 original = json.dumps(current, sort_keys=True)
-                if saved.get('task_id') != task_id:
+                if saved.get('task_id') != task_id or (audit_originals is not None and saved.get('skipped')):
                     raise ValueError('Invalid worker reference artifact')
                 allowed = {j['reference_id']:j for j in task['jobs']}
                 for identity, record in saved['records'].items():
                     if identity not in allowed or (record.get('qualified') and not valid_cached(record, allowed[identity])):
                         raise ValueError('Invalid saved reference evidence')
+                    if audit_originals is not None and record.get('provenance', {}).get('reference_audit') != queue_audit_comparison(
+                            audit_originals[allowed[identity]['physical_id']], record):
+                        raise ValueError('Invalid saved reference audit evidence')
                     if identity in current['records'] and current['records'][identity] != record:
                         raise ValueError('Conflicting saved reference evidence')
                     current['records'][identity] = record

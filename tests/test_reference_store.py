@@ -398,5 +398,267 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(b.read_json(selected)["references"]), 1)
 
 
+
+
+class AuditQueueTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+        config = b.read_json(b.ROOT / "benchmark.json")
+        config["frequency"] = dict(start_hz=1000, stop_hz=3000, step_hz=2000)
+        job = copy.deepcopy(refs.build_requests(config, b.read_json(b.ROOT / "sources.lock.json"), "pilot")[0])
+        job["incidence_deg"] = job["signature"]["physical"]["incidence_deg"] = 37.0
+        job["physical_id"] = b.physical_identity(job)
+        job["controls"]["mode_threads"] = 4
+        job["controls"]["target_tol"] = .0005
+        job["signature"]["controls"] = copy.deepcopy(job["controls"])
+        job["reference_id"] = b.fingerprint(job["signature"])
+        self.job = job
+        self.original = dict(reference_id="1" * 64, record_sha256="2" * 64,
+            physical=copy.deepcopy(job["signature"]["physical"]), ts_db=-41.0,
+            max_abs_delta_ts_db=2.0, measurements=[
+                dict(software="acousticts", status="ok", ts_db=-39.0, repetition=1),
+                dict(software="acousticts", status="ok", ts_db=-40.25, repetition=2)])
+        self.task = dict(id="a" * 24, case_timeout_seconds=600, jobs=[job])
+        self.plan = dict(queue_id="audit-fixture", source_sha=job["source_sha"], threads=4,
+            workers=2, audit_queue=True, audit_originals={job["physical_id"]:self.original},
+            tasks=[self.task])
+        self.state = dict(status="ready", scheduler_version=2, slots={}, allocations={},
+            dispatches={}, pending=[self.task["id"]], claims={}, finished=[])
+        self.args = SimpleNamespace(queue_id=self.plan["queue_id"], worker=0,
+            directory=Path("unused-audit-fixture"), runtime=Path("unused-runtime.json"), budget_seconds=1200)
+        self.documents = {store.queue_path(self.args.queue_id, "plan"):copy.deepcopy(self.plan),
+            store.queue_path(self.args.queue_id, "state"):copy.deepcopy(self.state),
+            "reference-queue-active.json":dict(schema_version=1, queue_id="existing-coverage")}
+        self.writes = []
+        self.good = evidence()
+        for name in ("baseline", "expanded"):
+            self.good[name]["diagnostics"]["solver_report"]["refinement"]["change_db"] = .0001
+
+    def read_document(self, api, path):
+        return copy.deepcopy(self.documents.get(path)), "sha" if path in self.documents else None
+
+    def write_document(self, api, path, value, expected):
+        self.documents[path] = copy.deepcopy(value)
+        self.writes.append(path)
+        return "sha"
+
+    def record(self, qualified=True, audit=True):
+        proof = copy.deepcopy(self.good)
+        if not qualified:
+            proof["baseline"]["diagnostics"]["solver_report"]["refinement"]["converged"] = False
+        record = refs.reference_record(self.job, proof, dict(reference_queue=self.args.queue_id))
+        if audit:
+            record["provenance"]["reference_audit"] = store.queue_audit_comparison(self.original, record)
+        return record
+
+    def packet(self, record=None):
+        return dict(task_id=self.task["id"], records={} if record is None else {self.job["reference_id"]:record},
+            skipped=[], active=None, owner="88:0")
+
+    def test_audit_plan_validates_selection_identity_and_finite_measurements(self):
+        invalid = []
+        for field, value in (("audit_queue", "true"), ("workers", 0), ("workers", 17), ("workers", True)):
+            plan = copy.deepcopy(self.plan)
+            plan[field] = value
+            invalid.append(plan)
+        for field, value in (("reference_id", self.job["reference_id"]), ("record_sha256", "invalid"),
+                             ("ts_db", float("nan")), ("max_abs_delta_ts_db", 1.0),
+                             ("measurements", [])):
+            plan = copy.deepcopy(self.plan)
+            plan["audit_originals"][self.job["physical_id"]][field] = value
+            invalid.append(plan)
+        for field, value in (("software", "other"), ("status", "pending"),
+                             ("ts_db", float("inf")), ("ts_db", True)):
+            plan = copy.deepcopy(self.plan)
+            plan["audit_originals"][self.job["physical_id"]]["measurements"][0][field] = value
+            invalid.append(plan)
+        plan = copy.deepcopy(self.plan)
+        plan["audit_originals"][self.job["physical_id"]]["physical"]["frequency_hz"] += 1
+        invalid.append(plan)
+        plan = copy.deepcopy(self.plan)
+        plan["audit_originals"] = {}
+        invalid.append(plan)
+        with patch.object(store, "queue_read", return_value=(self.plan, "sha")):
+            self.assertEqual(store.queue_plan(None, self.args.queue_id), self.plan)
+        for plan in invalid:
+            with self.subTest(plan=plan), patch.object(store, "queue_read", return_value=(plan, "sha")):
+                with self.assertRaises(ValueError):
+                    store.queue_plan(None, self.args.queue_id)
+
+    def test_audit_start_preserves_active_pointer_and_worker_limit(self):
+        path = store.queue_path(self.args.queue_id, "state")
+        self.documents[path]["pending"] += ["b" * 24, "c" * 24]
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document), \
+                patch.object(store, "queue_reconcile"), patch.dict(os.environ, {"GITHUB_RUN_ID":"88", "QUEUE_ROLE":"pool"}, clear=True):
+            store.queue_initialize(None, self.args)
+        self.assertEqual(self.documents[path]["allocations"]["88"]["slots"], [0, 1])
+        self.assertEqual(self.documents["reference-queue-active.json"]["queue_id"], "existing-coverage")
+        self.assertNotIn("reference-queue-active.json", self.writes)
+
+    def test_ordinary_start_keeps_default_sixteen_slots_and_active_pointer(self):
+        planpath = store.queue_path(self.args.queue_id, "plan")
+        self.documents[planpath].pop("audit_queue")
+        self.documents[planpath].pop("audit_originals")
+        self.documents[planpath].pop("workers")
+        statepath = store.queue_path(self.args.queue_id, "state")
+        self.documents[statepath]["pending"] = [str(i) for i in range(17)]
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document), \
+                patch.object(store, "queue_reconcile"), patch.dict(os.environ, {"GITHUB_RUN_ID":"88", "QUEUE_ROLE":"pool"}, clear=True):
+            store.queue_initialize(None, self.args)
+        self.assertEqual(self.documents[statepath]["allocations"]["88"]["slots"], list(range(16)))
+        self.assertEqual(self.documents["reference-queue-active.json"]["queue_id"], self.args.queue_id)
+
+    def test_refill_respects_audit_worker_limit(self):
+        statepath = store.queue_path(self.args.queue_id, "state")
+        self.documents[statepath].update(status="running", pending=[str(i) for i in range(5)])
+        api = Mock()
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document), \
+                patch.object(store, "queue_reconcile"), patch.dict(os.environ, {"GITHUB_REF_NAME":"audit-tag"}, clear=True):
+            store.queue_refill(api, self.args, self.plan)
+        self.assertEqual(set(self.documents[statepath]["slots"]), {"0", "1"})
+        api.request.assert_called_once()
+        self.assertEqual(api.request.call_args.args[2]["inputs"]["queue_role"], "workers")
+
+    def run_worker(self, audit, qualified=True):
+        from contextlib import nullcontext
+        planpath = store.queue_path(self.args.queue_id, "plan")
+        self.documents[planpath]["audit_queue"] = audit
+        statepath = store.queue_path(self.args.queue_id, "state")
+        self.documents[statepath].update(status="running", slots={"0":dict(run="88")})
+        runtime = dict(source_shas=dict(acousticscattering=self.job["source_sha"]),
+            availability=dict(acousticscattering=dict(status="ready")))
+        proof = copy.deepcopy(self.good)
+        if not qualified:
+            proof["baseline"]["diagnostics"]["solver_report"]["refinement"]["converged"] = False
+        def calculate(jobs, runtime, directory, threads, deadline, timeout, accept, progress, **kwargs):
+            self.assertEqual(jobs, [self.job])
+            self.assertEqual(threads, 4)
+            accept(jobs[0], proof)
+            return 1
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document), \
+                patch.object(store, "queue_shared", return_value={self.job["physical_id"]:self.original}) as shared, \
+                patch.object(store, "read_json", return_value=runtime), patch.object(store, "atomic_json"), \
+                patch.object(Path, "mkdir"), patch.object(store, "queue_heartbeat", return_value=nullcontext()), \
+                patch.object(refs, "julia_provenance", return_value={}), \
+                patch.object(refs, "_run_batch", side_effect=calculate) as batch, \
+                patch.dict(os.environ, {"GITHUB_RUN_ID":"88"}, clear=True):
+            store.queue_worker(None, self.args)
+        return self.documents[store.queue_path(self.args.queue_id, "task", self.task["id"])], batch, shared
+
+    def test_audit_reruns_published_physical_case_and_retains_comparison(self):
+        packet, batch, shared = self.run_worker(True)
+        batch.assert_called_once()
+        shared.assert_not_called()
+        self.assertEqual(packet["skipped"], [])
+        record = packet["records"][self.job["reference_id"]]
+        self.assertTrue(refs.valid_cached(record, self.job))
+        comparison = record["provenance"]["reference_audit"]
+        self.assertEqual(comparison["reference_change_db"], 1.0)
+        self.assertEqual(comparison["max_abs_delta_ts_db_before"], 2.0)
+        self.assertEqual(comparison["max_abs_delta_ts_db_after"], 1.0)
+        self.assertIs(comparison["still_above_threshold"], True)
+
+    def test_ordinary_worker_still_skips_published_physical_case(self):
+        packet, batch, shared = self.run_worker(False)
+        batch.assert_not_called()
+        shared.assert_called_once()
+        self.assertEqual(packet["skipped"], [self.job["reference_id"]])
+        self.assertEqual(packet["records"], {})
+
+    def test_failed_audit_retains_full_evidence_without_comparison_claim(self):
+        packet, batch, _ = self.run_worker(True, qualified=False)
+        batch.assert_called_once()
+        record = packet["records"][self.job["reference_id"]]
+        self.assertFalse(record["qualified"])
+        self.assertIn("baseline", record["evidence"])
+        comparison = record["provenance"]["reference_audit"]
+        self.assertIsNone(comparison["reference_change_db"])
+        self.assertIsNone(comparison["max_abs_delta_ts_db_after"])
+        self.assertIsNone(comparison["still_above_threshold"])
+
+    def test_audit_checkpoint_rejects_skips_and_modified_comparison(self):
+        for skipped, modified in ((True, False), (False, True)):
+            packet = self.packet(self.record())
+            if skipped:
+                packet["skipped"] = [self.job["reference_id"]]
+            if modified:
+                packet["records"][self.job["reference_id"]]["provenance"]["reference_audit"]["reference_change_db"] = 3.0
+            with patch.object(store, "queue_read", return_value=(packet, "sha")):
+                with self.assertRaisesRegex(ValueError, "audit checkpoint"):
+                    store.queue_packet(None, self.args.queue_id, self.task, audit_originals=self.plan["audit_originals"])
+
+    def test_audit_publication_retains_records_without_shared_curve_updates(self):
+        import publish_progress
+        packet = self.packet(self.record())
+        self.documents[store.queue_path(self.args.queue_id, "task", self.task["id"])] = packet
+        tree = {store.queue_path(self.args.queue_id, "task", self.task["id"]):dict(sha="sha")}
+        seen = {}
+        with patch.object(publish_progress, "_progress_tree", return_value=(None, None, tree)), \
+                patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "atomic_json"), patch.object(store, "publish_cache") as save, \
+                patch.object(store, "queue_merge_curves") as merge:
+            store.queue_publish(None, self.plan, self.args.directory, seen)
+            store.queue_publish(None, self.plan, self.args.directory, seen)
+        save.assert_called_once()
+        merge.assert_not_called()
+        self.assertEqual(seen, {self.task["id"]:"sha"})
+
+    def test_ordinary_publication_still_merges_curves(self):
+        import publish_progress
+        plan = dict(self.plan, audit_queue=False)
+        self.documents[store.queue_path(self.args.queue_id, "task", self.task["id"])] = self.packet(self.record(audit=False))
+        tree = {store.queue_path(self.args.queue_id, "task", self.task["id"]):dict(sha="sha")}
+        with patch.object(publish_progress, "_progress_tree", return_value=(None, None, tree)), \
+                patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "atomic_json"), patch.object(store, "publish_cache") as save, \
+                patch.object(store, "queue_merge_curves") as merge:
+            store.queue_publish(None, plan, self.args.directory, {})
+        save.assert_called_once()
+        merge.assert_called_once()
+
+    def test_audit_progress_separates_qualification_from_acousticTS_disagreement(self):
+        packet = self.packet(self.record())
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document), \
+                patch.object(store, "queue_publish", return_value=[(self.task, packet, "sha")]), \
+                patch.object(store, "atomic_json"), patch.object(Path, "mkdir"), \
+                patch.object(Path, "exists", return_value=False):
+            store.queue_monitor(None, self.args, once=True)
+        progress = self.documents[store.queue_path(self.args.queue_id, "progress")]
+        self.assertEqual(progress["qualified"], 1)
+        self.assertEqual(progress["audit_discrepancies"], 1)
+        self.assertEqual(progress["failed"], 0)
+        self.assertEqual(progress["shared_references_updated"], 0)
+        self.assertNotIn("reference-queue-active.json", self.writes)
+
+    def test_audit_artifact_recovery_preserves_evidence_and_checks_comparison(self):
+        packet = self.packet(self.record())
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr(self.task["id"] + ".json", json.dumps(packet))
+        api = Mock()
+        api.request.return_value = dict(artifacts=[dict(id=1, expired=False, name="reference-queue-worker-0")])
+        api.archive.return_value = output.getvalue()
+        with patch.object(store, "queue_read", side_effect=self.read_document), \
+                patch.object(store, "queue_write", side_effect=self.write_document):
+            store.queue_recover(api, self.plan, "88")
+        saved = self.documents[store.queue_path(self.args.queue_id, "task", self.task["id"])]["records"]
+        self.assertEqual(saved, packet["records"])
+        self.assertNotIn("reference-queue-active.json", self.writes)
+
+    def test_full_record_publication_remains_idempotent(self):
+        record = self.record()
+        api = MemoryGit()
+        with patch.object(store, "cached_reference", return_value=record):
+            self.assertEqual(store.publish_cache(api, [self.job], self.args.directory), 1)
+            first = copy.deepcopy(api.blobs)
+            self.assertEqual(store.publish_cache(api, [self.job], self.args.directory), 0)
+        self.assertEqual(first, api.blobs)
+
+
 if __name__ == "__main__":
     unittest.main()
