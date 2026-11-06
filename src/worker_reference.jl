@@ -57,7 +57,7 @@ function reference_calculation(request; calculate=scattering_calculation,
     if reuse_completed_modes && calculate === scattering_calculation
         return Base.invokelatest() do
             if isdefined(AcousticScattering, :_with_mode_solution_reuse)
-                AcousticScattering._with_mode_solution_reuse() do
+                AcousticScattering._with_mode_solution_reuse(; max_bytes=32*1024^2) do
                     evidence = calculation()
                     cache = AcousticScattering._mode_solution_reuse_context()
                     evidence["mode_reuse"] = Dict("hits" => cache.hits,

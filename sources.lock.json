@@ -1,11 +1,31 @@
 {
   "schema_version": 1,
-  "resolved_at": "2026-10-24",
+  "resolved_at": "2026-11-06",
   "sources": {
-    "acousticts": {"repository": "brandynlucca/acousticTS", "ref": "performance_enhancements", "sha": "3b238a837d0ee5e98e2c9142961ab56b47d48a75"},
-    "acousticscattering": {"repository": "brandynlucca/AcousticScattering.jl", "ref": "performance_upgrades", "sha": "d19a39a4e670c1174df2cb4cbdb3d255aa206797"},
-    "prol_spheroid": {"repository": "CRIMAC-WP4-Machine-learning/Prol_Spheroid", "ref": "vectorized", "sha": "995929a0144f9d82f926895157e8e2e558070d3d"},
-    "echosms": {"repository": "ices-tools-dev/echoSMs", "ref": "main", "sha": "ee56a9d2a5c2bb371d4cfb1114e33e5e23172a58"},
-    "liquid_spheroid": {"repository": "elavia/liquid_spheroid", "ref": "master", "sha": "99883b4a0f5cad9e55ab889b910135e109951214"}
+    "acousticts": {
+      "repository": "brandynlucca/acousticTS",
+      "ref": "performance_enhancements",
+      "sha": "3b238a837d0ee5e98e2c9142961ab56b47d48a75"
+    },
+    "acousticscattering": {
+      "repository": "brandynlucca/AcousticScattering.jl",
+      "ref": "performance_upgrades",
+      "sha": "3378934eccd2090723682a3d5be47a8bf794b9e3"
+    },
+    "prol_spheroid": {
+      "repository": "CRIMAC-WP4-Machine-learning/Prol_Spheroid",
+      "ref": "vectorized",
+      "sha": "995929a0144f9d82f926895157e8e2e558070d3d"
+    },
+    "echosms": {
+      "repository": "ices-tools-dev/echoSMs",
+      "ref": "main",
+      "sha": "ee56a9d2a5c2bb371d4cfb1114e33e5e23172a58"
+    },
+    "liquid_spheroid": {
+      "repository": "elavia/liquid_spheroid",
+      "ref": "master",
+      "sha": "99883b4a0f5cad9e55ab889b910135e109951214"
+    }
   }
 }

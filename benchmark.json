@@ -28,7 +28,7 @@
       "rigid": {"boundary_order": 7},
       "pressure_release": {"boundary_order": 7},
       "liquid": {"order": 8, "boundary_order": 7},
-      "gas": {"order": 6, "boundary_order": 5}
+      "gas": {"order": 8, "boundary_order": 7, "interior_field": "total"}
     }
   }
 }

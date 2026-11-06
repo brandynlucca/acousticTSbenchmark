@@ -47,7 +47,7 @@ class ReferenceTests(unittest.TestCase):
             changed["geometry"][field] = value
             self.assertNotEqual(self.job["reference_id"], r.build_requests(changed, self.lock, "pilot")[0]["reference_id"])
         changed = copy.deepcopy(self.config)
-        changed["controls"]["acousticscattering"]["gas"]["order"] = 8
+        changed["controls"]["acousticscattering"]["gas"]["order"] = self.job["controls"]["order"] - 1
         self.assertNotEqual(self.job["reference_id"], r.build_requests(changed, self.lock, "pilot")[0]["reference_id"])
         altered = r.reference_jobs(self.config, "pilot", self.job["source_sha"], adapters={"worker_reference.jl": "changed"})
         self.assertNotEqual(self.job["reference_id"], altered[0]["reference_id"])
@@ -194,14 +194,19 @@ class ReferenceTests(unittest.TestCase):
                 return 0
 
             process.poll.side_effect = exit_with_result
-            runtime = dict(executables={"acousticscattering": ["julia", "--threads=1"]})
+            runtime = dict(executables={"acousticscattering": ["julia", "--threads=1", "--heap-size-hint=768M"]})
             accepted = MagicMock()
-            with patch.object(r.subprocess, "Popen", return_value=process), patch.object(r, "_stop") as stop, \
+            with patch.object(r.subprocess, "Popen", return_value=process) as launch, patch.object(r, "_stop") as stop, \
                  patch("process_control.WindowsJob"):
                 completed = r._run_batch([self.job], runtime, directory, 4, 1e20, 600, accepted, MagicMock())
             self.assertEqual(completed, {self.job["reference_id"]})
             accepted.assert_called_once()
             self.assertEqual(accepted.call_args.args[1], evidence())
+            command = launch.call_args.args[0]
+            self.assertEqual(command.count("--heap-size-hint=3072M"), 1)
+            self.assertNotIn("--heap-size-hint=768M", command)
+            self.assertIn("--threads=4", command)
+            self.assertNotIn("--threads=1", command)
             stop.assert_called_once()
 
     def test_batch_timeout_records_failure_and_terminates_owned_process_once(self):

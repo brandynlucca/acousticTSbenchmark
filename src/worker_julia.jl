@@ -76,6 +76,9 @@ function scattering_controls(request)
 end
 
 function scattering_calculation(request, controls)
+    if get(controls, :interior_field, nothing) isa AbstractString
+        controls = merge(controls, Dict(:interior_field => Symbol(controls[:interior_field])))
+    end
     body = AcousticScattering.Spheroid(request["semimajor_m"], request["semiminor_m"])
     label = request["boundary"]
     boundary = label == "rigid" ? AcousticScattering.Rigid() :

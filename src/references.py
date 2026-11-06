@@ -232,8 +232,9 @@ def _run_batch(jobs, runtime, work, threads, deadline, case_timeout, accept, pro
                              active_path=str(marker), attempts_directory=str(attempts_dir)))
     prefix = list(runtime["executables"]["acousticscattering"])
     # Prepared runtime prefixes contain --threads=1 for timing workers.
-    prefix = [part for part in prefix if not part.startswith("--threads=")]
-    command = [*prefix, f"--threads={threads}", str(ROOT / "src/worker_reference.jl"), str(request)]
+    prefix = [part for part in prefix if not part.startswith(("--threads=", "--heap-size-hint="))]
+    command = [*prefix, f"--threads={threads}", "--heap-size-hint=3072M",
+               str(ROOT / "src/worker_reference.jl"), str(request)]
     env = dict(os.environ, **runtime.get("env", {}))
     env.update(JULIA_NUM_THREADS=str(threads), OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1",
                MKL_NUM_THREADS="1", VECLIB_MAXIMUM_THREADS="1")
