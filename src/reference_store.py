@@ -557,7 +557,8 @@ def queue_plan(api, queue_id):
     task_ids = set()
     for task in plan['tasks']:
         if (task['id'] in task_ids or not 1 <= len(task['jobs']) <= 8 or
-                not 600 <= task['case_timeout_seconds'] <= 1800):
+                (type(task['case_timeout_seconds']) is not int or
+                 not 600 <= task['case_timeout_seconds'] <= 5400)):
             raise ValueError('Invalid reference chunk')
         task_ids.add(task['id'])
         for job in task['jobs']:
