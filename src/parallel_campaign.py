@@ -34,7 +34,8 @@ PLATFORMS = {'ubuntu-latest': ('ubuntu-24.04', 'Linux'),
              'macos-latest': ('macos-latest', 'Darwin')}
 MAX_BYTES = 512 * 1024 * 1024
 DOCUMENT_PART_BYTES = 4 * 1024 * 1024
-SLOW_FREQUENCY_SECONDS = 120.0
+SLOW_FREQUENCY_SECONDS = 60.0
+FREQUENCY_TIMEOUT_SECONDS = 120
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
@@ -393,6 +394,12 @@ def slow_frequency(row):
     return row.get('status') == 'timeout' or (
         isinstance(elapsed, (int, float)) and math.isfinite(elapsed)
         and elapsed >= SLOW_FREQUENCY_SECONDS)
+
+
+def execution_policy():
+    """Report the active frequency budget and scheduling threshold."""
+    return dict(case_timeout_seconds=FREQUENCY_TIMEOUT_SECONDS,
+                slow_frequency_seconds=SLOW_FREQUENCY_SECONDS)
 
 
 def scheduling_queue(plan, candidates, packets, run_id, parallel):
@@ -969,6 +976,20 @@ def plan_campaign(api, inputs, directory):
         if tag['object']['sha'] != plan['source_ref']:
             raise ValueError('Campaign tag changed since its creation')
     packets = read_packets(api, plan)
+    if state.get('publish_recovered_before_resume'):
+        publish_datasets(api, plan, packets, directory)
+        state.pop('publish_recovered_before_resume')
+        state.setdefault('recovery_publications', []).append(dict(
+            run_id=int(os.environ['GITHUB_RUN_ID']), published_at=core.utc_now(),
+            observations=sum(len(packet.get('records', {})) for packet in packets.values())))
+    policy = execution_policy()
+    if state.get('execution_policy') != policy:
+        state.setdefault('execution_policy_history', []).append(dict(
+            previous=state.get('execution_policy'), current=policy,
+            original_timeouts={size: dataset['configuration']['case_timeout_seconds']
+                               for size, dataset in plan['datasets'].items()},
+            controller_ref=os.environ['GITHUB_SHA'], changed_at=core.utc_now()))
+        state['execution_policy'] = policy
     completed = {task_id for task_id, packet in packets.items() if packet.get('state') == 'complete'}
     candidates = [task for task in plan['tasks'] if task['id'] not in completed | set(state['blocked'])]
     parallel = int(inputs.get('max_parallel') or state.get('max_parallel', plan['max_parallel']))
@@ -996,6 +1017,7 @@ def plan_campaign(api, inputs, directory):
     if saved_wave is None:
         state['waves'].append(dict(run_id=run_id, tasks=[task['id'] for task in candidates],
             queue=queue_path, workers=workers,
+            execution_policy=policy,
             worker_names=[item['name'] for item in matrix], started_at=core.utc_now()))
     put_document(api, filename(campaign_id, 'state'), state, state_sha)
     directory.mkdir(parents=True, exist_ok=True)
@@ -1050,7 +1072,8 @@ def export_task(plan, task, packet, runtime, directory):
         environment_fingerprint=core.fingerprint(dict(runtime=runtime['environment_fingerprint'],
             memory_observer=core.memory_provenance())),
         workload='fresh_process_warmed_distinct_problem_single_prediction')
-    core.atomic_json(directory / 'manifest.json', dict(identity, fingerprint=core.fingerprint(identity)))
+    core.atomic_json(directory / 'manifest.json', dict(identity, fingerprint=core.fingerprint(identity),
+                                                      execution_policy=execution_policy()))
     core.atomic_json(directory / 'results.json',
         [packet['records'].get(case['case_id'], dict(case, status='pending')) for case in task['cases']])
     for invocation, environment in packet['environments'].items():
@@ -1085,6 +1108,7 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
     validate_packet(plan, task, packet)
     invocation = f"{os.environ['GITHUB_RUN_ID']}-{task_id}-{time.time_ns()}"
     packet['environments'][invocation] = task_environment(runtime)
+    packet['environments'][invocation]['execution_policy'] = execution_policy()
     directory.mkdir(parents=True, exist_ok=True)
     next_publication = 0.0
     def checkpoint(force=False):
@@ -1104,7 +1128,7 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
             next_publication = time.monotonic() + 120 + random.uniform(0,60)
             print(f"CHECKPOINT {task['name']} recorded={len(packet['records'])}/{len(task['cases'])}", flush=True)
     packet['state'] = 'running'
-    timeout = plan['datasets'][task['size']]['configuration']['case_timeout_seconds']
+    timeout = FREQUENCY_TIMEOUT_SECONDS
     checkpoint(True)
     try:
         for case in task['cases']:
@@ -1128,6 +1152,7 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
                        measurement_id=core.fingerprint([plan['campaign_id'], case['case_id']]),
                        measurement_origin_run_id=int(os.environ['GITHUB_RUN_ID']),
                        allocation_id=invocation, processor=packet['environments'][invocation]['processor'],
+                       case_timeout_seconds=timeout,
                        finished_at=core.utc_now())
             packet['records'][case['case_id']] = row
             print(f"DONE {task['name']} f={case['frequency_hz']/1000:g} kHz "
@@ -1173,8 +1198,7 @@ def run_worker(api, campaign_id, worker_id, runtime_path, directory, deadline):
     if bundle.get('campaign_id') != campaign_id or bundle.get('worker_id') != worker_id:
         raise ValueError('Local spectrum bundle belongs to another worker')
     tasks = {task['id']: task for task in plan['tasks']}
-    minimum_timeout = min((plan['datasets'][task['size']]['configuration']['case_timeout_seconds']
-                           for task in plan['tasks'] if task['id'] in wave['tasks']), default=0)
+    minimum_timeout = FREQUENCY_TIMEOUT_SECONDS
     while time.time() + minimum_timeout + 60 < deadline:
         task_id = change_queue(api, campaign_id, run_id, worker_id)
         if task_id is None:
@@ -1239,8 +1263,7 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
     """Run fresh sweeps before individual frequencies from expensive sweeps."""
     directory.mkdir(parents=True, exist_ok=True)
     tasks = {task['id']: task for task in plan['tasks']}
-    minimum_timeout = min((plan['datasets'][tasks[identity]['size']]['configuration']['case_timeout_seconds']
-                           for identity in wave['tasks']), default=0)
+    minimum_timeout = FREQUENCY_TIMEOUT_SECONDS
     idle_cache = {}
     while time.time() + minimum_timeout + 60 < deadline:
         work = change_work_queue(api, plan, wave['run_id'], worker_id)
@@ -1318,6 +1341,7 @@ def publish_datasets(api, plan, packets, directory, finished=False):
                                   state='completed' if finished and completed == len(tasks) else 'running')
         payload.update(parallel_campaign_id=plan['campaign_id'], parallel_tasks=dict(planned=len(tasks),
             completed=completed, pending=len(tasks)-completed), timing_statistic='arithmetic_mean')
+        payload['execution_policy'] = execution_policy()
         payload['artifact_url'] = f"https://github.com/{api.repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}#artifacts"
         current, _ = existing_snapshot(api, platform, snapshot_filename(platform, float(size)))
         if current and int(current['run_id']) > int(plan['campaign_id']):
@@ -1326,7 +1350,8 @@ def publish_datasets(api, plan, packets, directory, finished=False):
         target.mkdir(parents=True, exist_ok=True)
         core.atomic_json(target / 'results.json', rows)
         core.atomic_json(target / 'parallel-plan.json', dict(campaign_id=plan['campaign_id'],
-            platform=platform, source_ref=plan['source_ref'], configuration=dataset['configuration'], sources=plan['sources']))
+            platform=platform, source_ref=plan['source_ref'], configuration=dataset['configuration'],
+            execution_policy=execution_policy(), sources=plan['sources']))
         if dataset.get('archived_rows'):
             core.atomic_json(target / 'archived-results.json', dict(platform=platform,
                 reason='Superseded selected software measurements', rows=dataset['archived_rows']))
