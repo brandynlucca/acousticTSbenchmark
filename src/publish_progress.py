@@ -374,16 +374,19 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
             item["prediction_attempted"] = attempted
         if attempted is False or basis is not None:
             trigger_ids = basis.get("trigger_case_ids") if isinstance(basis, dict) else None
+            trigger_count = {"ten_consecutive_prediction_timeouts": 10,
+                             "five_consecutive_prediction_timeouts": 5}.get(
+                                 basis.get("rule") if isinstance(basis, dict) else None)
             if (row.get("status") != "timeout" or attempted is not False
                     or not isinstance(basis, dict) or set(basis) != {"rule", "trigger_case_ids"}
-                    or basis.get("rule") != "ten_consecutive_prediction_timeouts"
-                    or not isinstance(trigger_ids, list) or len(trigger_ids) != 10
+                    or trigger_count is None
+                    or not isinstance(trigger_ids, list) or len(trigger_ids) != trigger_count
                     or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
-                           for value in trigger_ids) or len(set(trigger_ids)) != 10):
+                           for value in trigger_ids) or len(set(trigger_ids)) != trigger_count):
                 raise ValueError("Invalid inferred timeout provenance")
-            if any(row.get(key) is not None for key in (
+            if any(value is not None for key, value in row.items() if key in (
                     "elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
-                    "delta_ts_db", "amplitude_real_m", "amplitude_imag_m")):
+                    "delta_ts_db", "amplitude_real_m", "amplitude_imag_m") or key.startswith("memory_")):
                 raise ValueError("Inferred timeout cannot contain prediction measurements")
             item["timeout_basis"] = dict(rule=basis["rule"], trigger_case_ids=list(trigger_ids))
         compact.append(item)

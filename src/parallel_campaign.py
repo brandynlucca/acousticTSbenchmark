@@ -35,10 +35,9 @@ PLATFORMS = {'ubuntu-latest': ('ubuntu-24.04', 'Linux'),
              'macos-latest': ('macos-latest', 'Darwin')}
 MAX_BYTES = 512 * 1024 * 1024
 DOCUMENT_PART_BYTES = 4 * 1024 * 1024
-SLOW_FREQUENCY_SECONDS = 60.0
-FREQUENCY_TIMEOUT_SECONDS = 120
-TIMEOUT_STREAK_LENGTH = 10
-TIMEOUT_STREAK_RULE = 'ten_consecutive_prediction_timeouts'
+FREQUENCY_TIMEOUT_SECONDS = 300
+TIMEOUT_STREAK_LENGTH = 5
+TIMEOUT_STREAK_RULE = 'five_consecutive_prediction_timeouts'
 PACKET_CACHE_BYTES = 64 * 1024 * 1024
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
@@ -405,27 +404,19 @@ def change_queue(api, campaign_id, run_id, worker_id, completed_task=None, outco
         time.sleep(random.uniform(.1, min(2., .2 * (attempt + 1))))
 
 
-def slow_frequency(row):
-    """Classify scheduling cost without changing the numerical timeout."""
-    elapsed = row.get('elapsed_seconds')
-    return row.get('status') == 'timeout' or (
-        isinstance(elapsed, (int, float)) and math.isfinite(elapsed)
-        and elapsed >= SLOW_FREQUENCY_SECONDS)
-
-
 def execution_policy():
-    """Report the active frequency budget and scheduling threshold."""
+    """Report the active prediction budget and whole-sweep scheduling policy."""
     return dict(case_timeout_seconds=FREQUENCY_TIMEOUT_SECONDS,
-                slow_frequency_seconds=SLOW_FREQUENCY_SECONDS,
+                scheduling='whole_sweep', frequency_deferral=False,
                 consecutive_timeouts=TIMEOUT_STREAK_LENGTH)
 
 
 def timeout_streak(task, records):
-    """Find ten adjacent measured timeouts in frequency order within one repetition."""
+    """Find adjacent measured timeouts at the active budget within one repetition."""
     streak = []
     for case in sorted(task['cases'], key=lambda case: case['frequency_hz']):
         row = records.get(case['case_id'], {})
-        if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False:
+        if measured_timeout(row, FREQUENCY_TIMEOUT_SECONDS):
             streak.append(case['case_id'])
             if len(streak) == TIMEOUT_STREAK_LENGTH:
                 return dict(after_frequency_hz=case['frequency_hz'], rule=TIMEOUT_STREAK_RULE,
@@ -435,26 +426,38 @@ def timeout_streak(task, records):
     return None
 
 
+def measured_timeout(row, minimum_seconds=None):
+    """Distinguish measured prediction timeouts from inferred or shorter-budget rows."""
+    if row.get('status') != 'timeout' or row.get('prediction_attempted') is False:
+        return False
+    seconds = row.get('case_timeout_seconds')
+    return minimum_seconds is None or (isinstance(seconds, (int, float))
+        and not isinstance(seconds, bool) and math.isfinite(seconds) and seconds >= minimum_seconds)
+
+
 def timeout_basis_frequency(task, records, basis, *, check_records=True):
     """Validate the recorded trigger independently of later completed frequencies."""
     identities = [case['case_id'] for case in sorted(task['cases'], key=lambda case: case['frequency_hz'])]
     trigger = basis.get('trigger_case_ids', []) if isinstance(basis, dict) else []
+    rule = basis.get('rule') if isinstance(basis, dict) else None
+    length = {'ten_consecutive_prediction_timeouts': 10,
+              'five_consecutive_prediction_timeouts': 5}.get(rule)
     if (not isinstance(basis, dict) or set(basis) != {'rule', 'trigger_case_ids'} or
-            basis.get('rule') != TIMEOUT_STREAK_RULE or not isinstance(trigger, list) or
-            len(trigger) != TIMEOUT_STREAK_LENGTH or trigger[0] not in identities):
+            length is None or not isinstance(trigger, list) or
+            len(trigger) != length or trigger[0] not in identities):
         raise ValueError('Invalid timeout-tail trigger')
     start = identities.index(trigger[0])
-    if identities[start:start + TIMEOUT_STREAK_LENGTH] != trigger or check_records and any(
-            records.get(identity, {}).get('status') != 'timeout' or
-            records[identity].get('prediction_attempted') is False for identity in trigger):
-        raise ValueError('Timeout-tail trigger requires ten adjacent measured timeouts')
+    if identities[start:start + length] != trigger or check_records and any(
+            not measured_timeout(records.get(identity, {}),
+                300 if rule == 'five_consecutive_prediction_timeouts' else None) for identity in trigger):
+        raise ValueError('Timeout-tail trigger requires adjacent measured timeouts at the stated budget')
     return next(case['frequency_hz'] for case in task['cases'] if case['case_id'] == trigger[-1])
 
 
 def scheduling_queue(plan, candidates, packets, run_id, parallel):
-    """Prioritize whole sweeps and distribute previously expensive tails."""
+    """Assign every incomplete spectrum to one worker without frequency deferral."""
     queue = dict(schema_version=2, campaign_id=plan['campaign_id'], run_id=run_id,
-                 slow_frequency_seconds=SLOW_FREQUENCY_SECONDS,
+                 frequency_deferral=False, scheduling='whole_sweep',
                  pending=[], deferred=[], units={}, owners={}, claims={}, finished={}, timeout_streaks={},
                  actual_timeouts={})
     resumed_sweeps = []
@@ -462,20 +465,15 @@ def scheduling_queue(plan, candidates, packets, run_id, parallel):
         packet = packets.get(task['id'], {})
         records = packet.get('records', {})
         queue['actual_timeouts'][task['id']] = sorted(identity for identity, row in records.items()
-            if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False)
+            if measured_timeout(row, FREQUENCY_TIMEOUT_SECONDS))
         cutoff = timeout_streak(task, records)
         if cutoff:
             queue['timeout_streaks'][task['id']] = cutoff
         remaining = [case['case_id'] for case in task['cases'] if case['case_id'] not in records]
         if not remaining:
             continue
-        if packet.get('slow_sweep') or any(slow_frequency(row) for row in records.values()):
-            for case_id in remaining:
-                queue['units'][case_id] = dict(kind='frequency', task_id=task['id'], case_id=case_id)
-                queue['deferred'].append(case_id)
-        else:
-            queue['units'][task['id']] = dict(kind='sweep', task_id=task['id'])
-            (resumed_sweeps if records else queue['pending']).append(task['id'])
+        queue['units'][task['id']] = dict(kind='sweep', task_id=task['id'])
+        (resumed_sweeps if records else queue['pending']).append(task['id'])
     queue['pending'].extend(resumed_sweeps)
     count = min(parallel, len(queue['pending']) + len(queue['deferred']))
     # Existing task identities remain usable as worker-slot identities.
@@ -545,12 +543,13 @@ def change_work_queue(api, plan, run_id, worker_id, completed_unit=None, packet=
                         raise ValueError('Frequency assignment has no saved observation')
                 actual = set(queue.setdefault('actual_timeouts', {}).get(task['id'], []))
                 actual.update(identity for identity, row in packet['records'].items()
-                    if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False)
+                    if measured_timeout(row, FREQUENCY_TIMEOUT_SECONDS))
                 queue['actual_timeouts'][task['id']] = sorted(actual)
-                cutoff = timeout_streak(task, {identity: dict(status='timeout') for identity in actual})
+                cutoff = timeout_streak(task, {identity: dict(status='timeout',
+                    case_timeout_seconds=FREQUENCY_TIMEOUT_SECONDS) for identity in actual})
                 if cutoff:
                     queue.setdefault('timeout_streaks', {})[task['id']] = cutoff
-                if unit['kind'] == 'sweep' and packet.get('slow_sweep'):
+                if queue.get('frequency_deferral', True) and unit['kind'] == 'sweep' and packet.get('slow_sweep'):
                     for case in task['cases']:
                         case_id = case['case_id']
                         if case_id in packet['records']:
@@ -1412,17 +1411,23 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
                 continue
             if case['case_id'] in packet['records']:
                 continue
-            if time.time() + (0 if tail else timeout) + 60 >= deadline:
+            basis = work['timeout_basis'] if tail else None
+            if work is None or work['kind'] == 'sweep':
+                cutoff = timeout_streak(task, packet['records'])
+                if cutoff and case['frequency_hz'] > cutoff['after_frequency_hz']:
+                    basis = {key: cutoff[key] for key in ('rule', 'trigger_case_ids')}
+            inferred = basis is not None
+            if time.time() + (0 if inferred else timeout) + 60 >= deadline:
                 packet['state'] = 'budget_paused'
                 break
             print(f"START {task['name']} f={case['frequency_hz']/1000:g} kHz "
                   f"recorded={len(packet['records'])}/{len(task['cases'])}", flush=True)
             process_started = time.monotonic()
-            result = (dict(status='timeout', prediction_attempted=False, timeout_basis=work['timeout_basis'])
-                      if tail else core.measure(case, runtime, directory / 'work' / case['case_id'], timeout))
-            if not tail:
+            result = (dict(status='timeout', prediction_attempted=False, timeout_basis=basis)
+                      if inferred else core.measure(case, runtime, directory / 'work' / case['case_id'], timeout))
+            if not inferred:
                 process_seconds += time.monotonic() - process_started
-            if not tail:
+            if not inferred:
                 result['prediction_attempted'] = True
             # A setup failure is not a numerical observation and should stop this worker.
             if result['status'] in ('setup_error', 'setup_timeout', 'setup_unavailable'):
@@ -1441,17 +1446,10 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
                 row['measurement_worker_id'] = work['worker_id']
             print(f"DONE {task['name']} f={case['frequency_hz']/1000:g} kHz "
                   f"status={row['status']} solve_seconds={row.get('elapsed_seconds')}", flush=True)
-            yielding_sweep = work is not None and work['kind'] == 'sweep' and slow_frequency(row)
-            if work is None or work['kind'] == 'sweep' and not yielding_sweep:
-                checkpoint(len(packet['records']) == 1)
+            if work is None or work['kind'] == 'sweep':
+                checkpoint()
             else:
                 core.atomic_json(directory / 'checkpoint.json', packet)
-            if yielding_sweep:
-                packet['slow_sweep'] = True
-                packet['state'] = 'split_pending'
-                print(f'SWEEP_YIELDED task={task["name"]} threshold_seconds={SLOW_FREQUENCY_SECONDS:g} '
-                      f'recorded={len(packet["records"])}/{len(task["cases"])}', flush=True)
-                break
         else:
             packet['state'] = 'complete' if len(packet['records']) == len(task['cases']) else 'fragment_complete'
         if len(packet['records']) == len(task['cases']):
@@ -1551,7 +1549,7 @@ def idle_owners_finished(api, plan, wave, worker_id, cache):
 
 
 def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, directory, deadline):
-    """Run fresh sweeps before individual frequencies from expensive sweeps."""
+    """Keep each sweep on one worker and accept historical queue assignments."""
     directory.mkdir(parents=True, exist_ok=True)
     tasks = {task['id']: task for task in plan['tasks']}
     minimum_timeout = FREQUENCY_TIMEOUT_SECONDS
