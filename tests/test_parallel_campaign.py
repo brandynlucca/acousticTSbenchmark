@@ -1521,7 +1521,8 @@ class WorkerPublicationRegressionTests(unittest.TestCase):
                 packet = packet_for(plan, task, runtime, 3)
                 packet["records"] = {task["cases"][index]["case_id"]: packet["records"][task["cases"][index]["case_id"]]}
                 packet["state"] = "fragment_complete"
-                work = dict(run_id=100 + index, worker_id=str(index) * 24)
+                work = dict(run_id=100, worker_id=str(index) * 24)
+                next(iter(packet['records'].values()))['measurement_worker_id'] = work['worker_id']
                 original = copy.deepcopy(packet)
                 parallel.publish_worker_packet(api, plan, task, packet, work)
                 self.assertEqual(packet, original)
@@ -1632,4 +1633,365 @@ class WorkerPublicationRegressionTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+
+# Sparse publication throughput regressions.
+"""Sparse publication, immutable cache, and exact consolidation regressions."""
+import base64
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import test_parallel_campaign as fixtures
+
+parallel = fixtures.parallel
+
+
+class ThroughputStore:
+    def __init__(self, documents):
+        self.documents = copy.deepcopy(documents)
+        self.blobs = {}
+        self.api = SimpleNamespace(request=Mock(side_effect=self.request))
+        self.writes = []
+
+    def entry(self, path):
+        raw = json.dumps(parallel.pack(self.documents[path]), separators=(",", ":")).encode()
+        sha = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        self.blobs[sha] = raw
+        return dict(sha=sha)
+
+    def tree(self, api):
+        return "head", "tree", {path: self.entry(path) for path in self.documents}
+
+    def request(self, method, path):
+        if method != "GET" or not path.startswith("/git/blobs/"):
+            raise AssertionError((method, path))
+        return dict(encoding="base64", content=base64.b64encode(self.blobs[path.rsplit("/", 1)[-1]]).decode())
+
+    def get(self, api, path):
+        if path not in self.documents:
+            return None, None
+        return copy.deepcopy(self.documents[path]), self.entry(path)["sha"]
+
+    def put(self, api, path, value, sha=None, **kwargs):
+        current_sha = self.entry(path)["sha"] if path in self.documents else None
+        if current_sha != sha:
+            raise parallel.DocumentConflict("stale canonical checkpoint")
+        self.documents[path] = copy.deepcopy(value)
+        self.writes.append(path)
+        return self.entry(path)["sha"]
+
+
+def throughput_packet(plan, task, runtime, indices, worker="1" * 24):
+    packet = fixtures.actual_packet(plan, task, runtime, indices, timeout=False)
+    packet["environments"] = {}
+    for identity, row in packet["records"].items():
+        invocation = "inv-" + identity
+        row.update(measurement_worker_id=worker, invocation_id=invocation, allocation_id=invocation)
+        packet["environments"][invocation] = dict(platform="Linux", processor="Test CPU",
+            github_run_id="100", github_run_attempt="1", runtime=copy.deepcopy(runtime),
+            diagnostic_padding=identity * 16)
+    packet["publication_owner"] = dict(run_id=100, worker_id=worker)
+    return packet
+
+
+class SparsePublicationTests(unittest.TestCase):
+    def test_payload_contains_only_owned_rows_and_referenced_environments(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        packet = throughput_packet(plan, task, runtime, range(20), worker="2" * 24)
+        identities = list(packet["records"])
+        packet["records"][identities[0]]["measurement_worker_id"] = "1" * 24
+        original = copy.deepcopy(packet)
+        store = ThroughputStore({})
+        work = dict(run_id=100, worker_id="1" * 24)
+        path = parallel.worker_packet_filename("100", 100, work["worker_id"], task["id"])
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            parallel.publish_worker_packet(store.api, plan, task, packet, work)
+            saved = store.documents[path]
+            self.assertEqual(set(saved["records"]), {identities[0]})
+            self.assertEqual(set(saved["environments"]), {packet["records"][identities[0]]["invocation_id"]})
+            self.assertLess(len(json.dumps(saved)), len(json.dumps(packet)) / 4)
+            self.assertEqual(packet, original)
+            packet["records"][identities[1]]["measurement_worker_id"] = "1" * 24
+            parallel.publish_worker_packet(store.api, plan, task, packet, work)
+        self.assertEqual(set(store.documents[path]["records"]), set(identities[:2]))
+        self.assertEqual(len(store.documents[path]["environments"]), 2)
+        self.assertEqual(store.documents[path]["publication_owner"], work)
+
+    def test_other_run_records_cannot_enter_current_worker_fragment(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        packet = throughput_packet(plan, task, runtime, [0])
+        store = ThroughputStore({})
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            result = parallel.publish_worker_packet(store.api, plan, task, packet,
+                                                     dict(run_id=101, worker_id="1" * 24))
+        self.assertIsNone(result)
+        self.assertEqual(store.writes, [])
+
+    def test_sparse_tail_fragment_uses_external_proof_without_fabricated_metrics(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        proof = fixtures.actual_packet(plan, task, runtime, range(10))
+        tail = throughput_packet(plan, task, runtime, [12])
+        row = next(iter(tail["records"].values()))
+        row.pop("elapsed_seconds")
+        row.pop("ts_db")
+        row.update(status="timeout", prediction_attempted=False,
+                   timeout_basis=dict(rule="ten_consecutive_prediction_timeouts",
+                                      trigger_case_ids=[case["case_id"] for case in task["cases"][:10]]))
+        full = parallel.combine_packets(plan, task, [proof, tail])
+        canonical = parallel.filename("100", "task", task["id"])
+        store = ThroughputStore({canonical: proof})
+        work = dict(run_id=100, worker_id="1" * 24)
+        path = parallel.worker_packet_filename("100", 100, work["worker_id"], task["id"])
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put), \
+             patch.object(parallel, "_progress_tree", side_effect=store.tree):
+            parallel.publish_worker_packet(store.api, plan, task, full, work)
+            self.assertEqual(set(store.documents[path]["records"]), {row["case_id"]})
+            restored = parallel.read_task_packet(store.api, plan, task)
+        self.assertEqual(restored["records"], full["records"])
+        with self.assertRaises(ValueError):
+            parallel.validate_packet(plan, task, store.documents[path])
+        bad = copy.deepcopy(proof)
+        next(iter(bad["records"].values()))["status"] = "setup_timeout"
+        with self.assertRaises(ValueError):
+            parallel.combine_packets(plan, task, [bad, store.documents[path]])
+        for metric in ("elapsed_seconds", "ts_db", "wall_seconds", "delta_ts_db", "memory_peak_rss_bytes"):
+            with self.subTest(metric=metric):
+                fabricated = copy.deepcopy(store.documents[path])
+                fabricated["records"][row["case_id"]][metric] = 0
+                with self.assertRaises(ValueError):
+                    parallel.validate_packet(plan, task, fabricated, check_tail_evidence=False)
+
+
+class PacketCacheAndConsolidationTests(unittest.TestCase):
+    def fixture(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        canonical = parallel.filename("100", "task", task["id"])
+        first = parallel.worker_packet_filename("100", 100, "1" * 24, task["id"])
+        second = parallel.worker_packet_filename("100", 100, "2" * 24, task["id"])
+        store = ThroughputStore({canonical: throughput_packet(plan, task, runtime, [0]),
+            first: throughput_packet(plan, task, runtime, [1]),
+            second: throughput_packet(plan, task, runtime, [2], worker="2" * 24)})
+        return plan, task, runtime, canonical, first, second, store
+
+    def test_repeated_task_reads_reuse_blobs_without_exposing_cached_mutability(self):
+        plan, task, runtime, canonical, first, second, store = self.fixture()
+        with patch.object(parallel, "_progress_tree", side_effect=store.tree):
+            original = parallel.read_task_packet(store.api, plan, task)
+            self.assertEqual(store.api.request.call_count, 3)
+            snapshot = copy.deepcopy(original)
+            next(iter(original["records"].values()))["ts_db"] = 999
+            next(iter(original["environments"].values()))["runtime"]["source_shas"]["acousticts"] = "f" * 40
+            repeated = parallel.read_task_packet(store.api, plan, task)
+            self.assertEqual(repeated, snapshot)
+            self.assertEqual(store.api.request.call_count, 3)
+            store.documents[second] = throughput_packet(plan, task, runtime, [2, 3], worker="2" * 24)
+            changed = parallel.read_task_packet(store.api, plan, task)
+        self.assertEqual(len(changed["records"]), 4)
+        self.assertEqual(store.api.request.call_count, 4)
+
+    def test_consolidation_preserves_exact_union_and_skips_integrated_blob_downloads(self):
+        plan, task, runtime, canonical, first, second, store = self.fixture()
+        original_fragments = {path: copy.deepcopy(store.documents[path]) for path in (first, second)}
+        expected_shas = {path: store.entry(path)["sha"] for path in (first, second)}
+        with patch.object(parallel, "_progress_tree", side_effect=store.tree), \
+             patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            packets = parallel.read_packets(store.api, plan)
+            before = copy.deepcopy(packets[task["id"]])
+            parallel.consolidate_worker_packets(store.api, plan, packets)
+            saved = store.documents[canonical]
+            self.assertEqual(saved["records"], before["records"])
+            self.assertEqual(saved["environments"], before["environments"])
+            self.assertEqual(saved["integrated_worker_packets"], expected_shas)
+            self.assertEqual({path: store.documents[path] for path in original_fragments}, original_fragments)
+            self.assertFalse(any(key.startswith("_") for key in saved))
+            store.api = SimpleNamespace(request=Mock(side_effect=store.request))
+            restored = parallel.read_task_packet(store.api, plan, task)
+            self.assertEqual(store.api.request.call_count, 1)
+            self.assertEqual(restored["records"], before["records"])
+            parallel.consolidate_worker_packets(store.api, plan, {task["id"]: restored})
+        self.assertEqual(store.writes, [canonical])
+
+    def test_changed_fragment_after_consolidation_remains_visible(self):
+        plan, task, runtime, canonical, first, second, store = self.fixture()
+        with patch.object(parallel, "_progress_tree", side_effect=store.tree), \
+             patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            packets = parallel.read_packets(store.api, plan)
+            parallel.consolidate_worker_packets(store.api, plan, packets)
+            store.documents[first] = throughput_packet(plan, task, runtime, [1, 3])
+            store.api = SimpleNamespace(request=Mock(side_effect=store.request))
+            restored = parallel.read_task_packet(store.api, plan, task)
+        self.assertEqual(set(restored["records"]), {case["case_id"] for case in task["cases"][:4]})
+        self.assertEqual(store.api.request.call_count, 2)
+
+    def test_changed_fragment_cannot_replace_saved_data_or_change_source(self):
+        for mutation in ("duplicate", "source", "owner"):
+            with self.subTest(mutation=mutation):
+                plan, task, runtime, canonical, first, second, store = self.fixture()
+                with patch.object(parallel, "_progress_tree", side_effect=store.tree), \
+                     patch.object(parallel, "get_document", side_effect=store.get), \
+                     patch.object(parallel, "put_document", side_effect=store.put):
+                    packets = parallel.read_packets(store.api, plan)
+                    parallel.consolidate_worker_packets(store.api, plan, packets)
+                    fragment = store.documents[first]
+                    if mutation == "duplicate":
+                        next(iter(fragment["records"].values()))["ts_db"] = -99
+                    elif mutation == "source":
+                        fragment["source_ref"] = "f" * 40
+                    else:
+                        fragment["publication_owner"]["worker_id"] = "3" * 24
+                    with self.assertRaises(ValueError):
+                        parallel.read_task_packet(store.api, plan, task)
+
+    def test_consolidation_preserves_canonical_rows_saved_after_initial_read(self):
+        plan, task, runtime, canonical, first, second, store = self.fixture()
+        with patch.object(parallel, "_progress_tree", side_effect=store.tree), \
+             patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            packets = parallel.read_packets(store.api, plan)
+            extra = throughput_packet(plan, task, runtime, [3])
+            store.documents[canonical] = parallel.combine_packets(plan, task, [store.documents[canonical], extra])
+            parallel.consolidate_worker_packets(store.api, plan, packets)
+        self.assertEqual(set(store.documents[canonical]["records"]),
+                         {case["case_id"] for case in task["cases"][:4]})
+
+    def test_cache_budget_evicts_least_recent_blob_and_rejects_oversized_entry(self):
+        plan, task, runtime, canonical, first, second, store = self.fixture()
+        paths = (canonical, first, second)
+        shas = [store.entry(path)["sha"] for path in paths]
+        sizes = [len(json.dumps(store.documents[path], separators=(",", ":")).encode()) for path in paths]
+        budget = max(sizes) * 2
+        with patch.object(parallel, "PACKET_CACHE_BYTES", budget):
+            for index in (0, 1, 0, 2):
+                parallel.read_packet_blob(store.api, shas[index])
+            cache = store.api.__dict__["_packet_blob_cache"]
+            self.assertLessEqual(cache["bytes"], budget)
+            self.assertEqual(set(cache["entries"]), {shas[0], shas[2]})
+            parallel.read_packet_blob(store.api, shas[1])
+            self.assertEqual(store.api.request.call_count, 4)
+        store.api = SimpleNamespace(request=Mock(side_effect=store.request))
+        with patch.object(parallel, "PACKET_CACHE_BYTES", 1):
+            parallel.read_packet_blob(store.api, shas[0])
+            parallel.read_packet_blob(store.api, shas[0])
+        self.assertEqual(store.api.request.call_count, 2)
+        self.assertEqual(store.api.__dict__["_packet_blob_cache"]["bytes"], 0)
+
+
+class AtomicCompletionAndPublicationTests(unittest.TestCase):
+    def test_combined_completion_and_claim_survives_lost_ack_without_duplicate_assignment(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
+        initial["slow_sweep"] = True
+        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, 1)
+        path = parallel.queue_filename("100", 100)
+        store = ThroughputStore({path: queue})
+        lost = [False]
+
+        def put(api, name, value, sha=None, **kwargs):
+            result = store.put(api, name, value, sha, **kwargs)
+            if lost[0]:
+                lost[0] = False
+                raise parallel.APIError(500, "write acknowledgement lost")
+            return result
+
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=put), \
+             patch.object(parallel.time, "sleep"):
+            first = parallel.change_work_queue(store.api, plan, 100, workers[0])
+            completed = fixtures.actual_packet(plan, task, runtime, [0], timeout=False)
+            completed["state"] = "fragment_complete"
+            before = len(store.writes)
+            lost[0] = True
+            following = parallel.change_work_queue(store.api, plan, 100, workers[0],
+                                                     first["id"], completed, claim_next=True)
+            retry = parallel.change_work_queue(store.api, plan, 100, workers[0],
+                                                 first["id"], completed, claim_next=True)
+        self.assertEqual(following, retry)
+        self.assertNotEqual(first["id"], following["id"])
+        self.assertEqual(len(store.writes) - before, 1)
+        self.assertEqual(len(store.documents[path]["claims"]), 2)
+        self.assertEqual(store.documents[path]["owners"][workers[0]], following["id"])
+        self.assertEqual(set(store.documents[path]["finished"]), {first["id"]})
+
+    def test_timeout_trigger_assembles_from_separate_stale_completed_packets(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
+        initial["slow_sweep"] = True
+        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, 10)
+        path = parallel.queue_filename("100", 100)
+        store = ThroughputStore({path: queue})
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            units = [parallel.change_work_queue(store.api, plan, 100, worker) for worker in workers]
+            for index in (9, 0, 8, 1, 7, 2, 6, 3, 5, 4):
+                packet = fixtures.actual_packet(plan, task, runtime, [index])
+                packet["state"] = "fragment_complete"
+                self.assertEqual(len(packet["records"]), 1)
+                parallel.change_work_queue(store.api, plan, 100, workers[index], units[index]["id"], packet)
+                if index != 4:
+                    self.assertNotIn(task["id"], store.documents[path].get("timeout_streaks", {}))
+            tail = parallel.change_work_queue(store.api, plan, 100, workers[0])
+        ordered = [case["case_id"] for case in task["cases"][:10]]
+        self.assertEqual(set(store.documents[path]["actual_timeouts"][task["id"]]), set(ordered))
+        self.assertEqual(tail["kind"], "timeout_tail")
+        self.assertEqual(tail["timeout_basis"]["trigger_case_ids"], ordered)
+        self.assertEqual(tail["case_ids"], [case["case_id"] for case in task["cases"][10:]])
+
+    def test_slow_single_frequency_publishes_exactly_once_after_measurement(self):
+        plan, task, runtime = fixtures.pending_plan()
+        store = ThroughputStore({})
+        worker = "1" * 24
+        work = dict(kind="frequency", run_id=100, worker_id=worker,
+                    case_id=task["cases"][0]["case_id"])
+        environment = fixtures.packet_for(plan, task, runtime)["environments"]["inv"]
+        clock = [0.0]
+
+        def measure(*args):
+            clock[0] += 125.0
+            return dict(status="timeout", elapsed_seconds=None, wall_seconds=120,
+                        solve_lower_bound_seconds=119)
+
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(os.environ, GITHUB_RUN_ID="100", GITHUB_SHA="c" * 40), \
+             patch.object(parallel.host_platform, "system", return_value="Linux"), \
+             patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put), \
+             patch.object(parallel, "read_task_packet", return_value=None), \
+             patch.object(parallel, "task_environment", return_value=environment), \
+             patch.object(parallel.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(parallel.core, "measure", side_effect=measure) as prediction:
+            root = Path(temporary)
+            parallel.core.atomic_json(root / "runtime.json", runtime)
+            result = parallel.run_task(store.api, "100", task["id"], root / "runtime.json",
+                                       root / "worker", float("inf"), context=(plan, {}), work=work)
+        prediction.assert_called_once()
+        self.assertEqual(prediction.call_args.args[-1], 120)
+        self.assertEqual(store.writes, [parallel.worker_packet_filename("100", 100, worker, task["id"])])
+        self.assertTrue(result["_publication_complete"])
+        self.assertEqual(result["_execution_timings"]["process_seconds"], 125)
+        saved = store.documents[store.writes[0]]
+        self.assertEqual(set(saved["records"]), {work["case_id"]})
+        self.assertEqual(saved["records"][work["case_id"]]["status"], "timeout")
+
+
+if __name__ == "__main__":
+    unittest.main()
 
