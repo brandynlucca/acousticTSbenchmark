@@ -25,7 +25,7 @@
       "dispatch_ref": "spectra-five-replicates-20261106"
     },
     {
-      "key": "echo-new",
+      "key": "echo-new-a0-001",
       "inputs": {
         "mode": "repeat",
         "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -39,14 +39,56 @@
         "timing_budget_minutes": "330",
         "platform": "ubuntu-latest",
         "software": "echosms",
-        "semimajor_axes": "0.001,0.07,0.1",
+        "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
       "dispatch_ref": "spectra-five-replicates-20261106"
     },
     {
-      "key": "prol-remaining",
+      "key": "echo-new-a0-07",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "echosms",
+        "semimajor_axes": "0.07",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "echo-new-a0-1",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "echosms",
+        "semimajor_axes": "0.1",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "prol-remaining-a0-001",
       "inputs": {
         "mode": "repeat",
         "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -60,7 +102,70 @@
         "timing_budget_minutes": "330",
         "platform": "ubuntu-latest",
         "software": "prol_spheroid",
-        "semimajor_axes": "0.001,0.01,0.07,0.1",
+        "semimajor_axes": "0.001",
+        "additional_repetitions": "4"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "prol-remaining-a0-01",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "prol_spheroid",
+        "semimajor_axes": "0.01",
+        "additional_repetitions": "4"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "prol-remaining-a0-07",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "prol_spheroid",
+        "semimajor_axes": "0.07",
+        "additional_repetitions": "4"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "prol-remaining-a0-1",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "prol_spheroid",
+        "semimajor_axes": "0.1",
         "additional_repetitions": "4"
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
@@ -88,7 +193,7 @@
       "dispatch_ref": "spectra-five-replicates-20261106"
     },
     {
-      "key": "liquid-new",
+      "key": "liquid-new-a0-001",
       "inputs": {
         "mode": "repeat",
         "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -102,7 +207,49 @@
         "timing_budget_minutes": "330",
         "platform": "ubuntu-latest",
         "software": "liquid_spheroid",
-        "semimajor_axes": "0.001,0.07,0.1",
+        "semimajor_axes": "0.001",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "liquid-new-a0-07",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "99",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "liquid_spheroid",
+        "semimajor_axes": "0.07",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+      "dispatch_ref": "spectra-five-replicates-20261106"
+    },
+    {
+      "key": "liquid-new-a0-1",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "99",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "liquid_spheroid",
+        "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
@@ -151,31 +298,101 @@
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42312205111"
-    },
-    "echo-new": {
-      "run_id": 42327640524,
-      "campaign_id": "42327640524",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.001,0.07,0.1",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42327640524"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T02:07:38.766527+00:00",
-  "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb"
+  "updated_at": "2026-11-07T02:18:06+00:00",
+  "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
+  "recovery_history": [
+    {
+      "recorded_at": "2026-11-07T02:18:06+00:00",
+      "reason": "The three-size echoSMs plan exceeded the 512 MiB serialized-state limit before worker dispatch. Split pending multi-size stages into sequential single-size campaigns.",
+      "failed_request": {
+        "key": "echo-new",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.001,0.07,0.1",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "dispatch_ref": "spectra-five-replicates-20261106"
+      },
+      "failed_receipt": {
+        "run_id": 42327640524,
+        "campaign_id": "42327640524",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.001,0.07,0.1",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42327640524"
+      },
+      "split_stages": [
+        {
+          "original_key": "echo-new",
+          "original_sizes": [
+            "0.001",
+            "0.07",
+            "0.1"
+          ],
+          "replacements": [
+            "echo-new-a0-001",
+            "echo-new-a0-07",
+            "echo-new-a0-1"
+          ]
+        },
+        {
+          "original_key": "prol-remaining",
+          "original_sizes": [
+            "0.001",
+            "0.01",
+            "0.07",
+            "0.1"
+          ],
+          "replacements": [
+            "prol-remaining-a0-001",
+            "prol-remaining-a0-01",
+            "prol-remaining-a0-07",
+            "prol-remaining-a0-1"
+          ]
+        },
+        {
+          "original_key": "liquid-new",
+          "original_sizes": [
+            "0.001",
+            "0.07",
+            "0.1"
+          ],
+          "replacements": [
+            "liquid-new-a0-001",
+            "liquid-new-a0-07",
+            "liquid-new-a0-1"
+          ]
+        }
+      ]
+    }
+  ]
 }
