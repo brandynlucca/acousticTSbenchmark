@@ -33,7 +33,9 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 #benchmark-progress,#reference-progress{margin:8px 0 18px}#software-progress,#reference-bars{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:16px}
 .progress-item{min-width:0}.progress-title{display:flex;justify-content:space-between;gap:12px;font-size:14px;margin-bottom:6px}.progress-title strong{font-weight:600}
 .progress-track{display:flex;height:10px;background:#e9edef;border-radius:3px;overflow:hidden}.progress-track span{background:var(--software-color);flex-shrink:0}
-.progress-track .progress-other{background:repeating-linear-gradient(135deg,var(--software-color) 0,var(--software-color) 3px,#ffffffc9 3px,#ffffffc9 6px)}
+.progress-track .progress-other,.progress-key.progress-other{background:repeating-linear-gradient(135deg,var(--software-color) 0,var(--software-color) 3px,#ffffffc9 3px,#ffffffc9 6px)}
+.progress-track .progress-timeout,.progress-key.progress-timeout{background:repeating-linear-gradient(0deg,var(--software-color) 0,var(--software-color) 2px,#fff 2px,#fff 4px)}
+.progress-key{--software-color:#505962;display:inline-block;width:20px;height:10px;margin-right:4px;vertical-align:middle}.timeout-strip{display:block;margin-top:2px}.timeout-strip text{font-size:11px}
 .progress-counts{font-size:13px;line-height:1.5;margin-top:6px;color:#505962;font-variant-numeric:tabular-nums}.progress-unknown{background:repeating-linear-gradient(135deg,#e9edef 0,#e9edef 5px,#fafaf8 5px,#fafaf8 10px)}
 .coverage .progress-item{min-width:170px}.coverage .progress-track{height:7px}.coverage .progress-counts{font-size:12px}.coverage .progress-title{font-size:13px}
 </style>
@@ -53,10 +55,11 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
-<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only boundaries supported by each software count toward completion. Solid color = successful, stripes = failed or skipped, gray = pending. Each planned repetition is one case. Percentages count recorded cases, not elapsed time.</p></section>
+<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only supported boundaries count toward completion. Solid color = successful, <span class="progress-key progress-timeout" aria-hidden="true"></span>horizontal stripes = timeout, <span class="progress-key progress-other" aria-hidden="true"></span>diagonal stripes = failed or skipped, gray = pending. Planned repetitions count separately. Percentages count recorded cases, not elapsed time.</p></section>
 <section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
-<p class="note" id="failure-note">X = failed prediction, in the software's color, at its recorded time to failure. Each failed repetition is shown separately. Failures without a positive recorded prediction duration, including timeouts, remain in the coverage counts.</p>
+<p class="note" id="failure-note">X = failed prediction at the recorded time to failure, colored by software. Failed repetitions appear separately. Failures without a positive recorded prediction duration remain in the coverage counts.</p>
+<p class="note" id="timeout-note" hidden>Hollow circles in the timeout rows mark frequencies without completed predictions. Timeout markers have no measured vertical value. Hover for incidence and repetition counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Mean total solve time (s)</th><th>Mean average solve time (s)</th><th>Mean RMSE ΔTS (dB)</th><th title="Largest absolute difference across matched successful measurements">Max |ΔTS| (dB)</th><th>Repetitions</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
@@ -139,9 +142,9 @@ function updateStatus(){
  const observations=rows.filter(r=>matchesSize(r)&&applicable(r)&&r.measurement_role!=='retained'&&r.status!=='pending');
  const planned=known?active.reduce((sum,g)=>sum+g.planned,0):null,recorded=known?active.reduce((sum,g)=>sum+g.recorded,0):observations.length;
  const success=known?active.reduce((sum,g)=>sum+g.success,0):observations.filter(r=>r.status==='ok').length,pending=known?planned-recorded:null;
- const other=Math.max(0,(recorded||0)-success),finished=data.state==='completed'||s.state==='complete';
- const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
- document.getElementById('status').textContent=planned?`${recorded} / ${planned} recorded · ${success} successful · ${other} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:known?'No supported benchmark cases in this run.':recorded?`${recorded} recorded · ${success} successful · ${other} failed or skipped · Planned total unavailable`:'Waiting for the benchmark plan.';
+ const other=Math.max(0,(recorded||0)-success),timeouts=known?active.reduce((sum,g)=>sum+g.timeouts,0):observations.filter(isTimeout).length,failed=Math.max(0,other-timeouts),finished=data.state==='completed'||s.state==='complete';
+ const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with timeouts, failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
+ document.getElementById('status').textContent=planned?`${recorded} / ${planned} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:known?'No supported benchmark cases in this run.':recorded?`${recorded} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed or skipped · Planned total unavailable`:'Waiting for the benchmark plan.';
  const latest=rows.filter(r=>applicable(r)&&r.measurement_role!=='retained'&&r.status!=='pending').at(-1),latestNote=document.getElementById('latest-prediction');
  latestNote.hidden=!latest;
  if(latest)latestNote.textContent=`Latest recorded prediction: ${labels[latest.software]||latest.software}, ${boundaryLabels[latest.boundary]||latest.boundary}, a = ${latest.semimajor_m??snapshotSize(data)} m, aspect ratio ${latest.aspect_ratio}, ${latest.incidence_deg}°, ${latest.frequency_hz/1000} kHz. Other selections update when their predictions run.`;
@@ -209,6 +212,7 @@ const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_by
 function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
 function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
 function timedFailure(row){return ['numerical_error','nonconverged','worker_error'].includes(row.status)&&Number.isFinite(row.elapsed_seconds)&&row.elapsed_seconds>0;}
+function isTimeout(row){return ['timeout','setup_timeout'].includes(row.status);}
 function formatted(value){return Math.abs(value)>0&&Math.abs(value)<.01?value.toExponential(2):value.toFixed(2);}
 function progressGroups(byAngle){
  const supplied=byAngle?data.incidence_coverage:data.coverage;
@@ -234,14 +238,15 @@ function benchmarkProgress(selected=false,boundary=null){
   const observed=rows.filter(r=>matchesSize(r)&&r.software===software&&inScope(r)&&supported(r)&&r.status!=='pending');
   const success=groups?scoped.reduce((sum,g)=>sum+g.success,0):observed.filter(r=>r.status==='ok').length;
   const other=groups?scoped.reduce((sum,g)=>sum+g.other_recorded,0):observed.filter(r=>r.status!=='ok').length;
+  const timeouts=Math.min(other,observed.filter(isTimeout).length);
   const recorded=success+other;
   const total=groups&&scoped.every(g=>Number.isFinite(g.planned)&&g.planned>=g.success+g.other_recorded)?scoped.reduce((sum,g)=>sum+g.planned,0):null;
   const planned=total!==null&&total>=recorded?total:null;
-  return {software,retained:retained.has(software),success,other,recorded,planned,pending:planned===null?null:planned-recorded};
+  return {software,retained:retained.has(software),success,other,timeouts,recorded,planned,pending:planned===null?null:planned-recorded};
  }).filter(summary=>!boundary||supportsBoundary(summary.software,boundary));
 }
 function progressBar(summary,showName=true){
- const {software,success,other,recorded,planned,pending}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',summary.color||colors[software]);
+ const {software,success,other,recorded,planned,pending,timeouts=0}=summary,node=document.createElement('div');node.className='progress-item';node.dataset.software=software;node.style.setProperty('--software-color',summary.color||colors[software]);
  const reference=summary.kind==='reference',label=summary.label||labels[software];
  const title=document.createElement('div');title.className='progress-title';
  if(showName){const name=document.createElement('strong');name.textContent=label;title.append(name);}
@@ -249,11 +254,12 @@ function progressBar(summary,showName=true){
  const number=document.createElement('span');number.textContent=percent===null?'Total unavailable':`${percent.toFixed(2)}%`;title.append(number);node.append(title);
  const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${label} ${reference?'qualified references':'recorded cases'}`);track.setAttribute('aria-valuemin','0');
  const countText=planned===null?`${recorded.toLocaleString()} ${reference?'qualified':'recorded'} · planned total unavailable`:`${recorded.toLocaleString()} / ${planned.toLocaleString()} ${reference?'qualified':'recorded'} · ${pending.toLocaleString()} ${reference?'missing':'pending'}`;
- track.setAttribute('aria-valuetext',countText);
- if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['other',other]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${100*count/planned}%`;track.append(segment);}}
+ const detailText=summary.detail||`${success.toLocaleString()} successful · ${timeouts.toLocaleString()} timeouts · ${(other-timeouts).toLocaleString()} failed or skipped`;
+ track.setAttribute('aria-valuetext',`${countText} · ${detailText}`);
+ if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['timeout',timeouts],['other',other-timeouts]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${planned?100*count/planned:0}%`;segment.title=`${count.toLocaleString()} ${kind==='timeout'?'timeouts':kind==='success'?'successful':'failed or skipped'}`;track.append(segment);}}
  else track.classList.add('progress-unknown');
  node.append(track);const counts=document.createElement('div');counts.className='progress-counts';counts.textContent=countText;
- if(showName){const detail=document.createElement('div');detail.textContent=summary.detail||`${success.toLocaleString()} successful · ${other.toLocaleString()} failed or skipped`;counts.append(detail);}node.append(counts);return node;
+ if(showName){const detail=document.createElement('div');detail.textContent=detailText;counts.append(detail);}node.append(counts);return node;
 }
 
 function referenceProgress(selected=false){
@@ -344,6 +350,31 @@ function failurePoint(svg,x,y,row){
  node.dataset.incidence=row.incidence_deg;node.dataset.frequency=row.frequency_hz;node.dataset.elapsed=row.elapsed_seconds;
  node.append(svgElement('title',{},title));svg.append(node);
 }
+function timeoutStrip(parent,group,frequencyBounds){
+ const timeouts=group.filter(r=>isTimeout(r)&&Number.isFinite(r.frequency_hz));
+ if(!timeouts.length)return;
+ const programs=Object.keys(colors).filter(software=>timeouts.some(row=>row.software===software));
+ let [lo,hi]=frequencyBounds||[Math.min(...timeouts.map(row=>row.frequency_hz)),Math.max(...timeouts.map(row=>row.frequency_hz))];
+ if(lo===hi){const margin=Math.abs(lo)*.1||1000;lo-=margin;hi+=margin;}
+ const height=programs.length*15+43,svg=svgElement('svg',{class:'timeout-strip',viewBox:`0 0 560 ${height}`,role:'img','aria-label':'Timeout frequencies, grouped by software'});
+ parent.append(svg);svg.append(svgElement('text',{x:4,y:16},'Timeouts'));
+ const grouped=new Map();
+ for(const row of timeouts){const key=JSON.stringify([row.software,row.frequency_hz]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(row);}
+ for(const observations of grouped.values()){
+  const row=observations[0],x=70+450*(row.frequency_hz-lo)/(hi-lo),y=12+15*programs.indexOf(row.software);
+  const detail=[...new Set(observations.map(item=>item.incidence_deg))].sort((a,b)=>a-b).map(angle=>{
+   const atAngle=observations.filter(item=>item.incidence_deg===angle),repetitions=atAngle.map(item=>item.repetition).filter(Number.isFinite).sort((a,b)=>a-b);
+   const setup=atAngle.filter(item=>item.status==='setup_timeout').length;
+   return `${angle}°: ${atAngle.length-setup} prediction timeouts, ${setup} setup timeouts${repetitions.length?`, repetitions ${repetitions.join(', ')}`:''}`;
+  }).join(' · ');
+  const title=`${labels[row.software]}, ${row.frequency_hz/1000} kHz: ${observations.length} timeouts. ${detail}. No completed prediction.`;
+  const node=svgElement('circle',{class:'timeout-observation',cx:x,cy:y,r:4.5,fill:'none',stroke:colors[row.software],'stroke-width':2,role:'img','aria-label':title,'data-software':row.software,'data-frequency':row.frequency_hz,'data-count':observations.length});
+  node.append(svgElement('title',{},title));svg.append(node);
+ }
+ const tickY=programs.length*15+15;
+ for(const fraction of [0,.5,1])svg.append(svgElement('text',{x:70+450*fraction,y:tickY,'text-anchor':'middle'},formatted((lo+(hi-lo)*fraction)/1000)));
+ svg.append(svgElement('text',{x:295,y:height-2,'text-anchor':'middle'},'Timeout frequency (kHz)'));
+}
 function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=false){
  const chart=document.createElement('div'),heading=document.createElement('h3');heading.textContent=title;chart.append(heading);parent.append(chart);
  const svg=svgElement('svg',{viewBox:'0 0 560 300',role:'img','aria-label':label});chart.append(svg);
@@ -355,7 +386,7 @@ function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=fals
   svg.append(svgElement('text',{x:63,y:yy+4,'text-anchor':'end'},formatted(ylog?10**yv:yv)));
  }
  svg.append(svgElement('text',{x:295,y:295,'text-anchor':'middle'},xlabel));
- return {svg,x,y};
+ return {svg,x,y,chart};
 }
 function benchmarkFrequencyWindow(selected,references,axes={}){
  const frequencies=[...new Set([...(axes.frequencies_hz||[]),...selected.map(r=>r.frequency_hz)])].filter(Number.isFinite).sort((a,b)=>a-b);
@@ -379,11 +410,12 @@ function render(){
  referenceLegend.hidden=!showReferences||!selectedReferences.length;
  const coverageGroups=(incidence.value==='all'?data.coverage:data.incidence_coverage)?.filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value)&&matchesAngle(r));
  const plannedGroups=coverageGroups||(data.coverage||[]).filter(r=>applicable(r)&&r.aspect_ratio===Number(aspect.value));
- const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db)),failures=selected.filter(timedFailure);
+ const measured=selected.filter(r=>r.status==='ok'),compared=measured.filter(r=>Number.isFinite(r.delta_ts_db)),failures=selected.filter(timedFailure),timeouts=selected.filter(isTimeout);
  const selectedSoftware=new Set([...selected.map(r=>r.software),...plannedGroups.map(r=>r.software)]);
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
  document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
+ document.getElementById('timeout-note').hidden=!timeouts.length;
  document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions within the benchmark frequency range (${localCount} from local runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear within that range in the TS view, including pending benchmark cases. Stored references beyond the range become visible when the benchmark is extended. Saved convergence checks distinguish the manuscript references from independently qualified references. References are reused across platforms.`;
  const allFreq=[...new Set([...spectrum.frequencies,...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
  const panels=document.getElementById('panels');panels.replaceChildren();panels.classList.toggle('paired',layout.value==='paired');
@@ -394,6 +426,7 @@ function render(){
  const plotStatus=document.getElementById('plot-status');
  plotStatus.textContent=!allFreq.length?`No benchmark frequency range is available for this selection yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Time uses the arithmetic mean. RAM and absolute ΔTS use medians across matched successful repetitions.':'';
  if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
+ if(!measured.length&&timeouts.length)plotStatus.textContent=`${timeouts.length} timeouts recorded. Hollow circles mark timeout frequencies below the plots. No successful predictions are available for the selected cases.`;
  if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
  if(!allFreq.length){document.getElementById('coverage').replaceChildren();return;}
@@ -419,7 +452,8 @@ function render(){
    const matched=measured.filter(r=>validValue(r,field)&&validValue(r,'delta_ts_db'));
    const transform=v=>field==='elapsed_seconds'?Math.log10(v):v;
    const xr=extentFor(matched.map(r=>transform(valueFor(r,field)))),yr=extentFor(matched.map(r=>Math.abs(r.delta_ts_db)),true);yr[0]=0;
-   const {svg,x,y}=chartFrame(charts,'Absolute ΔTS (dB)',`${title.textContent}: cost versus absolute ΔTS`,measures[field],xr,yr,field==='elapsed_seconds');
+   const {svg,x,y,chart}=chartFrame(charts,'Absolute ΔTS (dB)',`${title.textContent}: cost versus absolute ΔTS`,measures[field],xr,yr,field==='elapsed_seconds');
+   timeoutStrip(chart,timeouts.filter(row=>row.boundary===boundary),spectrum.bounds);
    let count=0;
    for(const observations of grouped.values()){
     const pairs=observations.filter(r=>r.boundary===boundary&&validValue(r,field)&&validValue(r,'delta_ts_db'));if(!pairs.length)continue;
@@ -427,7 +461,7 @@ function render(){
     point(svg,x(transform(cost)),y(error),row.incidence_deg,colors[row.software],`${labels[row.software]}, ${row.incidence_deg}°, ${row.frequency_hz/1000} kHz: ${formatted(cost)} ${field==='elapsed_seconds'?'s':'MiB'}, |ΔTS| ${formatted(error)} dB, n=${pairs.length}`,true);count++;
    }
    const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
-   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched cost and reference data'));
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},timeouts.some(row=>row.boundary===boundary)?'Timeouts have no valid cost–ΔTS comparison':failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched cost and reference data'));
    continue;
   }
   for(const measure of layout.value==='paired'?[field,'delta_ts_db']:[field]){
@@ -435,7 +469,8 @@ function render(){
    const valid=measured.filter(r=>validValue(r,measure)),timedFailures=measure==='elapsed_seconds'?failures:[];
    const curveRows=measure==='ts_db'?selectedReferences:[];
    const yr=extentFor([...valid,...timedFailures,...curveRows].map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
-   const {svg,x,y}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
+   const {svg,x,y,chart}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
+   timeoutStrip(chart,timeouts.filter(row=>row.boundary===boundary),spectrum.bounds);
    if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
    let count=0;
    const referenceLayer=svgElement('g',{class:'reference-layer'});
@@ -467,7 +502,7 @@ function render(){
    }
    if(referenceLayer.childElementCount)svg.append(referenceLayer);
    const failedOnly=failures.some(r=>r.boundary===boundary)&&!measured.some(r=>r.boundary===boundary);
-   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched reference comparisons'):'Waiting for measurements'));
+   if(!count)svg.append(svgElement('text',{x:295,y:140,'text-anchor':'middle',class:'empty'},timeouts.some(row=>row.boundary===boundary)?'Timeouts recorded · no completed measurements':measure==='delta_ts_db'?(failedOnly?'Failed predictions have no valid ΔTS':'Waiting for matched reference comparisons'):'Waiting for measurements'));
   }
  }
  const table=document.getElementById('coverage');table.replaceChildren();
@@ -676,5 +711,6 @@ if __name__ == "__main__":
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     render_report(output, [], dict(state="waiting", recorded=0, planned=0), args.repository)
+
 
 

@@ -1067,6 +1067,183 @@ assert.deepEqual(benchmarkFrequencyWindow([],saved,{frequency_hz:[1000,300000]})
         self.assertEqual(set(api.trees[commit["tree"]]), {"ubuntu-latest.json"})
 
 
+
+@unittest.skipUnless(shutil.which("node"), "Node.js exercises timeout dashboard semantics")
+class TimeoutDashboardTests(unittest.TestCase):
+    @staticmethod
+    def helpers(*names):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        chunks = []
+        for name in names:
+            start = source.index("function " + name + "(")
+            end = source.find("\nfunction ", start + 1)
+            chunks.append(source[start:end if end >= 0 else len(source)])
+        return "\n".join(chunks)
+
+    @staticmethod
+    def run_node(source):
+        subprocess.run([shutil.which("node"), "-e", source], check=True,
+                       capture_output=True, text=True)
+
+    DOM = r"""
+const assert=require('node:assert/strict');
+class Element {
+ constructor(tag){this.tag=tag;this.attrs={};this.children=[];this.dataset={};
+  this.style={setProperty:(key,value)=>{this.style[key]=value;}};
+  this.classList={add:name=>{this.className=[this.className,name].filter(Boolean).join(' ');}};}
+ append(...nodes){this.children.push(...nodes);}
+ setAttribute(key,value){this.attrs[key]=String(value);}
+}
+const document={createElement:tag=>new Element(tag)};
+const svgElement=(tag,attrs={},text)=>{
+ const node=new Element(tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);
+ if(text!==undefined)node.textContent=text;return node;
+};
+const descendants=node=>[node,...node.children.flatMap(descendants)];
+const colors={echosms:'#00366c',acousticts:'#c2461d'};
+const labels={echosms:'echoSMs',acousticts:'acousticTS'};
+"""
+
+    def test_timeout_counts_follow_size_incidence_boundary_and_retained_scope(self):
+        base = dict(software="echosms", boundary="liquid", semimajor_m=.07,
+                    aspect_ratio=10, incidence_deg=37, frequency_hz=1000)
+        rows = [dict(base, status=status, repetition=index + 1) for index, status in enumerate(
+            ("ok", "timeout", "setup_timeout", "numerical_error", "pending"))]
+        rows += [
+            dict(base, status="timeout", incidence_deg=90),
+            dict(base, status="timeout", boundary="gas"),
+            dict(base, status="timeout", aspect_ratio=2),
+            dict(base, status="timeout", software="liquid_spheroid", boundary="gas"),
+            dict(base, status="ok", software="acousticts", measurement_role="retained"),
+            dict(base, status="timeout", software="acousticts", measurement_role="retained"),
+        ]
+        current_rows = [{key: value for key, value in row.items() if key != "measurement_role"}
+                        for row in rows]
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 12, 1, current_rows)
+        for row in payload["rows"]:
+            if row["software"] == "acousticts":
+                row["measurement_role"] = "retained"
+        harness = r"""
+const assert=require('node:assert/strict');
+let repository='owner/repo';
+const colors={echosms:'blue',acousticts:'orange',liquid_spheroid:'brown'};
+const aspect={value:'10'},incidence={value:'37'};
+const matchesSize=row=>row.semimajor_m===.07;
+const supportsBoundary=(software,boundary)=>software!=='liquid_spheroid'||boundary==='liquid';
+let data=PAYLOAD,rows=data.rows;
+""" .replace("PAYLOAD", json.dumps(payload))
+        harness += self.helpers("isTimeout", "progressGroups", "benchmarkProgress")
+        harness += r"""
+const echo=(selected=false,boundary=null)=>benchmarkProgress(selected,boundary).find(row=>row.software==='echosms');
+assert.deepEqual([echo().success,echo().other,echo().timeouts,echo().recorded,echo().planned,echo().pending],[1,6,5,7,8,1]);
+const selected=echo(true,'liquid');
+assert.deepEqual([selected.success,selected.other,selected.timeouts,selected.recorded,selected.planned,selected.pending],[1,3,2,4,5,1]);
+assert.equal(benchmarkProgress().find(row=>row.software==='acousticts').retained,true);
+assert.equal(benchmarkProgress().find(row=>row.software==='acousticts').timeouts,1);
+assert.equal(benchmarkProgress().find(row=>row.software==='liquid_spheroid').recorded,0);
+incidence.value='90';assert.equal(echo(true,'liquid').timeouts,1);
+incidence.value='37';assert.equal(echo(true,'gas').timeouts,1);
+incidence.value='all';assert.equal(echo(true,'liquid').timeouts,3);
+const before=echo().timeouts;
+rows.push({...rows[0],semimajor_m:.1,status:'timeout'});assert.equal(echo().timeouts,before);
+incidence.value='37';delete data.incidence_coverage;
+assert.equal(echo(true,'liquid').planned,null);
+assert.equal(echo(true,'liquid').timeouts,2);
+repository=null;data={};rows=ALL_ROWS;
+assert.deepEqual([echo(true,'liquid').timeouts,echo(true,'liquid').planned,echo(true,'liquid').pending],[2,5,1]);
+""" .replace("ALL_ROWS", json.dumps(rows))
+        self.run_node(harness)
+
+    def test_progress_segments_preserve_totals_and_reference_bars_have_no_timeouts(self):
+        harness = self.DOM + self.helpers("progressBar") + r"""
+const bar=progressBar({software:'echosms',success:2,other:3,timeouts:2,recorded:5,planned:8,pending:3});
+const track=descendants(bar).find(node=>node.className==='progress-track');
+assert.deepEqual(track.children.map(node=>[node.className,node.style.width]),
+ [['progress-success','25%'],['progress-timeout','25%'],['progress-other','12.5%']]);
+assert.equal(track.attrs['aria-valuenow'],'5');
+assert.equal(track.attrs['aria-valuemax'],'8');
+assert.match(track.attrs['aria-valuetext'],/2 timeouts/);
+assert.match(track.attrs['aria-valuetext'],/1 failed or skipped/);
+const reference=progressBar({software:'reference',kind:'reference',label:'Qualified references',color:'green',
+ success:3,other:0,recorded:3,planned:4,pending:1,detail:'3 qualified references'});
+const referenceTrack=descendants(reference).find(node=>node.className==='progress-track');
+assert.deepEqual(referenceTrack.children.map(node=>node.style.width),['75%','0%','0%']);
+assert.equal(referenceTrack.attrs['aria-valuenow'],'3');
+assert.match(referenceTrack.attrs['aria-label'],/qualified references/);
+const empty=progressBar({software:'echosms',success:0,other:0,recorded:0,planned:0,pending:0});
+assert.ok(descendants(empty).filter(node=>node.className?.startsWith('progress-')&&node.style.width!==undefined)
+ .every(node=>node.style.width==='0%'));
+const unknown=progressBar({software:'echosms',success:1,other:1,timeouts:1,recorded:2,planned:null,pending:null});
+const unknownTrack=descendants(unknown).find(node=>node.className?.includes('progress-unknown'));
+assert.ok(unknownTrack);assert.equal(unknownTrack.children.length,0);
+assert.match(unknownTrack.attrs['aria-valuetext'],/1 timeouts/);
+"""
+        self.run_node(harness)
+
+    def test_hollow_timeout_markers_preserve_frequency_repetition_and_status_without_measurements(self):
+        harness = self.DOM + self.helpers("isTimeout", "formatted", "timeoutStrip") + r"""
+const row={software:'echosms',status:'timeout',frequency_hz:2000,incidence_deg:37,repetition:1,
+ elapsed_seconds:null,ts_db:null,delta_ts_db:null,memory_delta_peak_bytes:null};
+const rows=[row,{...row,repetition:2},{...row,status:'setup_timeout',incidence_deg:0,repetition:3},
+ {...row,frequency_hz:3000},{...row,software:'acousticts'},
+ {...row,status:'ok',frequency_hz:1500},{...row,status:'numerical_error',frequency_hz:1600},
+ {...row,status:'pending',frequency_hz:1700},{...row,status:'unsupported',frequency_hz:1800},
+ {...row,frequency_hz:null},{...row,frequency_hz:NaN}];
+const parent=new Element('div');timeoutStrip(parent,rows,[1000,3000]);
+const circles=descendants(parent).filter(node=>node.tag==='circle');
+assert.equal(circles.length,3);
+assert.ok(circles.every(node=>node.attrs.fill==='none'&&node.attrs.class==='timeout-observation'));
+const echo=circles.filter(node=>node.attrs['data-software']==='echosms');
+assert.deepEqual(echo.map(node=>[node.attrs['data-frequency'],node.attrs['data-count']]),[['2000','3'],['3000','1']]);
+assert.equal(echo[0].attrs.cx,'295');assert.equal(echo[1].attrs.cx,'520');
+assert.equal(echo[0].attrs.cy,echo[1].attrs.cy);
+assert.match(echo[0].attrs['aria-label'],/2 prediction timeouts/);
+assert.match(echo[0].attrs['aria-label'],/1 setup timeouts/);
+assert.match(echo[0].attrs['aria-label'],/repetitions 1, 2/);
+assert.match(echo[0].attrs['aria-label'],/No completed prediction/);
+assert.ok(descendants(parent).some(node=>node.textContent==='Timeout frequency (kHz)'));
+assert.ok(circles.every(node=>!('data-elapsed' in node.attrs)&&!('data-delta-ts' in node.attrs)));
+const changed=new Element('div');
+timeoutStrip(changed,rows.map(row=>({...row,elapsed_seconds:1e99,ts_db:-999,delta_ts_db:999,
+ memory_delta_peak_bytes:1e99,case_timeout_seconds:120,solve_lower_bound_seconds:600})),[1000,3000]);
+assert.deepEqual(descendants(changed).filter(node=>node.tag==='circle').map(node=>node.attrs),
+ circles.map(node=>node.attrs));
+const single=new Element('div');timeoutStrip(single,[row],[2000,2000]);
+const singleMarker=descendants(single).find(node=>node.tag==='circle');
+assert.equal(singleMarker.attrs.cx,'295');assert.ok(Number.isFinite(Number(singleMarker.attrs.cy)));
+const noTimeouts=new Element('div');timeoutStrip(noTimeouts,rows.filter(row=>!isTimeout(row)),[1000,3000]);
+assert.equal(noTimeouts.children.length,0);
+"""
+        self.run_node(harness)
+
+    def test_timeout_rows_never_enter_successful_timings_errors_or_memory(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        helpers = source[source.index("function mean("):source.index("const measures=")]
+        harness = "const assert=require('node:assert/strict');\n" + helpers
+        harness += self.helpers("validValue", "timedFailure", "isTimeout")
+        harness += r"""
+const success=[];
+for(const [index,physical_id] of ['p','q'].entries())for(const repetition of [1,2])
+ success.push({software:'echosms',source_sha:'source',physical_id,status:'ok',repetition,
+ elapsed_seconds:index+repetition,reference_id:'reference',delta_ts_db:(index+repetition)/10,
+ memory_delta_peak_bytes:1024,ts_db:-30});
+const timeouts=['timeout','setup_timeout'].map((status,index)=>({...success[index],status,
+ repetition:3,elapsed_seconds:120,delta_ts_db:1e9,ts_db:1e9,memory_delta_peak_bytes:1e12}));
+assert.deepEqual(timingSummary([...success,...timeouts],2),timingSummary(success,2));
+assert.deepEqual(repetitionRMSE([...success,...timeouts]),repetitionRMSE(success));
+assert.deepEqual(comparisonSummary([...success,...timeouts]),comparisonSummary(success));
+for(const row of timeouts){
+ assert.equal(isTimeout(row),true);assert.equal(timedFailure(row),false);
+ for(const field of ['elapsed_seconds','delta_ts_db','ts_db','memory_delta_peak_bytes'])
+  assert.equal(validValue(row,field),false);
+}
+assert.equal(isTimeout({status:'numerical_error'}),false);
+assert.equal(isTimeout({status:'pending'}),false);
+assert.equal(isTimeout({status:'unsupported'}),false);
+"""
+        self.run_node(harness)
+
 if __name__ == "__main__":
     unittest.main()
+
 
