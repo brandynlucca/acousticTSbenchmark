@@ -298,6 +298,9 @@ def recover_intent(api, state, sha):
 
 
 PARALLEL_WORKFLOW = ".github/workflows/parallel-spectra.yml"
+PARALLEL_CONTROLLER_FILES = {"src/parallel_campaign.py", "src/publish_progress.py",
+    "src/dataset.py", "src/report.py", "tests/test_parallel_campaign.py",
+    "tests/test_publish_progress.py"}
 PARALLEL_INPUTS = {"mode", "software", "semimajor_axes", "baseline_runs", "aspect_ratios",
     "incidences_deg", "boundaries", "frequency_start_khz", "frequency_end_khz",
     "frequency_interval_khz", "additional_repetitions", "max_parallel", "automatic_continue",
@@ -320,6 +323,12 @@ def validate_parallel_state(state, repository):
                 not re.fullmatch(r"[A-Za-z0-9_.-]+", request["dispatch_ref"]) or
                 not isinstance(request.get("inputs"), dict)):
             raise ValueError("Invalid parallel sequence request")
+        controllers = request.get("approved_controllers", [request["source_ref"]])
+        if (not isinstance(controllers, list) or not 1 <= len(controllers) <= 20 or
+                controllers[0] != request["source_ref"] or
+                any(not isinstance(ref, str) or not re.fullmatch(r"[a-f0-9]{40}", ref)
+                    for ref in controllers) or len(set(controllers)) != len(controllers)):
+            raise ValueError("Invalid approved parallel controller chain")
         keys.add(request["key"])
         inputs = request["inputs"]
         if (set(inputs) - PARALLEL_INPUTS or any(not isinstance(value, str) for value in inputs.values()) or
@@ -358,7 +367,9 @@ def validate_parallel_state(state, repository):
         if index >= len(state["requests"]) or not isinstance(intent, dict):
             raise ValueError("Invalid parallel dispatch intent")
         request = state["requests"][index]
-        if any(intent.get(key) != request[key] for key in ("key", "source_ref", "dispatch_ref", "inputs")):
+        if (any(intent.get(key) != request[key] for key in ("key", "source_ref", "dispatch_ref", "inputs")) or
+                intent.get("approved_controllers", [request["source_ref"]]) !=
+                request.get("approved_controllers", [request["source_ref"]])):
             raise ValueError("Parallel dispatch intent differs from the saved request")
         try:
             created = datetime.fromisoformat(intent["created_at"])
@@ -428,6 +439,48 @@ def parallel_state_document(api, campaign):
     return saved
 
 
+def approved_parallel_controller(api, request, saved):
+    """Verify applied controller changes without changing the original dispatch identity."""
+    approved = request.get("approved_controllers", [request["source_ref"]])
+    current = saved.get("controller_ref", request["source_ref"])
+    if current not in approved:
+        raise ValueError("Controller revision is not approved for the stage")
+    applied = approved.index(current)
+    history = saved.get("controller_history", [])
+    if not isinstance(history, list):
+        raise ValueError("Controller history is malformed")
+    if history and (not isinstance(history[-1], dict) or history[-1].get("current") != current):
+        raise ValueError("Controller history does not end at the active revision")
+    origins = [index for index, entry in enumerate(history)
+               if isinstance(entry, dict) and entry.get("previous") == approved[0]]
+    if not applied:
+        if origins:
+            raise ValueError("Controller history returns to the original stage revision")
+        return current
+    if len(origins) != 1 or len(history) - origins[0] != applied:
+        raise ValueError("Approved controller transition lacks recorded history")
+    for index, entry in enumerate(history[-applied:]):
+        previous, target = approved[index:index + 2]
+        if (not isinstance(entry, dict) or entry.get("previous") != previous or
+                entry.get("current") != target):
+            raise ValueError("Recorded controller history differs from the approved chain")
+        changed = entry.get("files")
+        if (not isinstance(changed, list) or not changed or
+                any(not isinstance(path, str) for path in changed) or
+                len(set(changed)) != len(changed)):
+            raise ValueError("Recorded controller files are malformed")
+        comparison = api.request("GET", f"/compare/{previous}...{target}")
+        files = comparison.get("files")
+        if (comparison.get("status") != "ahead" or not isinstance(files, list) or
+                not files or len(files) >= 300 or
+                any(not isinstance(item, dict) or item.get("filename") not in PARALLEL_CONTROLLER_FILES
+                    or item.get("status") == "renamed" for item in files)):
+            raise ValueError("Controller change modifies protected numerical sources or adapters")
+        if set(changed) != {item["filename"] for item in files}:
+            raise ValueError("Recorded controller files differ from the verified revision")
+    return current
+
+
 def parallel_predecessor(api, state, sha):
     request = state["requests"][len(state["dispatched"])-1]
     receipt = state["dispatched"][request["key"]]
@@ -441,16 +494,19 @@ def parallel_predecessor(api, state, sha):
         return pause(api, state, sha, "Parallel predecessor was cancelled")
     campaign = receipt["campaign_id"]
     saved = parallel_state_document(api, campaign)
-    if (not isinstance(saved, dict) or saved.get("campaign_id") != campaign or
-            saved.get("controller_ref", request["source_ref"]) != request["source_ref"]):
+    if not isinstance(saved, dict) or saved.get("campaign_id") != campaign:
         return pause(api, state, sha, "Saved parallel campaign differs from the dispatched stage", "blocked")
+    try:
+        controller = approved_parallel_controller(api, request, saved)
+    except ValueError as error:
+        return pause(api, state, sha, f"Saved parallel controller is invalid: {error}", "blocked")
     waves = saved.get("waves", [])
     if (not waves or not isinstance(waves, list) or
             any(not isinstance(wave, dict) or type(wave.get("run_id")) is not int for wave in waves) or
             receipt["run_id"] not in {wave["run_id"] for wave in waves}):
         return pause(api, state, sha, "Parallel dispatch is absent from the saved campaign history", "blocked")
     latest = checked_parallel_run(api, waves[-1]["run_id"])
-    if latest.get("head_sha") != request["source_ref"]:
+    if latest.get("head_sha") != controller:
         return pause(api, state, sha, "Latest parallel wave uses a different controller", "blocked")
     if latest.get("status") != "completed":
         return dict(status="waiting", campaign_id=campaign, run_id=latest["id"], run_status=latest.get("status"))
@@ -623,3 +679,4 @@ if __name__ == "__main__":
     except (OSError, RuntimeError, ValueError, KeyError) as error:
         print(f"Benchmark queue did not advance: {error}", file=sys.stderr)
         raise SystemExit(2)
+

@@ -686,12 +686,16 @@ class FakeParallelAPI(FakeAPI):
     def __init__(self, saved=None):
         super().__init__(saved or parallel_state())
         self.campaigns = {}
+        self.comparisons = {}
 
     def run(self, identity, inputs=None):
         return dict(super().run(identity), path=queue.PARALLEL_WORKFLOW,
             display_title=queue.parallel_title(inputs) if inputs else "Original spectra")
 
     def request(self, method, path, body=None):
+        if path.startswith("/compare/"):
+            self.calls.append((method, path, copy.deepcopy(body)))
+            return copy.deepcopy(self.comparisons[path])
         if path == "/actions/workflows/parallel-spectra.yml/dispatches":
             self.calls.append((method, path, copy.deepcopy(body)))
             if self.dispatch_error and not self.accept_before_error:
@@ -907,5 +911,183 @@ class ParallelQueueTests(unittest.TestCase):
         self.assertFalse(api.dispatches())
 
 
+
+class ParallelControllerUpgradeTests(unittest.TestCase):
+    advance = ParallelQueueTests.advance
+    ready = ParallelQueueTests.ready
+
+    def approved(self, active=False):
+        api, saved = self.ready()
+        request = api.state["requests"][0]
+        request["approved_controllers"] = ["a" * 40, "c" * 40]
+        files = ["src/parallel_campaign.py", "tests/test_parallel_campaign.py"]
+        saved.update(controller_ref="c" * 40, controller_history=[
+            dict(previous="a" * 40, current="c" * 40, files=files, changed_at=queue.utc_now())])
+        api.comparisons["/compare/" + "a" * 40 + "..." + "c" * 40] = dict(
+            status="ahead", files=[dict(filename=path, status="modified") for path in files])
+        api.runs[103] = dict(api.run(103, dict(campaign_id="101")), head_sha="c" * 40)
+        if active:
+            api.runs[103].update(status="in_progress", conclusion=None)
+        saved["waves"].append(dict(run_id=103))
+        return api, saved
+
+    def test_pending_handoff_keeps_original_controller_and_receipt_valid(self):
+        api, saved = self.ready()
+        original = copy.deepcopy(api.state["dispatched"]["echo-existing"])
+        api.state["requests"][0]["approved_controllers"] = ["a" * 40, "c" * 40]
+        saved.update(status="active", controller_tag="new-scheduler-tag",
+                     controller_upgrade_pending=dict(target="c" * 40))
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(api.state["dispatched"]["echo-existing"], original)
+        self.assertFalse(any(path.startswith("/compare/") for _, path, _ in api.calls))
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_verified_upgrade_waits_then_advances_without_rewriting_original_receipt(self):
+        api, saved = self.approved(active=True)
+        original = copy.deepcopy(api.state["dispatched"]["echo-existing"])
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+        api.finish(103)
+        api.ref_sha = "b" * 40
+        self.assertEqual(self.advance(api)["campaign_id"], "77")
+        self.assertEqual(api.state["dispatched"]["echo-existing"], original)
+        self.assertEqual(api.runs[101]["head_sha"], "a" * 40)
+        self.assertEqual(api.state["dispatched"]["acousticts-macos"]["source_ref"], "b" * 40)
+
+    def test_partial_approved_chain_and_preexisting_history_remain_valid(self):
+        api, saved = self.approved(active=True)
+        api.state["requests"][0]["approved_controllers"].append("d" * 40)
+        saved["controller_history"].insert(0, dict(previous="f" * 40, current="a" * 40,
+            files=["src/parallel_campaign.py"]))
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        saved["controller_history"].append(dict(previous="c" * 40, current="d" * 40,
+            files=["src/parallel_campaign.py"], changed_at=queue.utc_now()))
+        saved["controller_ref"] = "d" * 40
+        api.comparisons["/compare/" + "c" * 40 + "..." + "d" * 40] = dict(
+            status="ahead", files=[dict(filename="src/parallel_campaign.py", status="modified")])
+        api.runs[104] = dict(api.run(104, dict(campaign_id="101")), head_sha="d" * 40,
+                             status="in_progress", conclusion=None)
+        saved["waves"].append(dict(run_id=104))
+        self.assertEqual(self.advance(api)["status"], "waiting")
+
+    def test_invalid_approval_chains_are_rejected_before_dispatch(self):
+        bad = [None, "c" * 40, [], ["c" * 40], ["a" * 40, "a" * 40],
+               ["a" * 40, "bad"], ["a" * 40, 1], ["a" * 40, []],
+               ["a" * 40] + [format(i, "040x") for i in range(20)]]
+        for controllers in bad:
+            with self.subTest(controllers=controllers):
+                api = FakeParallelAPI()
+                api.state["requests"][0]["approved_controllers"] = controllers
+                with self.assertRaisesRegex(ValueError, "approved parallel controller"):
+                    self.advance(api)
+                self.assertFalse(api.dispatches())
+
+    def test_controller_history_requires_exact_contiguous_approved_transitions(self):
+        mutations = [
+            lambda saved: saved.pop("controller_history"),
+            lambda saved: saved.update(controller_history={}),
+            lambda saved: saved.update(controller_history=[None]),
+            lambda saved: saved["controller_history"][0].update(previous="b" * 40),
+            lambda saved: saved["controller_history"][0].update(current="d" * 40),
+            lambda saved: saved["controller_history"][0].update(files=[]),
+            lambda saved: saved["controller_history"][0].update(files=[None]),
+            lambda saved: saved["controller_history"][0].update(files=["src/parallel_campaign.py"]),
+            lambda saved: saved["controller_history"][0]["files"].append("src/parallel_campaign.py"),
+            lambda saved: saved.update(controller_ref="d" * 40),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                api, saved = self.approved()
+                mutate(saved)
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_actual_numerical_changes_block_even_with_approved_sha_and_claimed_history(self):
+        protected = ["sources.lock.json", "benchmark.json", "src/benchmark.py",
+                     "src/worker_python.py", "src/worker_acousticts.R",
+                     ".github/workflows/parallel-spectra.yml"]
+        for path in protected:
+            with self.subTest(path=path):
+                api, saved = self.approved()
+                comparison = next(iter(api.comparisons.values()))
+                comparison["files"].append(dict(filename=path, status="modified"))
+                saved["controller_history"][0]["files"].append(path)
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_behind_empty_renamed_and_truncated_comparisons_are_rejected(self):
+        comparisons = [
+            dict(status="behind", files=[dict(filename="src/parallel_campaign.py", status="modified")]),
+            dict(status="identical", files=[]),
+            dict(status="ahead", files=[]),
+            dict(status="ahead", files=None),
+            dict(status="ahead", files=[None]),
+            dict(status="ahead", files=[dict(filename="src/parallel_campaign.py", status="renamed")]),
+            dict(status="ahead", files=[dict(filename="src/parallel_campaign.py", status="modified")] * 300),
+        ]
+        for comparison in comparisons:
+            with self.subTest(comparison=comparison):
+                api, saved = self.approved()
+                api.comparisons[next(iter(api.comparisons))] = comparison
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_original_and_latest_workflow_sources_remain_distinct_checks(self):
+        for identity, source_ref in ((101, "c" * 40), (103, "a" * 40)):
+            with self.subTest(identity=identity):
+                api, saved = self.approved()
+                api.runs[identity]["head_sha"] = source_ref
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_unapproved_change_and_history_rollback_are_blocked(self):
+        api, saved = self.approved()
+        api.state["requests"][0].pop("approved_controllers")
+        self.assertEqual(self.advance(api)["status"], "blocked")
+        api, saved = self.approved()
+        saved["controller_ref"] = "a" * 40
+        api.runs[103]["head_sha"] = "a" * 40
+        self.assertEqual(self.advance(api)["status"], "blocked")
+
+    def test_extra_unapproved_history_cannot_be_hidden_before_matching_suffix(self):
+        api, saved = self.approved()
+        saved["controller_history"][0:0] = [
+            dict(previous="a" * 40, current="e" * 40, files=["benchmark.json"]),
+            dict(previous="e" * 40, current="a" * 40, files=["benchmark.json"])]
+        self.assertEqual(self.advance(api)["status"], "blocked")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_comparison_read_failure_never_changes_queue_or_dispatches(self):
+        api, saved = self.approved()
+        original = copy.deepcopy(api.state)
+        request = api.request
+        def fail_compare(method, path, body=None):
+            if path.startswith("/compare/"):
+                raise TimeoutError("Comparison unavailable")
+            return request(method, path, body)
+        with patch.object(api, "request", side_effect=fail_compare):
+            with self.assertRaises(TimeoutError):
+                self.advance(api)
+        self.assertEqual(api.state, original)
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_dispatch_intent_cannot_change_controller_approval(self):
+        for add_to_request in (False, True):
+            api = FakeParallelAPI()
+            if not add_to_request:
+                api.state["requests"][0]["approved_controllers"] = ["a" * 40, "c" * 40]
+            api.dispatch_error = TimeoutError("Uncertain dispatch")
+            with self.assertRaises(TimeoutError):
+                self.advance(api)
+            if add_to_request:
+                api.state["requests"][0]["approved_controllers"] = ["a" * 40, "c" * 40]
+            else:
+                api.state["requests"][0].pop("approved_controllers")
+            with self.assertRaisesRegex(ValueError, "dispatch intent"):
+                self.advance(api)
+            self.assertEqual(len(api.dispatches()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
