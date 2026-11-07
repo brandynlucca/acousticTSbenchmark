@@ -864,6 +864,8 @@ def recover_artifacts(api, plan, wave):
     tasks = {task['id']: task for task in plan['tasks'] if task['id'] in wave['tasks']}
     queue = get_document(api, wave['queue'])[0] if wave.get('queue') else None
     frequency_queue = queue is not None and queue.get('schema_version') == 2
+    recovered_tasks = {}
+    print(f'RECOVERY run={wave["run_id"]} stage=artifacts', flush=True)
     for artifact in all_artifacts(api, wave['run_id']):
         match = re.fullmatch(r'spectrum-([a-f0-9]{24})-([1-9][0-9]*)', artifact['name'])
         valid_workers = wave['workers'] if frequency_queue else tasks
@@ -877,6 +879,7 @@ def recover_artifacts(api, plan, wave):
             current, sha = get_document(api, path)
             if current and current.get('state') == 'complete':
                 continue
+        print(f'RECOVERY artifact={artifact["id"]} stage=download', flush=True)
         raw = api.archive(artifact['id'])
         if artifact.get('digest') and artifact['digest'] != 'sha256:' + hashlib.sha256(raw).hexdigest():
             raise ValueError('Recovery artifact digest does not match GitHub')
@@ -898,9 +901,12 @@ def recover_artifacts(api, plan, wave):
             seen.add(task_id)
             task = tasks[task_id]
             path = filename(plan['campaign_id'], 'task', task_id)
-            current, sha = get_document(api, path)
             if frequency_queue:
-                current = read_task_packet(api, plan, task)
+                if task_id not in recovered_tasks:
+                    print(f'RECOVERY artifact={artifact["id"]} task={task_id} stage=read_saved', flush=True)
+                    recovered_tasks[task_id] = read_task_packet(api, plan, task)
+                current = recovered_tasks[task_id]
+                validate_packet(plan, task, saved, check_tail_evidence=False)
                 # Shared snapshots may include records published by other owners.
                 owned = set()
                 for unit_id, owner in queue['claims'].items():
@@ -915,12 +921,25 @@ def recover_artifacts(api, plan, wave):
                 for identity, row in saved.get('records', {}).items():
                     if identity not in owned and (current or {}).get('records', {}).get(identity) != row:
                         raise ValueError('Recovery observation belongs to another frequency owner')
+                known = current is not None
+                for field in ('records', 'environments'):
+                    for identity, value in saved[field].items():
+                        existing = (current or {}).get(field, {})
+                        if identity in existing and existing[identity] != value:
+                            raise ValueError(f'Recovery artifact conflicts with published {field}')
+                        known = known and identity in existing
+                if known and (not saved.get('slow_sweep') or current.get('slow_sweep')):
+                    print(f'RECOVERY artifact={artifact["id"]} task={task_id} already_saved=true', flush=True)
+                    continue
                 recovered = combine_packets(plan, task, [value for value in (current, saved) if value is not None])
                 if current and current.get('_worker_packet_shas'):
                     recovered['integrated_worker_packets'] = dict(current['_worker_packet_shas'])
-                merge_task_packet(api, plan, task, recovered)
+                recovered_tasks[task_id] = merge_task_packet(api, plan, task, recovered)
             else:
+                current, sha = get_document(api, path)
                 restore_packet(api, plan, task, saved, current, sha)
+            print(f'RECOVERY artifact={artifact["id"]} task={task_id} saved=true', flush=True)
+    print(f'RECOVERY run={wave["run_id"]} stage=complete', flush=True)
 
 
 def restore_packet(api, plan, task, saved, current, sha):
@@ -1125,6 +1144,7 @@ def select_controller(api, plan, state):
 
 
 def plan_campaign(api, inputs, directory):
+    print('PLANNING stage=load', flush=True)
     campaign_id = inputs.get('campaign_id', '').strip()
     if campaign_id:
         plan, _ = get_document(api, filename(campaign_id, 'plan'))
@@ -1201,14 +1221,18 @@ def plan_campaign(api, inputs, directory):
     else:
         if tag['object']['sha'] != plan['source_ref']:
             raise ValueError('Campaign tag changed since its creation')
+    print('PLANNING stage=read_records', flush=True)
     packets = read_packets(api, plan)
+    print('PLANNING stage=consolidate', flush=True)
     consolidate_worker_packets(api, plan, packets)
     if state.get('publish_recovered_before_resume'):
+        print('PLANNING stage=publish_recovered', flush=True)
         publish_datasets(api, plan, packets, directory)
         state.pop('publish_recovered_before_resume')
         state.setdefault('recovery_publications', []).append(dict(
             run_id=int(os.environ['GITHUB_RUN_ID']), published_at=core.utc_now(),
             observations=sum(len(packet.get('records', {})) for packet in packets.values())))
+    print('PLANNING stage=schedule', flush=True)
     policy = execution_policy()
     if state.get('execution_policy') != policy:
         state.setdefault('execution_policy_history', []).append(dict(
