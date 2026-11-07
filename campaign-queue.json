@@ -323,7 +323,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T02:22:54.344864+00:00",
+  "updated_at": "2026-11-07T04:01:31.494999+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -416,5 +416,27 @@
         }
       ]
     }
-  ]
+  ],
+  "dispatch_intent": {
+    "key": "echo-new-a0-07",
+    "inputs": {
+      "mode": "repeat",
+      "aspect_ratios": "1.001,1.01,5,10,50,100",
+      "incidences_deg": "0,37,90",
+      "boundaries": "rigid,pressure_release,liquid,gas",
+      "frequency_start_khz": "1",
+      "frequency_end_khz": "300",
+      "frequency_interval_khz": "2",
+      "max_parallel": "16",
+      "automatic_continue": "true",
+      "timing_budget_minutes": "330",
+      "platform": "ubuntu-latest",
+      "software": "echosms",
+      "semimajor_axes": "0.07",
+      "additional_repetitions": "5"
+    },
+    "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+    "dispatch_ref": "spectra-five-replicates-20261106",
+    "created_at": "2026-11-07T04:01:31.494979+00:00"
+  }
 }
