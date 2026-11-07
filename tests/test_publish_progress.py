@@ -148,6 +148,7 @@ let count=0;
     def test_dashboard_totals_follow_each_grid_and_references_match_exact_cases(self):
         source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
         helpers = source[source.index("function referenceCurves(){"):source.index("let preferredSize=")]
+        helpers += source[source.index("function isTimeout("):source.index("function formatted(")]
         helpers += source[source.index("function progressGroups(byAngle){"):source.index("function progressBar(")]
         harness = r"""
 const assert=require('node:assert/strict');
