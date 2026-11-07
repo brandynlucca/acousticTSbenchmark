@@ -216,5 +216,144 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(dataset._object(archive, "test.json", omit=("omit", "small")), {"before": 1, "after": 4, "tail": 5})
 
 
+
+    def spectrum_exports(self):
+        first = case()
+        second = {key: value for key, value in dict(first, repetition=2).items() if key != "case_id"}
+        second["case_id"] = benchmark.fingerprint(second)
+        content = {}
+        for task_id, prediction, invocation in (("a" * 24, first, "first"), ("b" * 24, second, "second")):
+            exported = files(prediction, record(prediction, invocation=invocation))
+            exported[f"environments/{invocation}.json"] = dict(
+                platform="Linux", github_run_id="123", github_run_attempt="2", runtime={"historical": True})
+            content.update({f"spectrum/{task_id}/{name}": value for name, value in exported.items()})
+        content["benchmark-env/runtime.json"] = {"runtime": "unrelated setup metadata"}
+        return content
+
+    def test_nested_frequency_worker_exports_import_without_legacy_bundle_descriptor(self):
+        content = self.spectrum_exports()
+        name = "spectrum-" + "c" * 24 + "-1"
+        imported = self.load(content, name=name, run=456)
+        self.assertEqual(imported["observations"], 2)
+        self.assertEqual(imported["cases"], 2)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM manifests").fetchone()[0], 2)
+        self.assertEqual({tuple(row) for row in self.connection.execute(
+            "SELECT origin_run_id, origin_run_attempt FROM observations")}, {(123, 2)})
+        self.assertEqual(self.load(content, 2, name=name, run=789)["observations"], 0)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM observation_artifacts").fetchone()[0], 4)
+
+    def test_nested_spectrum_import_rolls_back_valid_earlier_exports_after_later_corruption(self):
+        for change in ("source", "atomic_record", "manifest"):
+            with self.subTest(change=change):
+                content = self.spectrum_exports()
+                prefix = "spectrum/" + "b" * 24 + "/"
+                if change == "source":
+                    content[prefix + "results.json"][0]["source_sha"] = "f" * 40
+                    raw = next(name for name in content if name.startswith(prefix + "records/"))
+                    content[raw]["source_sha"] = "f" * 40
+                elif change == "atomic_record":
+                    content[prefix + "results.json"][0]["elapsed_seconds"] = 99
+                else:
+                    content[prefix + "manifest.json"]["fingerprint"] = "f" * 64
+                with self.assertRaises(ValueError):
+                    self.load(content, name="spectrum-" + "c" * 24 + "-1")
+                self.assertEqual(dataset.database_summary(self.connection)["artifacts"], 0)
+                self.assertEqual(dataset.database_summary(self.connection)["observations"], 0)
+                self.assertEqual(self.connection.execute("SELECT count(*) FROM manifests").fetchone()[0], 0)
+
+    def test_nested_spectrum_groups_reject_incomplete_mixed_or_undeclared_exports(self):
+        for change in ("missing_results", "mixed_roots", "invalid_task", "undeclared_results"):
+            with self.subTest(change=change):
+                content = self.spectrum_exports()
+                prefix = "spectrum/" + "b" * 24 + "/"
+                if change == "missing_results":
+                    del content[prefix + "results.json"]
+                elif change in ("mixed_roots", "invalid_task"):
+                    replacement = ("other/" + "b" * 24 + "/"
+                                   if change == "mixed_roots" else "spectrum/not-a-task/")
+                    content = {name.replace(prefix, replacement): value for name, value in content.items()}
+                else:
+                    content["spectrum/" + "d" * 24 + "/results.json"] = []
+                with self.assertRaises(ValueError):
+                    self.load(content, name="spectrum-" + "c" * 24 + "-1")
+                self.assertEqual(dataset.database_summary(self.connection)["artifacts"], 0)
+
+    def test_nested_inference_preserves_declared_bundle_validation_and_legacy_ambiguity(self):
+        content = self.spectrum_exports()
+        with self.assertRaisesRegex(ValueError, "Ambiguous artifact metadata"):
+            self.load(content, name="results-ubuntu-latest")
+        content["spectrum/spectrum-bundle.json"] = dict(
+            schema_version=1, campaign_id="123", worker_id="c" * 24, task_ids=["a" * 24, "b" * 24])
+        self.assertEqual(self.load(content, name="spectrum-" + "c" * 24 + "-1")["observations"], 2)
+        broken = copy.deepcopy(content)
+        broken["spectrum/spectrum-bundle.json"]["task_ids"] = ["a" * 24]
+        with self.assertRaisesRegex(ValueError, "undeclared spectrum"):
+            self.load(broken, 2, name="spectrum-" + "c" * 24 + "-1")
+        self.assertEqual(dataset.database_summary(self.connection)["artifacts"], 1)
+        self.assertEqual(dataset.database_summary(self.connection)["observations"], 2)
+
+    def test_inferred_timeout_provenance_survives_dataset_and_progress_without_fake_measurements(self):
+        import publish_progress as progress
+        import zlib
+
+        prediction = case()
+        basis = dict(rule="ten_consecutive_prediction_timeouts",
+                     trigger_case_ids=[f"{index:064x}" for index in range(10)])
+        observation = dict(case_id=prediction["case_id"], source_sha="a" * 40,
+                           invocation_id="stopped-tail", finished_at="2026-11-07T00:00:00+00:00",
+                           status="timeout", prediction_attempted=False, timeout_basis=basis)
+        self.load(files(prediction, observation))
+        saved = self.connection.execute(
+            "SELECT elapsed_seconds, wall_seconds, ts_db, record_zlib FROM observations").fetchone()
+        self.assertEqual(tuple(saved[:3]), (None, None, None))
+        record = json.loads(zlib.decompress(saved["record_zlib"]))
+        self.assertIs(record["prediction_attempted"], False)
+        self.assertEqual(record["timeout_basis"], basis)
+        row = files(prediction, observation)["results.json"][0]
+        original = copy.deepcopy(row)
+        payload = progress.compact_payload("owner/repository", "ubuntu-latest", 12, 1, [row])
+        exported = payload["rows"][0]
+        self.assertIs(exported["prediction_attempted"], False)
+        self.assertEqual(exported["timeout_basis"], basis)
+        self.assertIsNone(exported["elapsed_seconds"])
+        self.assertIsNone(exported["ts_db"])
+        self.assertIsNone(exported["delta_ts_db"])
+        self.assertEqual(payload["coverage"][0]["success"], 0)
+        self.assertEqual(payload["coverage"][0]["other_recorded"], 1)
+        self.assertEqual(payload["coverage"][0]["elapsed_seconds_sum"], 0)
+        exported["timeout_basis"]["trigger_case_ids"].reverse()
+        self.assertEqual(row, original)
+        historical = progress.compact_payload("owner/repository", "ubuntu-latest", 12, 1,
+                                             [dict(prediction, status="timeout")])["rows"][0]
+        self.assertNotIn("prediction_attempted", historical)
+        self.assertNotIn("timeout_basis", historical)
+
+    def test_progress_rejects_invalid_inferred_timeout_proof_and_prediction_values(self):
+        import publish_progress as progress
+
+        row = dict(case(), status="timeout", prediction_attempted=False,
+                   timeout_basis=dict(rule="ten_consecutive_prediction_timeouts",
+                                      trigger_case_ids=[f"{index:064x}" for index in range(10)]))
+        invalid = []
+        for attempted in (0, "false", True, None):
+            invalid.append(dict(row, prediction_attempted=attempted))
+        invalid += [dict(row, status="ok"), dict(row, timeout_basis=None)]
+        for change in (
+                dict(rule="unsupported_rule", trigger_case_ids=row["timeout_basis"]["trigger_case_ids"]),
+                dict(row["timeout_basis"], extra="unverified"),
+                dict(row["timeout_basis"], trigger_case_ids=["a" * 64] * 10),
+                dict(row["timeout_basis"], trigger_case_ids=["invalid"] * 10),
+                dict(row["timeout_basis"], trigger_case_ids=row["timeout_basis"]["trigger_case_ids"][:9]),
+                dict(row["timeout_basis"], trigger_case_ids=None)):
+            invalid.append(dict(row, timeout_basis=change))
+        for field in ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
+                      "delta_ts_db", "amplitude_real_m", "amplitude_imag_m"):
+            invalid.append(dict(row, **{field: 0}))
+        for index, corrupt in enumerate(invalid):
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                progress.compact_payload("owner/repository", "ubuntu-latest", 12, 1, [corrupt])
+
+
 if __name__ == "__main__":
     unittest.main()
+

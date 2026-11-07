@@ -417,21 +417,29 @@ def _transaction(connection):
         connection.execute("RELEASE artifact_import")
 
 
-def _artifact_groups(archive, files):
+def _artifact_groups(archive, files, artifact_name=""):
     """Validate worker bundles while preserving the legacy artifact layout."""
     descriptor = _find(files, "spectrum-bundle.json")
     if descriptor is None:
-        return [files]
-    bundle = _object(archive, descriptor)
-    task_ids = bundle.get("task_ids")
-    if (bundle.get("schema_version") != 1 or not isinstance(task_ids, list)
-            or len(task_ids) > 10000
-            or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{24}", value) for value in task_ids)
-            or len(task_ids) != len(set(task_ids))
-            or not re.fullmatch(r"[a-f0-9]{24}", str(bundle.get("worker_id", "")))
-            or not re.fullmatch(r"[1-9][0-9]{0,19}", str(bundle.get("campaign_id", "")))):
-        raise ValueError("Invalid spectrum bundle descriptor")
-    root = PurePosixPath(descriptor).parent
+        roots = sorted({PurePosixPath(name).parent for name in files
+                        if PurePosixPath(name).name == "manifest.json"})
+        if len(roots) < 2 or not re.fullmatch(r"spectrum-[a-f0-9]{24}-[1-9][0-9]*", artifact_name):
+            return [files]
+        if (len(roots) > 10000 or len({path.parent for path in roots}) != 1
+                or any(not re.fullmatch(r"[a-f0-9]{24}", path.name) for path in roots)):
+            raise ValueError("Invalid nested spectrum export directories")
+        root, task_ids = roots[0].parent, [path.name for path in roots]
+    else:
+        bundle = _object(archive, descriptor)
+        task_ids = bundle.get("task_ids")
+        if (bundle.get("schema_version") != 1 or not isinstance(task_ids, list)
+                or len(task_ids) > 10000
+                or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{24}", value) for value in task_ids)
+                or len(task_ids) != len(set(task_ids))
+                or not re.fullmatch(r"[a-f0-9]{24}", str(bundle.get("worker_id", "")))
+                or not re.fullmatch(r"[1-9][0-9]{0,19}", str(bundle.get("campaign_id", "")))):
+            raise ValueError("Invalid spectrum bundle descriptor")
+        root = PurePosixPath(descriptor).parent
     groups, covered = [], set()
     for task_id in task_ids:
         prefix = str(root / task_id) + "/"
@@ -552,7 +560,7 @@ def import_artifact(connection, archive_path, artifact_metadata, repository):
         connection.execute("INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (artifact_id, repository, run_id, name, metadata.get("created_at"), digest,
              datetime.now(timezone.utc).isoformat(timespec="seconds"), _json(metadata)))
-        for group in _artifact_groups(archive, files):
+        for group in _artifact_groups(archive, files, name):
             _import_files(connection, archive, group, artifact_id, run_id, name, repository)
     after = database_summary(connection)
     return dict(imported=True, skipped=False, artifact_id=artifact_id,
@@ -615,4 +623,5 @@ def database_summary(connection):
     result["semimajor_m"] = [row[0] for row in connection.execute("SELECT DISTINCT semimajor_m FROM cases ORDER BY semimajor_m")]
     result["latest_measurement_at"] = connection.execute("SELECT max(finished_at) FROM observations").fetchone()[0]
     return result
+
 
