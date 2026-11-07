@@ -18,6 +18,57 @@ import parallel_campaign as parallel
 import benchmark as core
 
 
+def legacy_timeout_streak(task, records):
+    """Build historical ten-timeout proofs for saved-queue compatibility tests."""
+    streak = []
+    for case in sorted(task['cases'], key=lambda case: case['frequency_hz']):
+        row = records.get(case['case_id'], {})
+        if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False:
+            streak.append(case['case_id'])
+            if len(streak) == 10:
+                return dict(after_frequency_hz=case['frequency_hz'],
+                            rule='ten_consecutive_prediction_timeouts', trigger_case_ids=streak)
+        else:
+            streak = []
+    return None
+
+
+def legacy_scheduling_queue(plan, candidates, packets, run_id, maximum):
+    """Represent persisted frequency queues created before whole-sweep scheduling."""
+    queue = dict(schema_version=2, campaign_id=plan['campaign_id'], run_id=run_id,
+                 slow_frequency_seconds=60.0, pending=[], deferred=[], units={}, owners={},
+                 claims={}, finished={}, timeout_streaks={}, actual_timeouts={})
+    resumed = []
+    for task in candidates:
+        packet = packets.get(task['id'], {})
+        records = packet.get('records', {})
+        queue['actual_timeouts'][task['id']] = sorted(identity for identity, row in records.items()
+            if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False)
+        cutoff = legacy_timeout_streak(task, records)
+        if cutoff:
+            queue['timeout_streaks'][task['id']] = cutoff
+        remaining = [case['case_id'] for case in task['cases'] if case['case_id'] not in records]
+        if not remaining:
+            continue
+        expensive = packet.get('slow_sweep') or any(row.get('status') == 'timeout' or
+            isinstance(row.get('elapsed_seconds'), (int, float)) and row['elapsed_seconds'] >= 60
+            for row in records.values())
+        if expensive:
+            for identity in remaining:
+                queue['units'][identity] = dict(kind='frequency', task_id=task['id'], case_id=identity)
+                queue['deferred'].append(identity)
+        else:
+            queue['units'][task['id']] = dict(kind='sweep', task_id=task['id'])
+            (resumed if records else queue['pending']).append(task['id'])
+    queue['pending'].extend(resumed)
+    count = min(maximum, len(queue['pending']) + len(queue['deferred']))
+    workers = [task['id'] for task in candidates[:count]]
+    while len(workers) < count:
+        workers.append(core.fingerprint([plan['campaign_id'], run_id, 'worker', len(workers)])[:24])
+    queue['owners'] = {worker: None for worker in workers}
+    return queue, workers
+
+
 def fixture():
     config = dict(geometry=dict(semimajor_m=.07, aspect_ratios=[1.001, 5]),
         incidences_deg=[0, 37, 90], boundaries=list(core.BOUNDARIES),
@@ -620,20 +671,16 @@ class FrequencySchedulingTests(unittest.TestCase):
         plan['datasets']['0.07']['rows'] = [dict(case, status='pending') for case in cases]
         return plan, tasks, runtime
 
-    def test_deferral_threshold_is_inclusive_and_distinct_from_timeout(self):
-        self.assertEqual(parallel.execution_policy(), dict(case_timeout_seconds=120, slow_frequency_seconds=60.0,
-                                                         consecutive_timeouts=10))
-        self.assertFalse(parallel.slow_frequency(dict(status='ok', elapsed_seconds=59.99)))
-        self.assertTrue(parallel.slow_frequency(dict(status='ok', elapsed_seconds=60.0)))
-        self.assertTrue(parallel.slow_frequency(dict(status='timeout', elapsed_seconds=None)))
-        self.assertFalse(parallel.slow_frequency(dict(status='setup_timeout', elapsed_seconds=None)))
+    def test_active_policy_disables_deferral_and_uses_five_timeouts_at_300_seconds(self):
+        self.assertEqual(parallel.execution_policy(), dict(case_timeout_seconds=300,
+            scheduling='whole_sweep', frequency_deferral=False, consecutive_timeouts=5))
 
     def test_fresh_sweep_precedes_every_deferred_frequency(self):
         plan, tasks, runtime = self.two_sweeps()
         saved = packet_for(plan, tasks[0], runtime)
         next(iter(saved['records'].values()))['elapsed_seconds'] = 120
         original = copy.deepcopy(plan)
-        queue, workers = parallel.scheduling_queue(plan, tasks, {tasks[0]['id']: saved}, 100, 16)
+        queue, workers = legacy_scheduling_queue(plan, tasks, {tasks[0]['id']: saved}, 100, 16)
         self.assertEqual(plan, original)
         self.assertEqual(len(workers), 3)
         path = parallel.queue_filename('100', 100)
@@ -650,34 +697,35 @@ class FrequencySchedulingTests(unittest.TestCase):
         self.assertNotEqual(second['case_id'], third['case_id'])
         self.assertEqual(len(documents[path]['claims']), 3)
 
-    def test_one_expensive_sweep_can_use_multiple_worker_slots(self):
+    def test_resumed_expensive_sweep_keeps_one_owner(self):
         plan, task, runtime = pending_plan()
         saved = packet_for(plan, task, runtime)
         saved['slow_sweep'] = True
         queue, workers = parallel.scheduling_queue(plan, [task], {task['id']: saved}, 100, 16)
-        self.assertEqual(len(workers), 2)
-        self.assertEqual(len(set(workers)), 2)
-        self.assertEqual(queue['pending'], [])
-        self.assertEqual(set(queue['deferred']), {case['case_id'] for case in task['cases'][1:]})
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(queue['pending'], [task['id']])
+        self.assertEqual(queue['deferred'], [])
+        self.assertEqual(queue['units'], {task['id']: dict(kind='sweep', task_id=task['id'])})
+        self.assertFalse(queue['frequency_deferral'])
 
     def test_unstarted_sweep_precedes_resumption_of_a_partial_cheap_sweep(self):
         plan, tasks, runtime = self.two_sweeps()
         partial = packet_for(plan, tasks[0], runtime)
-        queue, workers = parallel.scheduling_queue(plan, tasks, {tasks[0]['id']: partial}, 100, 2)
+        queue, workers = legacy_scheduling_queue(plan, tasks, {tasks[0]['id']: partial}, 100, 2)
         self.assertEqual(queue['pending'], [tasks[1]['id'], tasks[0]['id']])
 
-    def test_worker_finishes_frequency_then_starts_brand_new_sweep(self):
+    def test_worker_finishes_complete_sweep_before_starting_next_sweep(self):
         plan, tasks, runtime = self.two_sweeps()
         queue, workers = parallel.scheduling_queue(plan, tasks, {}, 100, 1)
         path = parallel.queue_filename('100', 100)
         documents, get, put = self.documents({path: queue})
         wave = dict(run_id=100, queue=path, workers=workers, tasks=[task['id'] for task in tasks])
-        expected = [tasks[0]['cases'][0]] + tasks[1]['cases'] + tasks[0]['cases'][1:]
+        expected = tasks[0]['cases'] + tasks[1]['cases']
         environment = packet_for(plan, tasks[0], runtime)['environments']['inv']
         calls = []
         def measure(case, prepared, directory, timeout):
             calls.append((case['case_id'], timeout))
-            return dict(status='ok', elapsed_seconds=60.0 if len(calls) == 1 else .25, ts_db=-20.)
+            return dict(status='ok', elapsed_seconds=180.0 if len(calls) == 1 else .25, ts_db=-20.)
         with tempfile.TemporaryDirectory() as temporary, \
              patch.dict(os.environ, GITHUB_RUN_ID='100', GITHUB_SHA='c'*40), \
              patch.object(parallel.host_platform, 'system', return_value='Linux'), \
@@ -689,22 +737,23 @@ class FrequencySchedulingTests(unittest.TestCase):
             core.atomic_json(root / 'runtime.json', runtime)
             parallel.run_frequency_worker(Mock(), plan, {}, wave, workers[0], root / 'runtime.json',
                                           root / 'worker', float('inf'))
-        self.assertEqual(calls, [(case['case_id'], 120) for case in expected])
+        self.assertEqual(calls, [(case['case_id'], 300) for case in expected])
         self.assertEqual(len({identity for identity, timeout in calls}), 6)
         for task in tasks:
             packet = documents[parallel.worker_packet_filename('100', 100, workers[0], task['id'])]
             parallel.validate_packet(plan, task, packet)
             self.assertEqual(packet['state'], 'complete')
             self.assertEqual(len(packet['records']), 3)
-            self.assertTrue(all(row['case_timeout_seconds'] == 120 for row in packet['records'].values()))
+            self.assertTrue(all(row['case_timeout_seconds'] == 300 for row in packet['records'].values()))
             self.assertTrue(all(env['execution_policy'] == parallel.execution_policy()
                                 for env in packet['environments'].values()))
         self.assertEqual(plan['datasets']['0.07']['configuration']['case_timeout_seconds'], 600)
-        self.assertTrue(documents[parallel.worker_packet_filename('100', 100, workers[0], tasks[0]['id'])]['slow_sweep'])
+        self.assertEqual(documents[path]['deferred'], [])
+        self.assertTrue(all(unit['kind'] == 'sweep' for unit in documents[path]['units'].values()))
 
     def test_idle_worker_waits_for_active_sweep_and_then_takes_new_tail(self):
         plan, tasks, runtime = self.two_sweeps()
-        queue, workers = parallel.scheduling_queue(plan, tasks, {}, 100, 2)
+        queue, workers = legacy_scheduling_queue(plan, tasks, {}, 100, 2)
         path = parallel.queue_filename('100', 100)
         documents, get, put = self.documents({path: queue})
         with patch.object(parallel, 'get_document', side_effect=get), patch.object(parallel, 'put_document', side_effect=put):
@@ -757,18 +806,21 @@ class FrequencySchedulingTests(unittest.TestCase):
                 parallel.merge_task_packet(Mock(), plan, task, changed)
         put.assert_not_called()
 
-    def test_restart_retains_timeout_and_splits_only_unmeasured_frequencies(self):
+    def test_restart_retains_historical_timeout_inside_one_sweep(self):
         plan, task, runtime = pending_plan()
         packet = packet_for(plan, task, runtime)
         row = next(iter(packet['records'].values()))
-        row.update(status='timeout', elapsed_seconds=None, wall_seconds=600, solve_lower_bound_seconds=599)
+        row.update(status='timeout', elapsed_seconds=None, wall_seconds=120,
+                   case_timeout_seconds=120, solve_lower_bound_seconds=119)
+        original = copy.deepcopy(packet)
         queue, workers = parallel.scheduling_queue(plan, [task], {task['id']: packet}, 101, 16)
-        self.assertEqual(queue['pending'], [])
-        self.assertNotIn(row['case_id'], queue['units'])
-        self.assertEqual(len(queue['deferred']), 2)
+        self.assertEqual(queue['pending'], [task['id']])
+        self.assertEqual(queue['deferred'], [])
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(packet, original)
         self.assertEqual(plan['datasets']['0.07']['configuration']['case_timeout_seconds'], 600)
 
-    def test_numerical_timeout_yields_sweep_after_saving_actual_timeout(self):
+    def test_numerical_timeout_keeps_sweep_until_all_three_cases_finish(self):
         plan, task, runtime = pending_plan()
         documents, get, put = self.documents({})
         environment = packet_for(plan, task, runtime)['environments']['inv']
@@ -779,21 +831,20 @@ class FrequencySchedulingTests(unittest.TestCase):
              patch.object(parallel, 'put_document', side_effect=put), \
              patch.object(parallel, 'task_environment', return_value=environment), \
              patch.object(core, 'measure', return_value=dict(status='timeout', elapsed_seconds=None,
-                          wall_seconds=120, solve_lower_bound_seconds=119)) as measure:
+                          wall_seconds=300, solve_lower_bound_seconds=299)) as measure:
             root = Path(temporary)
             core.atomic_json(root / 'runtime.json', runtime)
             result = parallel.run_task(Mock(), '100', task['id'], root / 'runtime.json', root / 'worker',
                                        float('inf'), context=(plan, {}),
                                        work=dict(kind='sweep', run_id=100, worker_id=task['id']))
-        self.assertEqual(measure.call_count, 1)
-        self.assertEqual(measure.call_args.args[-1], 120)
-        self.assertEqual(result['state'], 'split_pending')
+        self.assertEqual(measure.call_count, 3)
+        self.assertEqual(measure.call_args.args[-1], 300)
+        self.assertEqual(result['state'], 'complete')
         saved = documents[parallel.worker_packet_filename('100', 100, task['id'], task['id'])]
-        self.assertTrue(saved['slow_sweep'])
-        self.assertEqual(len(saved['records']), 1)
+        self.assertEqual(len(saved['records']), 3)
         self.assertEqual(next(iter(saved['records'].values()))['status'], 'timeout')
 
-    def test_failed_publication_never_releases_a_slow_sweep(self):
+    def test_failed_publication_never_releases_a_completed_sweep(self):
         plan, tasks, runtime = self.two_sweeps()
         queue, workers = parallel.scheduling_queue(plan, tasks, {}, 100, 1)
         path = parallel.queue_filename('100', 100)
@@ -816,8 +867,8 @@ class FrequencySchedulingTests(unittest.TestCase):
             parallel.run_frequency_worker(Mock(), plan, {}, wave, workers[0], root / 'runtime.json',
                                           root / 'worker', float('inf'))
             local = core.read_json(root / 'worker' / tasks[0]['id'] / 'checkpoint.json')
-        self.assertEqual(measure.call_count, 1)
-        self.assertEqual(len(local['records']), 1)
+        self.assertEqual(measure.call_count, 3)
+        self.assertEqual(len(local['records']), 3)
         self.assertEqual(documents[path]['owners'][workers[0]], tasks[0]['id'])
         self.assertEqual(documents[path]['pending'], [tasks[1]['id']])
 
@@ -826,7 +877,7 @@ class FrequencySchedulingTests(unittest.TestCase):
         saved = packet_for(plan, task, runtime, 3)
         saved['records'] = {task['cases'][2]['case_id']: saved['records'][task['cases'][2]['case_id']]}
         saved.update(state='fragment_complete', slow_sweep=True)
-        queue, workers = parallel.scheduling_queue(plan, [task], {task['id']: saved}, 100, 2)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task['id']: saved}, 100, 2)
         queue_path = parallel.queue_filename('100', 100)
         task_path = parallel.filename('100', 'task', task['id'])
         documents, get, put = self.documents({queue_path: queue, task_path: saved})
@@ -860,7 +911,7 @@ class FrequencySchedulingTests(unittest.TestCase):
         plan, task, runtime = pending_plan()
         saved = packet_for(plan, task, runtime)
         saved.update(slow_sweep=True)
-        queue, workers = parallel.scheduling_queue(plan, [task], {task['id']: saved}, 100, 2)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task['id']: saved}, 100, 2)
         queue_path = parallel.queue_filename('100', 100)
         task_path = parallel.filename('100', 'task', task['id'])
         documents, get, put = self.documents({queue_path: queue, task_path: saved})
@@ -882,7 +933,7 @@ class FrequencySchedulingTests(unittest.TestCase):
 
     def test_lost_queue_write_acknowledgement_cannot_duplicate_work(self):
         plan, task, runtime = pending_plan()
-        queue, workers = parallel.scheduling_queue(plan, [task], {}, 100, 1)
+        queue, workers = legacy_scheduling_queue(plan, [task], {}, 100, 1)
         path = parallel.queue_filename('100', 100)
         documents, get, put = self.documents({path: queue})
         lost = [True]
@@ -1252,7 +1303,6 @@ class IdleOwnerLivenessTests(unittest.TestCase):
         sleep.assert_not_called()
 
 
-if __name__ == '__main__': unittest.main()
 
 
 
@@ -1284,7 +1334,7 @@ def actual_packet(plan, task, runtime, indices, timeout=True):
         row["prediction_attempted"] = True
         if timeout:
             row.update(status="timeout", elapsed_seconds=None, ts_db=None,
-                       wall_seconds=120, solve_lower_bound_seconds=119)
+                       wall_seconds=300, solve_lower_bound_seconds=299, case_timeout_seconds=300)
     return packet
 
 
@@ -1323,53 +1373,10 @@ def git_reader(saved):
     return api, tree
 
 
+@patch.object(parallel, 'timeout_streak', new=legacy_timeout_streak)
 class TimeoutTailRegressionTests(unittest.TestCase):
-    def test_streak_follows_planned_frequency_order_and_accepts_historical_actual_timeouts(self):
-        plan, runtime = long_plan()
-        task = plan["tasks"][0]
-        packet = actual_packet(plan, task, runtime, range(10))
-        ordered = [case["case_id"] for case in task["cases"][:10]]
-        del packet["records"][ordered[0]]["prediction_attempted"]
-        packet["records"] = dict(reversed(list(packet["records"].items())))
-        shuffled = dict(task, cases=list(reversed(task["cases"])))
-        self.assertEqual(parallel.timeout_streak(shuffled, packet["records"]),
-                         dict(after_frequency_hz=19000, rule="ten_consecutive_prediction_timeouts",
-                              trigger_case_ids=ordered))
 
-    def test_gaps_setup_inferred_and_other_results_reset_the_actual_timeout_streak(self):
-        plan, runtime = long_plan()
-        task = plan["tasks"][0]
-        original = actual_packet(plan, task, runtime, range(19))
-        reset = task["cases"][9]["case_id"]
-        for outcome in ("missing", "setup_timeout", "inferred", "ok", "numerical_error", "pending"):
-            with self.subTest(outcome=outcome):
-                packet = copy.deepcopy(original)
-                if outcome == "missing":
-                    del packet["records"][reset]
-                elif outcome == "inferred":
-                    packet["records"][reset]["prediction_attempted"] = False
-                else:
-                    packet["records"][reset]["status"] = outcome
-                self.assertIsNone(parallel.timeout_streak(task, packet["records"]))
-        later = actual_packet(plan, task, runtime, range(20))
-        later["records"][reset]["status"] = "setup_timeout"
-        self.assertEqual(parallel.timeout_streak(task, later["records"])["trigger_case_ids"],
-                         [case["case_id"] for case in task["cases"][10:20]])
 
-    def test_timeout_streaks_never_combine_repetitions(self):
-        plan, runtime = long_plan(repetitions=2)
-        first, second = plan["tasks"]
-        self.assertEqual(len({case["repetition"] for case in first["cases"]}), 1)
-        self.assertNotEqual(first["cases"][0]["repetition"], second["cases"][0]["repetition"])
-        left = actual_packet(plan, first, runtime, range(9))
-        right = actual_packet(plan, second, runtime, [0])
-        records = dict(left["records"], **right["records"])
-        self.assertIsNone(parallel.timeout_streak(first, records))
-        self.assertIsNone(parallel.timeout_streak(second, records))
-        records.update(actual_packet(plan, first, runtime, [9])["records"])
-        self.assertEqual(parallel.timeout_streak(first, records)["trigger_case_ids"],
-                         [case["case_id"] for case in first["cases"][:10]])
-        self.assertIsNone(parallel.timeout_streak(second, records))
 
     def test_later_trigger_remains_valid_after_an_earlier_streak_completes(self):
         plan, runtime = long_plan()
@@ -1395,7 +1402,7 @@ class TimeoutTailRegressionTests(unittest.TestCase):
         plan, runtime = long_plan()
         task = plan["tasks"][0]
         early = actual_packet(plan, task, runtime, range(9))
-        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: early}, 100, 3)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task["id"]: early}, 100, 3)
         path = parallel.queue_filename("100", 100)
         saved, get, put = documents({path: queue})
         with patch.object(parallel, "get_document", side_effect=get), \
@@ -1439,7 +1446,7 @@ class TimeoutTailRegressionTests(unittest.TestCase):
         plan, runtime = long_plan()
         task = plan["tasks"][0]
         packet = actual_packet(plan, task, runtime, range(10))
-        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: packet}, 100, 2)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task["id"]: packet}, 100, 2)
         path = parallel.queue_filename("100", 100)
         saved, get, put = documents({path: queue})
         active = task["cases"][12]["case_id"]
@@ -1505,6 +1512,7 @@ class TimeoutTailRegressionTests(unittest.TestCase):
             parallel.validate_packet(plan, task, result)
 
 
+@patch.object(parallel, 'timeout_streak', new=legacy_timeout_streak)
 class WorkerPublicationRegressionTests(unittest.TestCase):
     def test_worker_files_merge_with_legacy_results_and_cache_discovers_new_shards(self):
         plan, task, runtime = pending_plan()
@@ -1630,8 +1638,8 @@ class WorkerPublicationRegressionTests(unittest.TestCase):
         self.assertEqual(stored[task_path], legacy)
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
 
 
 
@@ -1897,13 +1905,14 @@ class PacketCacheAndConsolidationTests(unittest.TestCase):
         self.assertEqual(store.api.__dict__["_packet_blob_cache"]["bytes"], 0)
 
 
+@patch.object(parallel, 'timeout_streak', new=legacy_timeout_streak)
 class AtomicCompletionAndPublicationTests(unittest.TestCase):
     def test_combined_completion_and_claim_survives_lost_ack_without_duplicate_assignment(self):
         plan, runtime = fixtures.long_plan()
         task = plan["tasks"][0]
         initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
         initial["slow_sweep"] = True
-        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, 1)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task["id"]: initial}, 100, 1)
         path = parallel.queue_filename("100", 100)
         store = ThroughputStore({path: queue})
         lost = [False]
@@ -1939,7 +1948,7 @@ class AtomicCompletionAndPublicationTests(unittest.TestCase):
         task = plan["tasks"][0]
         initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
         initial["slow_sweep"] = True
-        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, 10)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task["id"]: initial}, 100, 10)
         path = parallel.queue_filename("100", 100)
         store = ThroughputStore({path: queue})
         with patch.object(parallel, "get_document", side_effect=store.get), \
@@ -1969,9 +1978,9 @@ class AtomicCompletionAndPublicationTests(unittest.TestCase):
         clock = [0.0]
 
         def measure(*args):
-            clock[0] += 125.0
-            return dict(status="timeout", elapsed_seconds=None, wall_seconds=120,
-                        solve_lower_bound_seconds=119)
+            clock[0] += 305.0
+            return dict(status="timeout", elapsed_seconds=None, wall_seconds=300,
+                        solve_lower_bound_seconds=299)
 
         with tempfile.TemporaryDirectory() as temporary, \
              patch.dict(os.environ, GITHUB_RUN_ID="100", GITHUB_SHA="c" * 40), \
@@ -1987,10 +1996,10 @@ class AtomicCompletionAndPublicationTests(unittest.TestCase):
             result = parallel.run_task(store.api, "100", task["id"], root / "runtime.json",
                                        root / "worker", float("inf"), context=(plan, {}), work=work)
         prediction.assert_called_once()
-        self.assertEqual(prediction.call_args.args[-1], 120)
+        self.assertEqual(prediction.call_args.args[-1], 300)
         self.assertEqual(store.writes, [parallel.worker_packet_filename("100", 100, worker, task["id"])])
         self.assertTrue(result["_publication_complete"])
-        self.assertEqual(result["_execution_timings"]["process_seconds"], 125)
+        self.assertEqual(result["_execution_timings"]["process_seconds"], 305)
         saved = store.documents[store.writes[0]]
         self.assertEqual(set(saved["records"]), {work["case_id"]})
         self.assertEqual(saved["records"][work["case_id"]]["status"], "timeout")
@@ -2002,7 +2011,7 @@ class ArtifactRecoveryCacheTests(unittest.TestCase):
         task = plan["tasks"][0]
         initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
         initial["slow_sweep"] = True
-        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, worker_count)
+        queue, workers = legacy_scheduling_queue(plan, [task], {task["id"]: initial}, 100, worker_count)
         queue_path = parallel.queue_filename("100", 100)
         task_path = parallel.filename("100", "task", task["id"])
         current = fixtures.actual_packet(plan, task, runtime, recorded, timeout=False)
@@ -2088,6 +2097,155 @@ class ArtifactRecoveryCacheTests(unittest.TestCase):
         for packet in (current, first, second):
             for identity, row in packet["records"].items():
                 self.assertEqual(saved["records"][identity], row)
+
+
+class WholeSweepPolicyTests(unittest.TestCase):
+    def execute(self, measure, current=None, run_worker=False):
+        plan, runtime = fixtures.long_plan()
+        task = plan['tasks'][0]
+        task_path = parallel.filename('100', 'task', task['id'])
+        store = ThroughputStore({task_path: current} if current else {})
+        environment = fixtures.packet_for(plan, task, runtime)['environments']['inv']
+        queue_path = parallel.queue_filename('100', 100)
+        if run_worker:
+            queue, workers = parallel.scheduling_queue(plan, [task], {task['id']: current} if current else {}, 100, 16)
+            store.documents[queue_path] = queue
+            worker = workers[0]
+            wave = dict(run_id=100, tasks=[task['id']], workers=workers, queue=queue_path)
+        else:
+            worker = '1' * 24
+        calls = []
+        def measured(case, runtime, directory, timeout):
+            calls.append(case['case_id'])
+            self.assertEqual(timeout, 300)
+            if run_worker:
+                queue = store.documents[queue_path]
+                self.assertEqual(queue['owners'][worker], task['id'])
+                self.assertEqual(queue['claims'], {task['id']: worker})
+                self.assertEqual(queue['finished'], {})
+                self.assertEqual(queue['deferred'], [])
+            return measure(len(calls), case)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(os.environ, GITHUB_RUN_ID='100', GITHUB_SHA='c' * 40), \
+             patch.object(parallel.host_platform, 'system', return_value='Linux'), \
+             patch.object(parallel, 'get_document', side_effect=store.get), \
+             patch.object(parallel, 'put_document', side_effect=store.put), \
+             patch.object(parallel, 'read_task_packet', return_value=copy.deepcopy(current)), \
+             patch.object(parallel, 'task_environment', return_value=environment), \
+             patch.object(parallel.core, 'measure', side_effect=measured), \
+             patch.object(parallel, 'change_work_queue', wraps=parallel.change_work_queue) as queue_change:
+            root = Path(temporary)
+            parallel.core.atomic_json(root / 'runtime.json', runtime)
+            if run_worker:
+                parallel.run_frequency_worker(store.api, plan, {}, wave, worker, root / 'runtime.json',
+                                              root / 'worker', float('inf'))
+                packet = parallel.core.read_json(root / 'worker' / task['id'] / 'checkpoint.json')
+                self.assertEqual(queue_change.call_count, 2)
+                self.assertEqual(store.writes.count(queue_path), 2)
+            else:
+                packet = parallel.run_task(store.api, '100', task['id'], root / 'runtime.json',
+                    root / 'worker', float('inf'), context=(plan, {}),
+                    work=dict(kind='sweep', run_id=100, worker_id=worker))
+        return plan, task, packet, calls
+
+    @staticmethod
+    def timeout(index, case):
+        return dict(status='timeout', elapsed_seconds=None, wall_seconds=300,
+                    solve_lower_bound_seconds=299)
+
+    def test_five_timeouts_infer_remaining_rows_without_releasing_sweep(self):
+        plan, task, packet, calls = self.execute(self.timeout, run_worker=True)
+        self.assertEqual(calls, [case['case_id'] for case in task['cases'][:5]])
+        self.assertEqual(packet['state'], 'complete')
+        self.assertEqual(len(packet['records']), len(task['cases']))
+        trigger = [case['case_id'] for case in task['cases'][:5]]
+        for case in task['cases'][5:]:
+            row = packet['records'][case['case_id']]
+            self.assertEqual(row['status'], 'timeout')
+            self.assertIs(row['prediction_attempted'], False)
+            self.assertEqual(row['timeout_basis'], dict(rule='five_consecutive_prediction_timeouts',
+                                                       trigger_case_ids=trigger))
+            self.assertEqual(row['case_timeout_seconds'], 300)
+            for key, value in row.items():
+                if key in ('elapsed_seconds', 'wall_seconds', 'solve_lower_bound_seconds', 'ts_db',
+                           'delta_ts_db', 'amplitude_real_m', 'amplitude_imag_m') or key.startswith('memory_'):
+                    self.assertIsNone(value)
+        parallel.validate_packet(plan, task, packet)
+
+    def test_success_breaks_streak_and_setup_timeout_stops_without_inference(self):
+        def successes(index, case):
+            return dict(status='ok', elapsed_seconds=180, ts_db=-20) if index % 5 == 0 else self.timeout(index, case)
+        plan, task, packet, calls = self.execute(successes)
+        self.assertEqual(len(calls), len(task['cases']))
+        self.assertTrue(all(row['prediction_attempted'] for row in packet['records'].values()))
+        def setup(index, case):
+            return dict(status='setup_timeout') if index == 5 else self.timeout(index, case)
+        plan, task, packet, calls = self.execute(setup)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(packet['state'], 'setup_failed')
+        self.assertEqual(len(packet['records']), 4)
+        self.assertTrue(all(row['prediction_attempted'] for row in packet['records'].values()))
+
+    def test_trigger_requires_adjacent_actual_records_at_300_seconds_within_one_repetition(self):
+        plan, runtime = fixtures.long_plan(repetitions=2)
+        task, other = plan['tasks']
+        valid = fixtures.actual_packet(plan, task, runtime, range(5))
+        for row in valid['records'].values():
+            row['case_timeout_seconds'] = 300
+        expected = [case['case_id'] for case in task['cases'][:5]]
+        self.assertEqual(parallel.timeout_streak(dict(task, cases=list(reversed(task['cases']))),
+                                               valid['records'])['trigger_case_ids'], expected)
+        for mutation in ('gap', 'setup', 'inferred', 'old_cap'):
+            with self.subTest(mutation=mutation):
+                records = copy.deepcopy(valid['records'])
+                identity = expected[2]
+                if mutation == 'gap':
+                    del records[identity]
+                elif mutation == 'setup':
+                    records[identity]['status'] = 'setup_timeout'
+                elif mutation == 'inferred':
+                    records[identity]['prediction_attempted'] = False
+                else:
+                    records[identity]['case_timeout_seconds'] = 120
+                self.assertIsNone(parallel.timeout_streak(task, records))
+        across = fixtures.actual_packet(plan, task, runtime, range(4))['records']
+        across.update(fixtures.actual_packet(plan, other, runtime, [4])['records'])
+        self.assertIsNone(parallel.timeout_streak(task, across))
+        for row in valid['records'].values():
+            row['case_timeout_seconds'] = 600
+        self.assertIsNotNone(parallel.timeout_streak(task, valid['records']))
+
+    def test_resumed_sweep_fills_lower_gap_and_preserves_higher_actual_result(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan['tasks'][0]
+        current = fixtures.actual_packet(plan, task, runtime, [0, 1, 3, 4, 5, 6, 7, 12])
+        current['slow_sweep'] = True
+        for row in current['records'].values():
+            row['case_timeout_seconds'] = 300
+        for index in (0, 1):
+            current['records'][task['cases'][index]['case_id']]['case_timeout_seconds'] = 120
+        current['records'][task['cases'][12]['case_id']].update(status='ok', elapsed_seconds=5, ts_db=-20)
+        original = copy.deepcopy(current['records'])
+        plan, task, packet, calls = self.execute(lambda index, case: dict(status='ok', elapsed_seconds=2, ts_db=-20), current)
+        self.assertEqual(calls, [task['cases'][2]['case_id']])
+        self.assertEqual(packet['state'], 'complete')
+        self.assertTrue(all(packet['records'][identity] == row for identity, row in original.items()))
+        self.assertEqual(len(packet['records']), len(task['cases']))
+
+    def test_historical_ten_timeout_proof_remains_valid_at_old_budget(self):
+        plan, runtime = fixtures.long_plan()
+        task = plan['tasks'][0]
+        packet = fixtures.actual_packet(plan, task, runtime, range(10))
+        for row in packet['records'].values():
+            row['case_timeout_seconds'] = 120
+        historical = dict(rule='ten_consecutive_prediction_timeouts',
+                          trigger_case_ids=[case['case_id'] for case in task['cases'][:10]])
+        self.assertEqual(parallel.timeout_basis_frequency(task, packet['records'], historical), 19000)
+        self.assertIsNone(parallel.timeout_streak(task, packet['records']))
+        new_basis = dict(rule='five_consecutive_prediction_timeouts',
+                         trigger_case_ids=historical['trigger_case_ids'][:5])
+        with self.assertRaises(ValueError):
+            parallel.timeout_basis_frequency(task, packet['records'], new_basis)
 
 
 if __name__ == "__main__":
