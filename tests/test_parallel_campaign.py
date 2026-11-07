@@ -599,6 +599,14 @@ class FrequencySchedulingTests(unittest.TestCase):
             versions[path] = versions.get(path, 0) + 1
             documents[path] = copy.deepcopy(value)
             return versions[path]
+        def read_task(api, plan, task):
+            values = [value for name, value in documents.items()
+                      if name == parallel.filename(plan['campaign_id'], 'task', task['id']) or
+                      (name.startswith(f"spectra-{plan['campaign_id']}-worker-") and name.endswith(task['id'] + '.json'))]
+            return parallel.combine_packets(plan, task, values)
+        reader = patch.object(parallel, 'read_task_packet', side_effect=read_task)
+        self.addCleanup(reader.stop)
+        reader.start()
         return documents, get, put
 
     def two_sweeps(self):
@@ -613,7 +621,8 @@ class FrequencySchedulingTests(unittest.TestCase):
         return plan, tasks, runtime
 
     def test_deferral_threshold_is_inclusive_and_distinct_from_timeout(self):
-        self.assertEqual(parallel.execution_policy(), dict(case_timeout_seconds=120, slow_frequency_seconds=60.0))
+        self.assertEqual(parallel.execution_policy(), dict(case_timeout_seconds=120, slow_frequency_seconds=60.0,
+                                                         consecutive_timeouts=10))
         self.assertFalse(parallel.slow_frequency(dict(status='ok', elapsed_seconds=59.99)))
         self.assertTrue(parallel.slow_frequency(dict(status='ok', elapsed_seconds=60.0)))
         self.assertTrue(parallel.slow_frequency(dict(status='timeout', elapsed_seconds=None)))
@@ -683,7 +692,7 @@ class FrequencySchedulingTests(unittest.TestCase):
         self.assertEqual(calls, [(case['case_id'], 120) for case in expected])
         self.assertEqual(len({identity for identity, timeout in calls}), 6)
         for task in tasks:
-            packet = documents[parallel.filename('100', 'task', task['id'])]
+            packet = documents[parallel.worker_packet_filename('100', 100, workers[0], task['id'])]
             parallel.validate_packet(plan, task, packet)
             self.assertEqual(packet['state'], 'complete')
             self.assertEqual(len(packet['records']), 3)
@@ -691,7 +700,7 @@ class FrequencySchedulingTests(unittest.TestCase):
             self.assertTrue(all(env['execution_policy'] == parallel.execution_policy()
                                 for env in packet['environments'].values()))
         self.assertEqual(plan['datasets']['0.07']['configuration']['case_timeout_seconds'], 600)
-        self.assertTrue(documents[parallel.filename('100', 'task', tasks[0]['id'])]['slow_sweep'])
+        self.assertTrue(documents[parallel.worker_packet_filename('100', 100, workers[0], tasks[0]['id'])]['slow_sweep'])
 
     def test_idle_worker_waits_for_active_sweep_and_then_takes_new_tail(self):
         plan, tasks, runtime = self.two_sweeps()
@@ -774,11 +783,12 @@ class FrequencySchedulingTests(unittest.TestCase):
             root = Path(temporary)
             core.atomic_json(root / 'runtime.json', runtime)
             result = parallel.run_task(Mock(), '100', task['id'], root / 'runtime.json', root / 'worker',
-                                       float('inf'), context=(plan, {}), work=dict(kind='sweep'))
+                                       float('inf'), context=(plan, {}),
+                                       work=dict(kind='sweep', run_id=100, worker_id=task['id']))
         self.assertEqual(measure.call_count, 1)
         self.assertEqual(measure.call_args.args[-1], 120)
         self.assertEqual(result['state'], 'split_pending')
-        saved = documents[parallel.filename('100', 'task', task['id'])]
+        saved = documents[parallel.worker_packet_filename('100', 100, task['id'], task['id'])]
         self.assertTrue(saved['slow_sweep'])
         self.assertEqual(len(saved['records']), 1)
         self.assertEqual(next(iter(saved['records'].values()))['status'], 'timeout')
@@ -789,7 +799,7 @@ class FrequencySchedulingTests(unittest.TestCase):
         path = parallel.queue_filename('100', 100)
         documents, get, put = self.documents({path: queue})
         def outage(api, name, value, sha=None, **kwargs):
-            if '-task-' in name:
+            if '-task-' in name or '-worker-' in name:
                 raise parallel.APIError(503, 'unavailable')
             return put(api, name, value, sha, **kwargs)
         wave = dict(run_id=100, queue=path, workers=workers, tasks=[task['id'] for task in tasks])
@@ -1026,6 +1036,35 @@ class DocumentStorageTests(unittest.TestCase):
 
 
 class GitDataStorageTests(unittest.TestCase):
+    def test_data_tree_preserves_missing_parent_blob_without_hydration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def git(*arguments, data=None, check=True):
+                return subprocess.run(['git', *arguments], cwd=root, input=data,
+                                      check=check, capture_output=True)
+            git('init')
+            missing = 'b' * 40
+            tree = git('mktree', '--missing', data=f'100644 blob {missing}\thistorical.json\n'.encode()).stdout.decode().strip()
+            blob = git('hash-object', '-w', '--stdin', data=b'{"saved":true}').stdout.decode().strip()
+            store = parallel.GitDataStore(root)
+            result = store.request('POST', '/git/trees', dict(base_tree=tree,
+                tree=[dict(path='new.json', sha=blob)]))
+            entries = git('ls-tree', result['sha']).stdout.decode()
+            self.assertIn(missing, entries)
+            self.assertIn(blob, entries)
+            self.assertNotEqual(git('cat-file', '-e', missing, check=False).returncode, 0)
+            self.assertEqual(git('cat-file', 'blob', blob).stdout, b'{"saved":true}')
+
+    def test_git_timeout_invalidates_cache_and_retains_safe_retry_error(self):
+        store = parallel.GitDataStore('.')
+        store.fetched = 100
+        with patch.object(parallel.subprocess, 'run', side_effect=subprocess.TimeoutExpired('secret', 180)), \
+             self.assertRaises(parallel.APIError) as raised:
+            store.git('write-tree')
+        self.assertEqual(raised.exception.status, 503)
+        self.assertLess(store.fetched, 0)
+        self.assertNotIn('secret', str(raised.exception))
+
     def test_rate_limit_metadata_does_not_echo_response_credentials(self):
         from urllib.error import HTTPError
         error=HTTPError('https://api.github.com/repos/owner/repo/private',403,'Forbidden',
@@ -1214,3 +1253,383 @@ class IdleOwnerLivenessTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+
+
+
+# Publication repair and timeout-tail regressions.
+import base64
+import hashlib
+def long_plan(repetitions=1):
+    baseline, sources, runtime = fixture()
+    configuration = copy.deepcopy(baseline["configuration"])
+    configuration["frequency"]["stop_hz"] = 49000
+    configuration["repetitions"] = repetitions
+    cases = [case for case in core.build_cases(configuration, "full", ["acousticts"])
+             if case["boundary"] == "rigid" and case["aspect_ratio"] == 5 and case["incidence_deg"] == 37]
+    tasks = parallel.make_tasks("100", {"0.07": cases})
+    data = dict(baseline, configuration=configuration,
+                rows=[dict(case, status="pending") for case in cases], compatibility={})
+    return dict(campaign_id="100", source_ref="c" * 40, sources=sources, tasks=tasks,
+                datasets={"0.07": data}), runtime
+
+
+def actual_packet(plan, task, runtime, indices, timeout=True):
+    packet = packet_for(plan, task, runtime, len(task["cases"]))
+    chosen = {task["cases"][index]["case_id"] for index in indices}
+    packet["records"] = {identity: row for identity, row in packet["records"].items() if identity in chosen}
+    packet["state"] = "interrupted"
+    for row in packet["records"].values():
+        row["prediction_attempted"] = True
+        if timeout:
+            row.update(status="timeout", elapsed_seconds=None, ts_db=None,
+                       wall_seconds=120, solve_lower_bound_seconds=119)
+    return packet
+
+
+def documents(initial):
+    saved = copy.deepcopy(initial)
+    versions = {path: 1 for path in saved}
+
+    def get(api, path):
+        return copy.deepcopy(saved.get(path)), versions.get(path)
+
+    def put(api, path, value, sha=None, **kwargs):
+        if versions.get(path) != sha:
+            raise parallel.DocumentConflict("stale writer")
+        versions[path] = versions.get(path, 0) + 1
+        saved[path] = copy.deepcopy(value)
+        return versions[path]
+
+    return saved, get, put
+
+
+def git_reader(saved):
+    blobs = {}
+
+    def tree(api):
+        entries = {}
+        for path, packet in saved.items():
+            raw = json.dumps(parallel.pack(packet), separators=(",", ":")).encode()
+            sha = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+            entries[path] = dict(sha=sha)
+            blobs[sha] = raw
+        return "head", "tree", entries
+
+    api = Mock()
+    api.request.side_effect = lambda method, path: dict(
+        encoding="base64", content=base64.b64encode(blobs[path.rsplit("/", 1)[-1]]).decode())
+    return api, tree
+
+
+class TimeoutTailRegressionTests(unittest.TestCase):
+    def test_streak_follows_planned_frequency_order_and_accepts_historical_actual_timeouts(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        packet = actual_packet(plan, task, runtime, range(10))
+        ordered = [case["case_id"] for case in task["cases"][:10]]
+        del packet["records"][ordered[0]]["prediction_attempted"]
+        packet["records"] = dict(reversed(list(packet["records"].items())))
+        shuffled = dict(task, cases=list(reversed(task["cases"])))
+        self.assertEqual(parallel.timeout_streak(shuffled, packet["records"]),
+                         dict(after_frequency_hz=19000, rule="ten_consecutive_prediction_timeouts",
+                              trigger_case_ids=ordered))
+
+    def test_gaps_setup_inferred_and_other_results_reset_the_actual_timeout_streak(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        original = actual_packet(plan, task, runtime, range(19))
+        reset = task["cases"][9]["case_id"]
+        for outcome in ("missing", "setup_timeout", "inferred", "ok", "numerical_error", "pending"):
+            with self.subTest(outcome=outcome):
+                packet = copy.deepcopy(original)
+                if outcome == "missing":
+                    del packet["records"][reset]
+                elif outcome == "inferred":
+                    packet["records"][reset]["prediction_attempted"] = False
+                else:
+                    packet["records"][reset]["status"] = outcome
+                self.assertIsNone(parallel.timeout_streak(task, packet["records"]))
+        later = actual_packet(plan, task, runtime, range(20))
+        later["records"][reset]["status"] = "setup_timeout"
+        self.assertEqual(parallel.timeout_streak(task, later["records"])["trigger_case_ids"],
+                         [case["case_id"] for case in task["cases"][10:20]])
+
+    def test_timeout_streaks_never_combine_repetitions(self):
+        plan, runtime = long_plan(repetitions=2)
+        first, second = plan["tasks"]
+        self.assertEqual(len({case["repetition"] for case in first["cases"]}), 1)
+        self.assertNotEqual(first["cases"][0]["repetition"], second["cases"][0]["repetition"])
+        left = actual_packet(plan, first, runtime, range(9))
+        right = actual_packet(plan, second, runtime, [0])
+        records = dict(left["records"], **right["records"])
+        self.assertIsNone(parallel.timeout_streak(first, records))
+        self.assertIsNone(parallel.timeout_streak(second, records))
+        records.update(actual_packet(plan, first, runtime, [9])["records"])
+        self.assertEqual(parallel.timeout_streak(first, records)["trigger_case_ids"],
+                         [case["case_id"] for case in first["cases"][:10]])
+        self.assertIsNone(parallel.timeout_streak(second, records))
+
+    def test_later_trigger_remains_valid_after_an_earlier_streak_completes(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        packet = actual_packet(plan, task, runtime, range(12, 22))
+        later = parallel.timeout_streak(task, packet["records"])
+        basis = {key: later[key] for key in ("rule", "trigger_case_ids")}
+        row = actual_packet(plan, task, runtime, [24])["records"][task["cases"][24]["case_id"]]
+        row = {key: value for key, value in row.items()
+               if key not in ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db")}
+        row.update(prediction_attempted=False, timeout_basis=basis)
+        packet["records"][row["case_id"]] = row
+        parallel.validate_packet(plan, task, packet)
+        packet["records"].update(actual_packet(plan, task, runtime, range(10))["records"])
+        self.assertEqual(parallel.timeout_streak(task, packet["records"])["after_frequency_hz"], 19000)
+        self.assertEqual(parallel.timeout_basis_frequency(task, packet["records"], basis), 43000)
+        parallel.validate_packet(plan, task, packet)
+        reversed_basis = dict(basis, trigger_case_ids=list(reversed(basis["trigger_case_ids"])))
+        with self.assertRaises(ValueError):
+            parallel.timeout_basis_frequency(task, packet["records"], reversed_basis)
+
+    def test_tail_reservation_excludes_a_real_prediction_already_in_flight(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        early = actual_packet(plan, task, runtime, range(9))
+        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: early}, 100, 3)
+        path = parallel.queue_filename("100", 100)
+        saved, get, put = documents({path: queue})
+        with patch.object(parallel, "get_document", side_effect=get), \
+             patch.object(parallel, "put_document", side_effect=put):
+            tenth = parallel.change_work_queue(Mock(), plan, 100, workers[0])
+            active = parallel.change_work_queue(Mock(), plan, 100, workers[1])
+            completed = actual_packet(plan, task, runtime, range(10))
+            completed["state"] = "fragment_complete"
+            parallel.change_work_queue(Mock(), plan, 100, workers[0], tenth["id"], completed)
+            tail = parallel.change_work_queue(Mock(), plan, 100, workers[2])
+            self.assertEqual(tail["kind"], "timeout_tail")
+            self.assertEqual(tail["case_ids"], [case["case_id"] for case in task["cases"][11:]])
+            self.assertNotIn(active["case_id"], tail["case_ids"])
+            self.assertEqual(saved[path]["owners"][workers[1]], active["id"])
+            self.assertEqual(saved[path]["claims"][active["id"]], workers[1])
+            self.assertEqual(parallel.change_work_queue(Mock(), plan, 100, workers[0]), dict(kind="wait"))
+
+    def test_inferred_rows_reject_measured_timing_error_amplitude_and_memory_fields(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        packet = actual_packet(plan, task, runtime, range(10))
+        cutoff = parallel.timeout_streak(task, packet["records"])
+        identity = task["cases"][10]["case_id"]
+        row = actual_packet(plan, task, runtime, [10])["records"][identity]
+        row = {key: value for key, value in row.items()
+               if key not in ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db")}
+        row.update(prediction_attempted=False,
+                   timeout_basis={key: cutoff[key] for key in ("rule", "trigger_case_ids")})
+        packet["records"][identity] = row
+        parallel.validate_packet(plan, task, packet)
+        for field in ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
+                      "delta_ts_db", "amplitude_real_m", "amplitude_imag_m",
+                      "memory_delta_peak_bytes", "memory_samples"):
+            with self.subTest(field=field):
+                corrupt = copy.deepcopy(packet)
+                corrupt["records"][identity][field] = 0
+                with self.assertRaises(ValueError):
+                    parallel.validate_packet(plan, task, corrupt)
+
+    def test_tail_reservation_rechecks_active_claims_after_compare_and_swap_conflict(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        packet = actual_packet(plan, task, runtime, range(10))
+        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: packet}, 100, 2)
+        path = parallel.queue_filename("100", 100)
+        saved, get, put = documents({path: queue})
+        active = task["cases"][12]["case_id"]
+        raced = []
+
+        def concurrent(api, target, value, sha=None, **kwargs):
+            if not raced:
+                raced.append(True)
+                competing = copy.deepcopy(saved[path])
+                competing["deferred"].remove(active)
+                competing["owners"][workers[1]] = active
+                competing["claims"][active] = workers[1]
+                put(api, target, competing, sha)
+                raise parallel.DocumentConflict("active claim arrived before tail reservation")
+            return put(api, target, value, sha, **kwargs)
+
+        with patch.object(parallel, "get_document", side_effect=get), \
+             patch.object(parallel, "put_document", side_effect=concurrent), \
+             patch.object(parallel.time, "sleep"):
+            tail = parallel.change_work_queue(Mock(), plan, 100, workers[0])
+        self.assertNotIn(active, tail["case_ids"])
+        self.assertEqual(saved[path]["owners"][workers[1]], active)
+        self.assertEqual(len(tail["case_ids"]), len(task["cases"]) - 11)
+
+    def test_timeout_tail_emits_no_prediction_measurements_and_preserves_saved_actual_rows(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        packet = actual_packet(plan, task, runtime, range(10))
+        actual = actual_packet(plan, task, runtime, [11], timeout=False)
+        packet["records"].update(actual["records"])
+        basis = parallel.timeout_streak(task, packet["records"])
+        selected = [task["cases"][index]["case_id"] for index in (10, 12)]
+        work = dict(kind="timeout_tail", task_id=task["id"], case_ids=selected, run_id=100,
+                    worker_id="d" * 24,
+                    timeout_basis={key: basis[key] for key in ("rule", "trigger_case_ids")})
+        published = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            core.atomic_json(root / "runtime.json", runtime)
+            with patch.dict(os.environ, GITHUB_RUN_ID="100", GITHUB_RUN_ATTEMPT="1", GITHUB_SHA="c" * 40), \
+                 patch.object(parallel.host_platform, "system", return_value="Linux"), \
+                 patch.object(parallel, "read_task_packet", return_value=copy.deepcopy(packet)), \
+                 patch.object(parallel, "get_document", return_value=(None, None)), \
+                 patch.object(parallel, "task_environment", return_value=packet["environments"]["inv"]), \
+                 patch.object(parallel, "publish_worker_packet",
+                              side_effect=lambda api, plan, task, value, work: published.append(copy.deepcopy(value))), \
+                 patch.object(core, "measure", side_effect=AssertionError("Tail must not run numerical software")) as measure:
+                result = parallel.run_task(Mock(), "100", task["id"], root / "runtime.json",
+                                           root / "worker", float("inf"), context=(plan, {}), work=work)
+            measure.assert_not_called()
+            for identity in selected:
+                row = result["records"][identity]
+                self.assertIs(row["prediction_attempted"], False)
+                self.assertEqual(row["status"], "timeout")
+                self.assertEqual(row["timeout_basis"], work["timeout_basis"])
+                self.assertTrue(all(row.get(key) is None for key in
+                                    ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
+                                     "amplitude_real_m", "amplitude_imag_m")))
+            for identity, row in packet["records"].items():
+                self.assertEqual(result["records"][identity], row)
+            self.assertEqual(len(result["records"]), len(packet["records"]) + 2)
+            self.assertEqual(published[-1]["records"], result["records"])
+            parallel.validate_packet(plan, task, result)
+
+
+class WorkerPublicationRegressionTests(unittest.TestCase):
+    def test_worker_files_merge_with_legacy_results_and_cache_discovers_new_shards(self):
+        plan, task, runtime = pending_plan()
+        old = packet_for(plan, task, runtime)
+        legacy_path = parallel.filename("100", "task", task["id"])
+        saved, get, put = documents({legacy_path: old})
+        api, tree = git_reader(saved)
+        with patch.object(parallel, "get_document", side_effect=get), \
+             patch.object(parallel, "put_document", side_effect=put), \
+             patch.object(parallel, "_progress_tree", side_effect=tree):
+            cache = parallel.read_packets(api, plan)
+            self.assertEqual(len(cache[task["id"]]["records"]), 1)
+            for index in (1, 2):
+                packet = packet_for(plan, task, runtime, 3)
+                packet["records"] = {task["cases"][index]["case_id"]: packet["records"][task["cases"][index]["case_id"]]}
+                packet["state"] = "fragment_complete"
+                work = dict(run_id=100 + index, worker_id=str(index) * 24)
+                original = copy.deepcopy(packet)
+                parallel.publish_worker_packet(api, plan, task, packet, work)
+                self.assertEqual(packet, original)
+                cache = parallel.read_packets(api, plan, cache=cache)
+                self.assertEqual(len(cache[task["id"]]["records"]), index + 1)
+            merged = cache[task["id"]]
+            self.assertEqual(merged["state"], "complete")
+            self.assertEqual(merged["records"][task["cases"][0]["case_id"]], old["records"][task["cases"][0]["case_id"]])
+            self.assertNotIn("publication_owner", merged)
+            self.assertEqual(saved[legacy_path], old)
+            self.assertEqual(len(saved), 3)
+
+    def test_conflicting_worker_rows_environments_sources_and_owners_are_rejected(self):
+        plan, task, runtime = pending_plan()
+        old = packet_for(plan, task, runtime)
+        for change in ("elapsed_seconds", "environment", "source_ref"):
+            with self.subTest(change=change):
+                other = copy.deepcopy(old)
+                if change == "elapsed_seconds":
+                    next(iter(other["records"].values()))["elapsed_seconds"] = 99
+                elif change == "environment":
+                    other["environments"]["inv"]["processor"] = "different allocation"
+                else:
+                    other["source_ref"] = "f" * 40
+                with self.assertRaises(ValueError):
+                    parallel.combine_packets(plan, task, [old, other])
+        path = parallel.worker_packet_filename("100", 101, "d" * 24, task["id"])
+        saved = {path: dict(old, publication_owner=dict(run_id=102, worker_id="d" * 24))}
+        api, tree = git_reader(saved)
+        with patch.object(parallel, "_progress_tree", side_effect=tree), \
+             self.assertRaisesRegex(ValueError, "publication owner"):
+            parallel.read_packets(api, plan)
+
+    def test_interrupted_tail_artifact_recovers_owned_subset_and_keeps_active_real_result(self):
+        plan, runtime = long_plan()
+        task = plan["tasks"][0]
+        current = actual_packet(plan, task, runtime, range(10))
+        active = actual_packet(plan, task, runtime, [10], timeout=False)
+        current["records"].update(active["records"])
+        basis = parallel.timeout_streak(task, current["records"])
+        worker = "d" * 24
+        tail_ids = [case["case_id"] for case in task["cases"][11:]]
+        recovered = copy.deepcopy(current)
+        first = actual_packet(plan, task, runtime, [11])["records"][tail_ids[0]]
+        first = {key: value for key, value in first.items()
+                 if key not in ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db")}
+        first.update(prediction_attempted=False,
+                     timeout_basis={key: basis[key] for key in ("rule", "trigger_case_ids")})
+        recovered["records"][tail_ids[0]] = first
+        recovered["state"] = "interrupted"
+        queue_path = parallel.queue_filename("100", 100)
+        task_path = parallel.filename("100", "task", task["id"])
+        queue = dict(schema_version=2, claims={"tail": worker}, units={
+            "tail": dict(kind="timeout_tail", task_id=task["id"], case_ids=tail_ids)})
+        saved, get, put = documents({queue_path: queue, task_path: current})
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as stream:
+            stream.writestr("spectrum/" + task["id"] + "/checkpoint.json", json.dumps(recovered))
+        api = Mock()
+        api.archive.return_value = archive.getvalue()
+        artifact = dict(id=1, name=f"spectrum-{worker}-1",
+                        digest="sha256:" + hashlib.sha256(archive.getvalue()).hexdigest())
+        wave = dict(run_id=100, tasks=[task["id"]], queue=queue_path, workers=[worker])
+        with patch.object(parallel, "get_document", side_effect=get), \
+             patch.object(parallel, "put_document", side_effect=put), \
+             patch.object(parallel, "read_task_packet", side_effect=lambda api, plan, task: copy.deepcopy(saved[task_path])), \
+             patch.object(parallel, "all_artifacts", return_value=[artifact]):
+            parallel.recover_artifacts(api, plan, wave)
+            first_recovery = copy.deepcopy(saved[task_path])
+            parallel.recover_artifacts(api, plan, wave)
+        self.assertEqual(saved[task_path], first_recovery)
+        self.assertEqual(saved[task_path]["records"][tail_ids[0]], first)
+        self.assertEqual(saved[task_path]["records"][task["cases"][10]["case_id"]],
+                         active["records"][task["cases"][10]["case_id"]])
+        self.assertEqual(len(saved[task_path]["records"]), len(current["records"]) + 1)
+
+    def test_recovery_rejects_conflict_with_existing_worker_shard_before_legacy_write(self):
+        plan, task, runtime = pending_plan()
+        current = packet_for(plan, task, runtime, 2)
+        legacy = packet_for(plan, task, runtime, 1)
+        owned = task["cases"][1]["case_id"]
+        worker = "d" * 24
+        saved = copy.deepcopy(current)
+        saved["records"][owned]["elapsed_seconds"] = 99
+        saved["state"] = "interrupted"
+        queue = dict(schema_version=2, claims={owned: worker}, units={
+            owned: dict(kind="frequency", task_id=task["id"], case_id=owned)})
+        queue_path = parallel.queue_filename("100", 100)
+        task_path = parallel.filename("100", "task", task["id"])
+        stored, get, put = documents({queue_path: queue, task_path: legacy})
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as stream:
+            stream.writestr("spectrum/" + task["id"] + "/checkpoint.json", json.dumps(saved))
+        api = Mock()
+        api.archive.return_value = archive.getvalue()
+        artifact = dict(id=1, name=f"spectrum-{worker}-1")
+        wave = dict(run_id=100, tasks=[task["id"]], queue=queue_path, workers=[worker])
+        with patch.object(parallel, "get_document", side_effect=get), \
+             patch.object(parallel, "put_document", side_effect=put) as write, \
+             patch.object(parallel, "read_task_packet", return_value=current), \
+             patch.object(parallel, "all_artifacts", return_value=[artifact]):
+            with self.assertRaises(ValueError):
+                parallel.recover_artifacts(api, plan, wave)
+            write.assert_not_called()
+        self.assertEqual(stored[task_path], legacy)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+

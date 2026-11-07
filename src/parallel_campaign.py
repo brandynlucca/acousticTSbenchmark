@@ -36,11 +36,13 @@ MAX_BYTES = 512 * 1024 * 1024
 DOCUMENT_PART_BYTES = 4 * 1024 * 1024
 SLOW_FREQUENCY_SECONDS = 60.0
 FREQUENCY_TIMEOUT_SECONDS = 120
+TIMEOUT_STREAK_LENGTH = 10
+TIMEOUT_STREAK_RULE = 'ten_consecutive_prediction_timeouts'
 TASK_FIELDS = ('software', 'semimajor_m', 'aspect_ratio', 'boundary', 'incidence_deg', 'repetition')
 REFERENCE_FIELDS = ('reference_id', 'reference_source_sha', 'reference_ts_db',
                     'reference_qualification', 'reference_fingerprint', 'reference_uncertainty_db')
 CONTROLLER_FILES = {'src/parallel_campaign.py', 'src/publish_progress.py', 'src/dataset.py', 'src/report.py',
-                    'tests/test_parallel_campaign.py', 'tests/test_publish_progress.py'}
+                    'tests/test_parallel_campaign.py', 'tests/test_publish_progress.py', 'tests/test_dataset.py'}
 
 
 class LiveGitHub(GitHub):
@@ -79,8 +81,12 @@ class GitDataStore:
         self.head = None
 
     def git(self, *arguments, data=None, env=None, check=True):
-        result = subprocess.run(['git', *arguments], cwd=self.root, input=data,
-            capture_output=True, env=env, timeout=180)
+        try:
+            result = subprocess.run(['git', *arguments], cwd=self.root, input=data,
+                capture_output=True, env=env, timeout=180)
+        except subprocess.TimeoutExpired:
+            self.fetched = float('-inf')
+            raise APIError(503, f'Git data transport exceeded its deadline during {arguments[0]}') from None
         if check and result.returncode:
             raise APIError(503, 'Git data transport failed')
         return result
@@ -162,7 +168,8 @@ class GitDataStore:
                         raise ValueError('Invalid data checkpoint path')
                     lines.append(f"100644 blob {entry['sha']}\t{name}\n")
                 self.git('update-index','--index-info',data=''.join(lines).encode(),env=env)
-                return dict(sha=self.git('write-tree',env=env).stdout.decode().strip())
+                # Parent blobs already exist remotely. Avoid hydrating the entire partial checkout.
+                return dict(sha=self.git('write-tree','--missing-ok',env=env).stdout.decode().strip())
         if method == 'POST' and path == '/git/commits':
             arguments=['-c','user.name=acousticTSbenchmark','-c','user.email=benchmark@users.noreply.github.com',
                 'commit-tree',body['tree']]
@@ -281,6 +288,12 @@ class DocumentConflict(ValueError):
     """A competing writer changed the expected checkpoint revision."""
 
 
+def invalidate_data_cache(api):
+    store = getattr(api, 'data_store', None)
+    if isinstance(store, GitDataStore):
+        store.fetched = float('-inf')
+
+
 def put_document(api, path, value, previous_sha=None, *, immutable=False):
     previous, actual_sha = get_document(api, path)
     if immutable and previous is not None:
@@ -290,6 +303,7 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
     if previous_sha is not None and actual_sha != previous_sha:
         if previous == value:
             return actual_sha
+        invalidate_data_cache(api)
         raise DocumentConflict('Another writer changed this task or campaign state')
     previous_sha = actual_sha
     raw = (json.dumps(pack(value), separators=(',', ':')) + '\n').encode()
@@ -313,6 +327,7 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
         if current_sha == proposed_sha:
             return proposed_sha
         if current_sha != previous_sha:
+            invalidate_data_cache(api)
             raise DocumentConflict('Another writer changed this task or campaign state')
         body = dict(tree=entries)
         if tree_sha:
@@ -399,18 +414,53 @@ def slow_frequency(row):
 def execution_policy():
     """Report the active frequency budget and scheduling threshold."""
     return dict(case_timeout_seconds=FREQUENCY_TIMEOUT_SECONDS,
-                slow_frequency_seconds=SLOW_FREQUENCY_SECONDS)
+                slow_frequency_seconds=SLOW_FREQUENCY_SECONDS,
+                consecutive_timeouts=TIMEOUT_STREAK_LENGTH)
+
+
+def timeout_streak(task, records):
+    """Find ten adjacent measured timeouts in frequency order within one repetition."""
+    streak = []
+    for case in sorted(task['cases'], key=lambda case: case['frequency_hz']):
+        row = records.get(case['case_id'], {})
+        if row.get('status') == 'timeout' and row.get('prediction_attempted') is not False:
+            streak.append(case['case_id'])
+            if len(streak) == TIMEOUT_STREAK_LENGTH:
+                return dict(after_frequency_hz=case['frequency_hz'], rule=TIMEOUT_STREAK_RULE,
+                            trigger_case_ids=streak)
+        else:
+            streak = []
+    return None
+
+
+def timeout_basis_frequency(task, records, basis):
+    """Validate the recorded trigger independently of later completed frequencies."""
+    identities = [case['case_id'] for case in sorted(task['cases'], key=lambda case: case['frequency_hz'])]
+    trigger = basis.get('trigger_case_ids', []) if isinstance(basis, dict) else []
+    if (not isinstance(basis, dict) or set(basis) != {'rule', 'trigger_case_ids'} or
+            basis.get('rule') != TIMEOUT_STREAK_RULE or not isinstance(trigger, list) or
+            len(trigger) != TIMEOUT_STREAK_LENGTH or trigger[0] not in identities):
+        raise ValueError('Invalid timeout-tail trigger')
+    start = identities.index(trigger[0])
+    if identities[start:start + TIMEOUT_STREAK_LENGTH] != trigger or any(
+            records.get(identity, {}).get('status') != 'timeout' or
+            records[identity].get('prediction_attempted') is False for identity in trigger):
+        raise ValueError('Timeout-tail trigger requires ten adjacent measured timeouts')
+    return next(case['frequency_hz'] for case in task['cases'] if case['case_id'] == trigger[-1])
 
 
 def scheduling_queue(plan, candidates, packets, run_id, parallel):
     """Prioritize whole sweeps and distribute previously expensive tails."""
     queue = dict(schema_version=2, campaign_id=plan['campaign_id'], run_id=run_id,
                  slow_frequency_seconds=SLOW_FREQUENCY_SECONDS,
-                 pending=[], deferred=[], units={}, owners={}, claims={}, finished={})
+                 pending=[], deferred=[], units={}, owners={}, claims={}, finished={}, timeout_streaks={})
     resumed_sweeps = []
     for task in candidates:
         packet = packets.get(task['id'], {})
         records = packet.get('records', {})
+        cutoff = timeout_streak(task, records)
+        if cutoff:
+            queue['timeout_streaks'][task['id']] = cutoff
         remaining = [case['case_id'] for case in task['cases'] if case['case_id'] not in records]
         if not remaining:
             continue
@@ -450,6 +500,19 @@ def change_work_queue(api, plan, run_id, worker_id, completed_unit=None, packet=
                 # Active sweeps can still release tails into the secondary queue.
                 return dict(kind='wait') if any(queue['owners'].values()) else None
             selected = waiting.pop(0)
+            unit = queue['units'][selected]
+            cutoff = queue.get('timeout_streaks', {}).get(unit['task_id'])
+            if unit['kind'] == 'frequency' and cutoff:
+                cases = {case['case_id']: case for case in tasks[unit['task_id']]['cases']}
+                if cases[unit['case_id']]['frequency_hz'] > cutoff['after_frequency_hz']:
+                    tail = [selected] + [identity for identity in queue['deferred']
+                        if queue['units'][identity]['task_id'] == unit['task_id']
+                        and cases[identity]['frequency_hz'] > cutoff['after_frequency_hz']]
+                    excluded = set(tail)
+                    queue['deferred'] = [identity for identity in queue['deferred'] if identity not in excluded]
+                    selected = core.fingerprint([plan['campaign_id'], run_id, 'timeout_tail', tail])
+                    queue['units'][selected] = dict(kind='timeout_tail', task_id=unit['task_id'],
+                        case_ids=tail, timeout_basis={key: cutoff[key] for key in ('rule', 'trigger_case_ids')})
             if selected in queue['claims']:
                 raise ValueError('Frequency queue contains an already claimed assignment')
             queue['claims'][selected] = worker_id
@@ -466,9 +529,13 @@ def change_work_queue(api, plan, run_id, worker_id, completed_unit=None, packet=
             task = tasks[unit['task_id']]
             validate_packet(plan, task, packet)
             outcome = packet['state']
-            if unit['kind'] == 'frequency' and outcome not in ('budget_paused', 'setup_failed'):
-                if unit['case_id'] not in packet['records']:
+            if unit['kind'] in ('frequency', 'timeout_tail') and outcome not in ('budget_paused', 'setup_failed'):
+                required = [unit['case_id']] if unit['kind'] == 'frequency' else unit['case_ids']
+                if any(identity not in packet['records'] for identity in required):
                     raise ValueError('Frequency assignment has no saved observation')
+            cutoff = timeout_streak(task, packet['records'])
+            if cutoff:
+                queue.setdefault('timeout_streaks', {})[task['id']] = cutoff
             if unit['kind'] == 'sweep' and packet.get('slow_sweep'):
                 for case in task['cases']:
                     case_id = case['case_id']
@@ -524,6 +591,44 @@ def merge_task_packet(api, plan, task, packet):
             if attempt == 31:
                 raise PublicationConflict('Concurrent frequency results could not be merged')
             time.sleep(random.uniform(.1, min(2., .2 * (attempt + 1))))
+
+
+def worker_packet_filename(campaign_id, run_id, worker_id, task_id):
+    if not all(re.fullmatch(r'[a-f0-9]{24}', value) for value in (worker_id, task_id)):
+        raise ValueError('Invalid worker packet identity')
+    return f'spectra-{identifier(campaign_id)}-worker-{identifier(run_id)}-{worker_id}-{task_id}.json'
+
+
+def combine_packets(plan, task, packets):
+    """Combine immutable observations while rejecting conflicting duplicates."""
+    merged = None
+    for packet in packets:
+        validate_packet(plan, task, packet)
+        if merged is None:
+            merged = copy.deepcopy(packet)
+            for key in ('_blob_sha', 'publication_owner'):
+                merged.pop(key, None)
+            continue
+        for field in ('records', 'environments'):
+            for identity, value in packet[field].items():
+                if identity in merged[field] and merged[field][identity] != value:
+                    raise ValueError(f'Concurrent worker {field} conflict')
+                merged[field][identity] = value
+        if packet.get('slow_sweep'):
+            merged['slow_sweep'] = True
+    if merged is not None:
+        merged['state'] = 'complete' if len(merged['records']) == len(task['cases']) else 'running'
+    return merged
+
+
+def publish_worker_packet(api, plan, task, packet, work):
+    """Publish to a single-owner file without competing for the sweep record."""
+    path = worker_packet_filename(plan['campaign_id'], work['run_id'], work['worker_id'], task['id'])
+    current, sha = get_document(api, path)
+    merged = combine_packets(plan, task, [value for value in (current, packet) if value is not None])
+    merged['state'] = packet['state'] if merged['state'] != 'complete' else 'complete'
+    merged['publication_owner'] = dict(run_id=work['run_id'], worker_id=work['worker_id'])
+    return put_document(api, path, merged, sha)
 
 
 def csv_values(value, cast=str):
@@ -588,18 +693,28 @@ def read_packets(api, plan, *, cache=None):
     _, _, tree = _progress_tree(api)
     def read(task):
         name = filename(plan['campaign_id'], 'task', task['id'])
-        entry = tree.get(name)
-        if entry is None:
+        pattern = re.compile(r'spectra-' + re.escape(plan['campaign_id']) +
+            r'-worker-([1-9][0-9]*)-([a-f0-9]{24})-' + re.escape(task['id']) + r'\.json')
+        entries = sorted((path, entry) for path, entry in tree.items()
+                         if path == name or pattern.fullmatch(path))
+        if not entries:
             return task['id'], None
-        if cache.get(task['id'], {}).get('_blob_sha') == entry['sha']:
+        digest = core.fingerprint([(path, entry['sha']) for path, entry in entries])
+        if cache.get(task['id'], {}).get('_blob_sha') == digest:
             return task['id'], cache[task['id']]
-        blob = api.request('GET', '/git/blobs/' + entry['sha'])
-        raw = base64.b64decode(''.join(blob['content'].split()), validate=True)
-        if hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() != entry['sha']:
-            raise ValueError('Worker packet does not match its Git digest')
-        packet = _unpack_document(api, raw)
-        validate_packet(plan, task, packet)
-        packet['_blob_sha'] = entry['sha']
+        packets = []
+        for path, entry in entries:
+            blob = api.request('GET', '/git/blobs/' + entry['sha'])
+            raw = base64.b64decode(''.join(blob['content'].split()), validate=True)
+            if hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() != entry['sha']:
+                raise ValueError('Worker packet does not match its Git digest')
+            packet = _unpack_document(api, raw)
+            match = pattern.fullmatch(path)
+            if match and packet.get('publication_owner') != dict(run_id=int(match[1]), worker_id=match[2]):
+                raise ValueError('Worker packet publication owner differs from its path')
+            packets.append(packet)
+        packet = combine_packets(plan, task, packets)
+        packet['_blob_sha'] = digest
         return task['id'], packet
     # Downloads do not execute numerical solves.
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -607,6 +722,10 @@ def read_packets(api, plan, *, cache=None):
             if packet is not None:
                 cache[task_id] = packet
     return cache
+
+
+def read_task_packet(api, plan, task):
+    return read_packets(api, dict(plan, tasks=[task])).get(task['id'])
 
 
 def validate_packet(plan, task, packet):
@@ -619,6 +738,9 @@ def validate_packet(plan, task, packet):
         raise ValueError('Worker packet contains unexpected physical cases')
     for identity, row in records.items():
         case = cases[identity]
+        if ('prediction_attempted' in row and not isinstance(row['prediction_attempted'], bool) or
+                row.get('timeout_basis') is not None and row.get('prediction_attempted') is not False):
+            raise ValueError('Invalid prediction attempt provenance')
         if (any(row.get(key) != value for key, value in case.items()) or
                 row.get('source_sha') != plan['sources']['sources'][case['software']]['sha'] or
                 row.get('status') not in core.STATUSES or
@@ -634,6 +756,13 @@ def validate_packet(plan, task, packet):
         if row['status'] == 'ok' and (not math.isfinite(row.get('elapsed_seconds', float('nan')))
                                      or row['elapsed_seconds'] <= 0 or not math.isfinite(row['ts_db'])):
             raise ValueError('Successful timing must have a finite positive solve duration')
+        if row.get('prediction_attempted') is False:
+            cutoff = timeout_basis_frequency(task, records, row.get('timeout_basis'))
+            if (row['status'] != 'timeout' or case['frequency_hz'] <= cutoff or
+                    any(value is not None for key, value in row.items() if key in (
+                        'elapsed_seconds', 'wall_seconds', 'solve_lower_bound_seconds', 'ts_db', 'delta_ts_db',
+                        'amplitude_real_m', 'amplitude_imag_m') or key.startswith('memory_'))):
+                raise ValueError('Inferred timeout requires ten measured timeouts and no invented measurements')
     if packet.get('state') == 'complete' and records.keys() != cases.keys():
         raise ValueError('Incomplete spectrum was marked complete')
 
@@ -679,6 +808,7 @@ def recover_artifacts(api, plan, wave):
             path = filename(plan['campaign_id'], 'task', task_id)
             current, sha = get_document(api, path)
             if frequency_queue:
+                current = read_task_packet(api, plan, task)
                 # Shared snapshots may include records published by other owners.
                 owned = set()
                 for unit_id, owner in queue['claims'].items():
@@ -686,13 +816,15 @@ def recover_artifacts(api, plan, wave):
                     if owner != match[1] or unit['task_id'] != task_id:
                         continue
                     owned.update([unit['case_id']] if unit['kind'] == 'frequency' else
+                                 unit['case_ids'] if unit['kind'] == 'timeout_tail' else
                                  [case['case_id'] for case in task['cases']])
                 if not owned:
                     raise ValueError('Recovery artifact has no claimed frequency or sweep')
                 for identity, row in saved.get('records', {}).items():
                     if identity not in owned and (current or {}).get('records', {}).get(identity) != row:
                         raise ValueError('Recovery observation belongs to another frequency owner')
-                merge_task_packet(api, plan, task, saved)
+                recovered = combine_packets(plan, task, [value for value in (current, saved) if value is not None])
+                merge_task_packet(api, plan, task, recovered)
             else:
                 restore_packet(api, plan, task, saved, current, sha)
 
@@ -1101,7 +1233,11 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
     if runtime.get('availability', {}).get(program, {}).get('status') != 'ready':
         raise ValueError('Prepared solver is unavailable')
     path = filename(campaign_id, 'task', task_id)
-    packet, packet_sha = get_document(api, path)
+    packet_sha = None
+    if work is None:
+        packet, packet_sha = get_document(api, path)
+    else:
+        packet = read_task_packet(api, plan, task)
     if packet is None:
         packet = dict(campaign_id=campaign_id, task_id=task_id, source_ref=plan['source_ref'],
                       records={}, environments={}, state='running')
@@ -1110,38 +1246,52 @@ def run_task(api, campaign_id, task_id, runtime_path, directory, deadline, *, co
     packet['environments'][invocation] = task_environment(runtime)
     packet['environments'][invocation]['execution_policy'] = execution_policy()
     directory.mkdir(parents=True, exist_ok=True)
-    next_publication = 0.0
-    def checkpoint(force=False):
+    next_publication = time.monotonic() + 120
+    def checkpoint(force=False, local_only=False):
         nonlocal packet_sha, next_publication
         packet['updated_at'] = core.utc_now()
         core.atomic_json(directory / 'checkpoint.json', packet)
         if force or time.monotonic() >= next_publication:
             export_task(plan, task, packet, runtime, directory)
+            if local_only:
+                return
             try:
                 if work is None:
                     packet_sha = put_document(api, path, packet, packet_sha)
                 else:
-                    merge_task_packet(api, plan, task, packet)
-            except (APIError, OSError, TimeoutError) as error:
+                    publish_worker_packet(api, plan, task, packet, work)
+            except (PublicationConflict, DocumentConflict, APIError, OSError, TimeoutError) as error:
                 print(f"CHECKPOINT_DEFERRED {task['name']} error={type(error).__name__} "
                       f"status={getattr(error, 'status', None)} local_records={len(packet['records'])}", flush=True)
             next_publication = time.monotonic() + 120 + random.uniform(0,60)
             print(f"CHECKPOINT {task['name']} recorded={len(packet['records'])}/{len(task['cases'])}", flush=True)
     packet['state'] = 'running'
     timeout = FREQUENCY_TIMEOUT_SECONDS
-    checkpoint(True)
+    checkpoint(True, local_only=work is not None)
+    tail = work is not None and work['kind'] == 'timeout_tail'
+    if tail:
+        cutoff = timeout_basis_frequency(task, packet['records'], work['timeout_basis'])
+        selected = set(work['case_ids'])
+        if not selected or any(case['frequency_hz'] <= cutoff for case in task['cases']
+                               if case['case_id'] in selected):
+            raise ValueError('Timeout-tail assignment includes a frequency before the trigger')
     try:
         for case in task['cases']:
             if work is not None and work['kind'] == 'frequency' and case['case_id'] != work['case_id']:
                 continue
+            if tail and case['case_id'] not in selected:
+                continue
             if case['case_id'] in packet['records']:
                 continue
-            if time.time() + timeout + 60 >= deadline:
+            if time.time() + (0 if tail else timeout) + 60 >= deadline:
                 packet['state'] = 'budget_paused'
                 break
             print(f"START {task['name']} f={case['frequency_hz']/1000:g} kHz "
                   f"recorded={len(packet['records'])}/{len(task['cases'])}", flush=True)
-            result = core.measure(case, runtime, directory / 'work' / case['case_id'], timeout)
+            result = (dict(status='timeout', prediction_attempted=False, timeout_basis=work['timeout_basis'])
+                      if tail else core.measure(case, runtime, directory / 'work' / case['case_id'], timeout))
+            if not tail:
+                result['prediction_attempted'] = True
             # A setup failure is not a numerical observation and should stop this worker.
             if result['status'] in ('setup_error', 'setup_timeout', 'setup_unavailable'):
                 packet['state'] = 'setup_failed'
@@ -1266,7 +1416,12 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
     minimum_timeout = FREQUENCY_TIMEOUT_SECONDS
     idle_cache = {}
     while time.time() + minimum_timeout + 60 < deadline:
-        work = change_work_queue(api, plan, wave['run_id'], worker_id)
+        try:
+            work = change_work_queue(api, plan, wave['run_id'], worker_id)
+        except (PublicationConflict, APIError, OSError, TimeoutError) as error:
+            print(f'QUEUE_DEFERRED worker={worker_id} error={type(error).__name__}', flush=True)
+            time.sleep(15)
+            continue
         if work is None:
             print(f'QUEUE_EMPTY worker={worker_id}', flush=True)
             return
@@ -1277,12 +1432,13 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
             time.sleep(15)
             continue
         task = tasks[work['task_id']]
+        work.update(run_id=wave['run_id'], worker_id=worker_id)
         print(f'WORK_CLAIMED worker={worker_id} kind={work["kind"]} task={task["name"]} '
               f'case={work.get("case_id", "sweep")}', flush=True)
         packet = run_task(api, plan['campaign_id'], task['id'], runtime_path, directory / task['id'],
                           deadline, context=(plan, state), work=work)
         # Release work only after every local observation has durable storage.
-        saved, _ = get_document(api, filename(plan['campaign_id'], 'task', task['id']))
+        saved = read_task_packet(api, plan, task)
         if saved is None or any(saved.get('records', {}).get(identity) != row
                                 for identity, row in packet['records'].items()):
             print(f'PUBLICATION_PENDING worker={worker_id} task={task["name"]}', flush=True)
@@ -1292,7 +1448,11 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
         completion = dict(saved, state=packet['state'])
         if len(saved['records']) == len(task['cases']):
             completion['state'] = 'complete'
-        change_work_queue(api, plan, wave['run_id'], worker_id, work['id'], completion)
+        try:
+            change_work_queue(api, plan, wave['run_id'], worker_id, work['id'], completion)
+        except (PublicationConflict, APIError, OSError, TimeoutError) as error:
+            print(f'COMPLETION_DEFERRED worker={worker_id} error={type(error).__name__}', flush=True)
+            return
         print(f'WORK_FINISHED worker={worker_id} kind={work["kind"]} task={task["name"]} '
               f'state={completion["state"]}', flush=True)
         if packet['state'] in ('budget_paused', 'setup_failed', 'interrupted'):
@@ -1489,3 +1649,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

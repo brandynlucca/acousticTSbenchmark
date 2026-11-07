@@ -367,6 +367,25 @@ def compact_payload(repository, platform, run_id, run_attempt, rows, status=None
             if not isinstance(value, (str, int, float, bool, type(None))):
                 raise ValueError(f"Unexpected structured value in public field {key}")
             item[key] = None if isinstance(value, float) and not math.isfinite(value) else value
+        attempted, basis = row.get("prediction_attempted"), row.get("timeout_basis")
+        if attempted is not None and not isinstance(attempted, bool):
+            raise ValueError("prediction_attempted must be a boolean")
+        if attempted is not None:
+            item["prediction_attempted"] = attempted
+        if attempted is False or basis is not None:
+            trigger_ids = basis.get("trigger_case_ids") if isinstance(basis, dict) else None
+            if (row.get("status") != "timeout" or attempted is not False
+                    or not isinstance(basis, dict) or set(basis) != {"rule", "trigger_case_ids"}
+                    or basis.get("rule") != "ten_consecutive_prediction_timeouts"
+                    or not isinstance(trigger_ids, list) or len(trigger_ids) != 10
+                    or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                           for value in trigger_ids) or len(set(trigger_ids)) != 10):
+                raise ValueError("Invalid inferred timeout provenance")
+            if any(row.get(key) is not None for key in (
+                    "elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
+                    "delta_ts_db", "amplitude_real_m", "amplitude_imag_m")):
+                raise ValueError("Inferred timeout cannot contain prediction measurements")
+            item["timeout_basis"] = dict(rule=basis["rule"], trigger_case_ids=list(trigger_ids))
         compact.append(item)
     original = status or {}
     if not isinstance(original, dict):
@@ -763,5 +782,6 @@ if __name__ == "__main__":
     except (ValueError, RuntimeError, OSError, zipfile.BadZipFile) as error:
         print(f"Progress publication failed: {safe_error_summary(error)}", file=sys.stderr)
         raise SystemExit(1)
+
 
 
