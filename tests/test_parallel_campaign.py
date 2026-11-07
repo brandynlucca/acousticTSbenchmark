@@ -1636,17 +1636,21 @@ if __name__ == "__main__":
 
 
 
+
+
 # Sparse publication throughput regressions.
 """Sparse publication, immutable cache, and exact consolidation regressions."""
 import base64
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 
 import test_parallel_campaign as fixtures
@@ -1990,6 +1994,100 @@ class AtomicCompletionAndPublicationTests(unittest.TestCase):
         saved = store.documents[store.writes[0]]
         self.assertEqual(set(saved["records"]), {work["case_id"]})
         self.assertEqual(saved["records"][work["case_id"]]["status"], "timeout")
+
+
+class ArtifactRecoveryCacheTests(unittest.TestCase):
+    def fixture(self, worker_count=2, recorded=range(16)):
+        plan, runtime = fixtures.long_plan()
+        task = plan["tasks"][0]
+        initial = fixtures.actual_packet(plan, task, runtime, [], timeout=False)
+        initial["slow_sweep"] = True
+        queue, workers = parallel.scheduling_queue(plan, [task], {task["id"]: initial}, 100, worker_count)
+        queue_path = parallel.queue_filename("100", 100)
+        task_path = parallel.filename("100", "task", task["id"])
+        current = fixtures.actual_packet(plan, task, runtime, recorded, timeout=False)
+        store = ThroughputStore({queue_path: queue, task_path: current})
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put):
+            units = [parallel.change_work_queue(store.api, plan, 100, worker) for worker in workers]
+        store.writes.clear()
+        wave = dict(run_id=100, tasks=[task["id"]], queue=queue_path, workers=workers)
+        return plan, task, runtime, current, store, wave, units
+
+    def archives(self, task, items):
+        artifacts, archives = [], {}
+        attempts = {}
+        for index, (worker, packet) in enumerate(items):
+            attempts[worker] = attempts.get(worker, 0) + 1
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                archive.writestr("spectrum/" + task["id"] + "/checkpoint.json", json.dumps(packet))
+            archives[index] = stream.getvalue()
+            artifacts.append(dict(id=index, name=f"spectrum-{worker}-{attempts[worker]}",
+                                  digest="sha256:" + hashlib.sha256(archives[index]).hexdigest()))
+        return artifacts, archives
+
+    def test_known_copied_artifacts_reuse_task_read_and_perform_zero_writes(self):
+        plan, task, runtime, current, store, wave, units = self.fixture(worker_count=16)
+        artifacts, archives = self.archives(task, [(worker, current) for worker in wave["workers"]])
+        store.api.archive = Mock(side_effect=lambda identity: archives[identity])
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put), \
+             patch.object(parallel, "read_task_packet", return_value=copy.deepcopy(current)) as read, \
+             patch.object(parallel, "merge_task_packet", wraps=parallel.merge_task_packet) as merge, \
+             patch.object(parallel, "all_artifacts", return_value=artifacts):
+            parallel.recover_artifacts(store.api, plan, wave)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(store.api.archive.call_count, 16)
+        merge.assert_not_called()
+        self.assertEqual(store.writes, [])
+        self.assertEqual(store.documents[parallel.filename("100", "task", task["id"])], current)
+
+    def test_idempotent_skip_cannot_bypass_conflict_provenance_or_ownership_checks(self):
+        for mutation in ("record", "environment", "source", "unowned", "archive_digest"):
+            with self.subTest(mutation=mutation):
+                plan, task, runtime, current, store, wave, units = self.fixture()
+                saved = copy.deepcopy(current)
+                if mutation == "record":
+                    saved["records"][units[0]["case_id"]]["ts_db"] = -99
+                elif mutation == "environment":
+                    saved["environments"]["inv"]["processor"] = "Conflicting CPU"
+                elif mutation == "source":
+                    saved["source_ref"] = "f" * 40
+                elif mutation == "unowned":
+                    extra = fixtures.actual_packet(plan, task, runtime, [20], timeout=False)
+                    saved["records"].update(extra["records"])
+                artifacts, archives = self.archives(task, [(wave["workers"][0], saved)])
+                if mutation == "archive_digest":
+                    artifacts[0]["digest"] = "sha256:" + "0" * 64
+                store.api.archive = Mock(side_effect=lambda identity: archives[identity])
+                with patch.object(parallel, "get_document", side_effect=store.get), \
+                     patch.object(parallel, "put_document", side_effect=store.put), \
+                     patch.object(parallel, "read_task_packet", return_value=copy.deepcopy(current)), \
+                     patch.object(parallel, "all_artifacts", return_value=artifacts):
+                    with self.assertRaises(ValueError):
+                        parallel.recover_artifacts(store.api, plan, wave)
+                self.assertEqual(store.writes, [])
+
+    def test_recovery_cache_updates_after_new_observation_and_skips_duplicate_attempt(self):
+        plan, task, runtime, current, store, wave, units = self.fixture(recorded=[24])
+        first = fixtures.actual_packet(plan, task, runtime, [0], timeout=False)
+        second = fixtures.actual_packet(plan, task, runtime, [1], timeout=False)
+        artifacts, archives = self.archives(task, [(wave["workers"][0], first),
+            (wave["workers"][1], second), (wave["workers"][0], first)])
+        store.api.archive = Mock(side_effect=lambda identity: archives[identity])
+        with patch.object(parallel, "get_document", side_effect=store.get), \
+             patch.object(parallel, "put_document", side_effect=store.put), \
+             patch.object(parallel, "read_task_packet", return_value=copy.deepcopy(current)) as read, \
+             patch.object(parallel, "all_artifacts", return_value=artifacts):
+            parallel.recover_artifacts(store.api, plan, wave)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(len(store.writes), 2)
+        saved = store.documents[parallel.filename("100", "task", task["id"])]
+        self.assertEqual(set(saved["records"]), {task["cases"][index]["case_id"] for index in (0, 1, 24)})
+        for packet in (current, first, second):
+            for identity, row in packet["records"].items():
+                self.assertEqual(saved["records"][identity], row)
 
 
 if __name__ == "__main__":
