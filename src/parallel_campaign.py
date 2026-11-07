@@ -1073,7 +1073,7 @@ def export_task(plan, task, packet, runtime, directory):
             memory_observer=core.memory_provenance())),
         workload='fresh_process_warmed_distinct_problem_single_prediction')
     core.atomic_json(directory / 'manifest.json', dict(identity, fingerprint=core.fingerprint(identity),
-                                                      execution_policy=execution_policy()))
+                                                      active_execution_policy=execution_policy()))
     core.atomic_json(directory / 'results.json',
         [packet['records'].get(case['case_id'], dict(case, status='pending')) for case in task['cases']])
     for invocation, environment in packet['environments'].items():
@@ -1341,7 +1341,7 @@ def publish_datasets(api, plan, packets, directory, finished=False):
                                   state='completed' if finished and completed == len(tasks) else 'running')
         payload.update(parallel_campaign_id=plan['campaign_id'], parallel_tasks=dict(planned=len(tasks),
             completed=completed, pending=len(tasks)-completed), timing_statistic='arithmetic_mean')
-        payload['execution_policy'] = execution_policy()
+        payload['active_execution_policy'] = execution_policy()
         payload['artifact_url'] = f"https://github.com/{api.repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}#artifacts"
         current, _ = existing_snapshot(api, platform, snapshot_filename(platform, float(size)))
         if current and int(current['run_id']) > int(plan['campaign_id']):
@@ -1351,7 +1351,7 @@ def publish_datasets(api, plan, packets, directory, finished=False):
         core.atomic_json(target / 'results.json', rows)
         core.atomic_json(target / 'parallel-plan.json', dict(campaign_id=plan['campaign_id'],
             platform=platform, source_ref=plan['source_ref'], configuration=dataset['configuration'],
-            execution_policy=execution_policy(), sources=plan['sources']))
+            active_execution_policy=execution_policy(), sources=plan['sources']))
         if dataset.get('archived_rows'):
             core.atomic_json(target / 'archived-results.json', dict(platform=platform,
                 reason='Superseded selected software measurements', rows=dataset['archived_rows']))
