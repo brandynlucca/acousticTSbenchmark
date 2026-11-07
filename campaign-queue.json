@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "active",
+  "status": "paused",
   "requests": [
     {
       "key": "echo-existing",
@@ -352,7 +352,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T05:44:34.344614+00:00",
+  "updated_at": "2026-11-07T15:36:04.524063+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -445,5 +445,6 @@
         }
       ]
     }
-  ]
+  ],
+  "reason": "Recover worker publications and apply ten-consecutive-timeout stopping rule"
 }
