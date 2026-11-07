@@ -60,6 +60,53 @@ def packet_for(plan, task, runtime, count=1):
 
 
 class PlanningTests(unittest.TestCase):
+    def test_interrupted_measurements_are_published_before_worker_allocation(self):
+        for failure in (False, True):
+            with self.subTest(publication_failure=failure):
+                plan, task, runtime = pending_plan()
+                plan.update(max_parallel=16, budget_minutes=330, automatic_continue=True)
+                original = copy.deepcopy(plan)
+                state = dict(campaign_id='100', status='active', attempts={}, completed=[], blocked=[],
+                    waves=[dict(run_id=100, tasks=[task['id']])], publish_recovered_before_resume=True)
+                documents = {parallel.filename('100', 'plan'): plan, parallel.filename('100', 'state'): state}
+                order = []
+                def get(api, path):
+                    return copy.deepcopy(documents.get(path)), 's'
+                def put(api, path, value, *args, **kwargs):
+                    order.append('allocate' if 'queue' in path else 'save')
+                    documents[path] = copy.deepcopy(value)
+                    return 's'
+                def publish(*args, **kwargs):
+                    order.append('publish')
+                    if failure:
+                        raise parallel.PublicationConflict('retry publication')
+                api = Mock(repository='owner/repo')
+                api.request.return_value = dict(object=dict(sha='c'*40))
+                with tempfile.TemporaryDirectory() as temporary, \
+                     patch.dict(os.environ, GITHUB_SHA='c'*40, GITHUB_RUN_ID='101'), \
+                     patch.object(parallel, 'get_document', side_effect=get), \
+                     patch.object(parallel, 'put_document', side_effect=put), \
+                     patch.object(parallel, 'recover_artifacts', side_effect=lambda *args: order.append('recover')), \
+                     patch.object(parallel, 'read_packets', return_value={task['id']: packet_for(plan, task, runtime)}), \
+                     patch.object(parallel, 'publish_datasets', side_effect=publish), \
+                     patch.object(parallel, 'write_outputs'):
+                    if failure:
+                        with self.assertRaises(parallel.PublicationConflict):
+                            parallel.plan_campaign(api, dict(campaign_id='100'), Path(temporary))
+                    else:
+                        parallel.plan_campaign(api, dict(campaign_id='100'), Path(temporary))
+                self.assertEqual(order[:2], ['recover', 'publish'])
+                self.assertEqual(documents[parallel.filename('100', 'plan')], original)
+                saved = documents[parallel.filename('100', 'state')]
+                if failure:
+                    self.assertEqual(order, ['recover', 'publish'])
+                    self.assertTrue(saved['publish_recovered_before_resume'])
+                else:
+                    self.assertNotIn('publish_recovered_before_resume', saved)
+                    self.assertEqual(saved['execution_policy'], parallel.execution_policy())
+                    self.assertEqual(saved['waves'][-1]['execution_policy'], parallel.execution_policy())
+                    self.assertEqual(saved['recovery_publications'][0]['observations'], 1)
+
     def test_completed_wave_continues_only_remaining_selected_spectra(self):
         base,sources,runtime=fixture()
         documents={};packets={};outputs=[]
@@ -565,9 +612,10 @@ class FrequencySchedulingTests(unittest.TestCase):
         plan['datasets']['0.07']['rows'] = [dict(case, status='pending') for case in cases]
         return plan, tasks, runtime
 
-    def test_threshold_is_inclusive_and_does_not_change_timeout(self):
-        self.assertFalse(parallel.slow_frequency(dict(status='ok', elapsed_seconds=119.99)))
-        self.assertTrue(parallel.slow_frequency(dict(status='ok', elapsed_seconds=120.0)))
+    def test_deferral_threshold_is_inclusive_and_distinct_from_timeout(self):
+        self.assertEqual(parallel.execution_policy(), dict(case_timeout_seconds=120, slow_frequency_seconds=60.0))
+        self.assertFalse(parallel.slow_frequency(dict(status='ok', elapsed_seconds=59.99)))
+        self.assertTrue(parallel.slow_frequency(dict(status='ok', elapsed_seconds=60.0)))
         self.assertTrue(parallel.slow_frequency(dict(status='timeout', elapsed_seconds=None)))
         self.assertFalse(parallel.slow_frequency(dict(status='setup_timeout', elapsed_seconds=None)))
 
@@ -620,7 +668,7 @@ class FrequencySchedulingTests(unittest.TestCase):
         calls = []
         def measure(case, prepared, directory, timeout):
             calls.append((case['case_id'], timeout))
-            return dict(status='ok', elapsed_seconds=120.0 if len(calls) == 1 else .25, ts_db=-20.)
+            return dict(status='ok', elapsed_seconds=60.0 if len(calls) == 1 else .25, ts_db=-20.)
         with tempfile.TemporaryDirectory() as temporary, \
              patch.dict(os.environ, GITHUB_RUN_ID='100', GITHUB_SHA='c'*40), \
              patch.object(parallel.host_platform, 'system', return_value='Linux'), \
@@ -632,13 +680,17 @@ class FrequencySchedulingTests(unittest.TestCase):
             core.atomic_json(root / 'runtime.json', runtime)
             parallel.run_frequency_worker(Mock(), plan, {}, wave, workers[0], root / 'runtime.json',
                                           root / 'worker', float('inf'))
-        self.assertEqual(calls, [(case['case_id'], 600) for case in expected])
+        self.assertEqual(calls, [(case['case_id'], 120) for case in expected])
         self.assertEqual(len({identity for identity, timeout in calls}), 6)
         for task in tasks:
             packet = documents[parallel.filename('100', 'task', task['id'])]
             parallel.validate_packet(plan, task, packet)
             self.assertEqual(packet['state'], 'complete')
             self.assertEqual(len(packet['records']), 3)
+            self.assertTrue(all(row['case_timeout_seconds'] == 120 for row in packet['records'].values()))
+            self.assertTrue(all(env['execution_policy'] == parallel.execution_policy()
+                                for env in packet['environments'].values()))
+        self.assertEqual(plan['datasets']['0.07']['configuration']['case_timeout_seconds'], 600)
         self.assertTrue(documents[parallel.filename('100', 'task', tasks[0]['id'])]['slow_sweep'])
 
     def test_idle_worker_waits_for_active_sweep_and_then_takes_new_tail(self):
@@ -718,13 +770,13 @@ class FrequencySchedulingTests(unittest.TestCase):
              patch.object(parallel, 'put_document', side_effect=put), \
              patch.object(parallel, 'task_environment', return_value=environment), \
              patch.object(core, 'measure', return_value=dict(status='timeout', elapsed_seconds=None,
-                          wall_seconds=600, solve_lower_bound_seconds=599)) as measure:
+                          wall_seconds=120, solve_lower_bound_seconds=119)) as measure:
             root = Path(temporary)
             core.atomic_json(root / 'runtime.json', runtime)
             result = parallel.run_task(Mock(), '100', task['id'], root / 'runtime.json', root / 'worker',
                                        float('inf'), context=(plan, {}), work=dict(kind='sweep'))
         self.assertEqual(measure.call_count, 1)
-        self.assertEqual(measure.call_args.args[-1], 600)
+        self.assertEqual(measure.call_args.args[-1], 120)
         self.assertEqual(result['state'], 'split_pending')
         saved = documents[parallel.filename('100', 'task', task['id'])]
         self.assertTrue(saved['slow_sweep'])

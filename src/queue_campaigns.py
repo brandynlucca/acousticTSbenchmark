@@ -329,6 +329,11 @@ def validate_parallel_state(state, repository):
                 any(not isinstance(ref, str) or not re.fullmatch(r"[a-f0-9]{40}", ref)
                     for ref in controllers) or len(set(controllers)) != len(controllers)):
             raise ValueError("Invalid approved parallel controller chain")
+        interrupted = request.get("interrupted_runs", [])
+        if (not isinstance(interrupted, list) or len(interrupted) > 100 or
+                any(type(run_id) is not int or run_id < 1 for run_id in interrupted) or
+                len(set(interrupted)) != len(interrupted)):
+            raise ValueError("Invalid interrupted parallel run list")
         keys.add(request["key"])
         inputs = request["inputs"]
         if (set(inputs) - PARALLEL_INPUTS or any(not isinstance(value, str) for value in inputs.values()) or
@@ -351,6 +356,8 @@ def validate_parallel_state(state, repository):
             raise ValueError("New stages require an explicit continuing parallel selection")
         receipt = state["dispatched"].get(request["key"])
         if receipt is None:
+            if interrupted:
+                raise ValueError("Interrupted parallel runs require an existing stage receipt")
             missing = True
             continue
         if (missing or not isinstance(receipt, dict) or type(receipt.get("run_id")) is not int or
@@ -369,7 +376,8 @@ def validate_parallel_state(state, repository):
         request = state["requests"][index]
         if (any(intent.get(key) != request[key] for key in ("key", "source_ref", "dispatch_ref", "inputs")) or
                 intent.get("approved_controllers", [request["source_ref"]]) !=
-                request.get("approved_controllers", [request["source_ref"]])):
+                request.get("approved_controllers", [request["source_ref"]]) or
+                intent.get("interrupted_runs", []) != request.get("interrupted_runs", [])):
             raise ValueError("Parallel dispatch intent differs from the saved request")
         try:
             created = datetime.fromisoformat(intent["created_at"])
@@ -490,7 +498,8 @@ def parallel_predecessor(api, state, sha):
         return pause(api, state, sha, "Parallel predecessor source changed", "blocked")
     if first.get("status") != "completed":
         return dict(status="waiting", run_id=first["id"], run_status=first.get("status"))
-    if first.get("conclusion") == "cancelled":
+    interrupted = set(request.get("interrupted_runs", []))
+    if first.get("conclusion") == "cancelled" and first["id"] not in interrupted:
         return pause(api, state, sha, "Parallel predecessor was cancelled")
     campaign = receipt["campaign_id"]
     saved = parallel_state_document(api, campaign)
@@ -508,10 +517,34 @@ def parallel_predecessor(api, state, sha):
     latest = checked_parallel_run(api, waves[-1]["run_id"])
     if latest.get("head_sha") != controller:
         return pause(api, state, sha, "Latest parallel wave uses a different controller", "blocked")
-    if latest.get("status") != "completed":
-        return dict(status="waiting", campaign_id=campaign, run_id=latest["id"], run_status=latest.get("status"))
+    continuation_title = parallel_title(dict(campaign_id=campaign))
+    if latest["id"] != first["id"] and latest.get("display_title") != continuation_title:
+        return pause(api, state, sha, "Latest parallel wave belongs to another campaign", "blocked")
     if latest.get("conclusion") == "cancelled":
         return pause(api, state, sha, "Latest parallel wave was cancelled")
+    origin = next(index for index, wave in enumerate(waves) if wave["run_id"] == first["id"])
+    stage_waves = waves[origin:]
+    older_ids = [wave["run_id"] for wave in stage_waves[:-1]]
+    if (len({wave["run_id"] for wave in stage_waves}) != len(stage_waves) or
+            interrupted - set(older_ids)):
+        return pause(api, state, sha, "Interrupted parallel run lacks a newer saved continuation", "blocked")
+    approved = request.get("approved_controllers", [request["source_ref"]])
+    applied = set(approved[:approved.index(controller) + 1])
+    for run_id in older_ids:
+        run = first if run_id == first["id"] else checked_parallel_run(api, run_id)
+        expected = parallel_title(request["inputs"]) if run_id == first["id"] else continuation_title
+        if (run.get("head_sha") not in applied or run.get("display_title") != expected or
+                run_id >= latest["id"]):
+            return pause(api, state, sha, "Earlier parallel wave differs from the saved campaign", "blocked")
+        if run.get("status") != "completed":
+            return dict(status="waiting", campaign_id=campaign, run_id=run_id, run_status=run.get("status"))
+        if run.get("conclusion") == "cancelled":
+            if run_id not in interrupted:
+                return pause(api, state, sha, "Earlier parallel wave was cancelled without an approved interruption")
+        elif run_id in interrupted:
+            return pause(api, state, sha, "Listed interrupted parallel run was not cancelled", "blocked")
+    if latest.get("status") != "completed":
+        return dict(status="waiting", campaign_id=campaign, run_id=latest["id"], run_status=latest.get("status"))
     status = saved.get("status")
     if status in {"paused", "blocked", "publication_blocked"}:
         return pause(api, state, sha, f"Parallel campaign {campaign} requires review: {status}",

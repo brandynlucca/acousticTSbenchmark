@@ -1088,6 +1088,132 @@ class ParallelControllerUpgradeTests(unittest.TestCase):
             self.assertEqual(len(api.dispatches()), 1)
 
 
+class ParallelInterruptedRunTests(unittest.TestCase):
+    advance = ParallelQueueTests.advance
+    ready = ParallelQueueTests.ready
+    approved = ParallelControllerUpgradeTests.approved
+
+    def resumed(self, active=True):
+        api, saved = self.approved(active=active)
+        api.state["requests"][0]["interrupted_runs"] = [101]
+        api.finish(101, "cancelled")
+        saved["status"] = "active" if active else "complete"
+        return api, saved
+
+    def test_authorized_first_cancellation_waits_for_verified_resume_then_advances(self):
+        api, saved = self.resumed()
+        receipt = copy.deepcopy(api.state["dispatched"]["echo-existing"])
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+        api.finish(103)
+        saved["status"] = "complete"
+        api.ref_sha = "b" * 40
+        self.assertEqual(self.advance(api)["campaign_id"], "77")
+        self.assertEqual(api.state["dispatched"]["echo-existing"], receipt)
+
+    def test_cancelled_latest_wave_still_pauses_with_or_without_listing(self):
+        for listed in (False, True):
+            with self.subTest(listed=listed):
+                api, saved = self.resumed()
+                api.finish(103, "cancelled")
+                if listed:
+                    api.state["requests"][0]["interrupted_runs"].append(103)
+                self.assertEqual(self.advance(api)["status"], "paused")
+                self.assertEqual(len(api.dispatches()), 1)
+        api, saved = self.ready()
+        api.state["requests"][0]["interrupted_runs"] = [101]
+        api.finish(101, "cancelled")
+        self.assertEqual(self.advance(api)["status"], "paused")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_cancelled_middle_wave_requires_explicit_listing(self):
+        for listed in (False, True):
+            with self.subTest(listed=listed):
+                api, saved = self.resumed()
+                api.finish(103, "cancelled")
+                api.runs[104] = dict(api.run(104, dict(campaign_id="101")), head_sha="c" * 40,
+                                     status="in_progress", conclusion=None)
+                saved["waves"].append(dict(run_id=104))
+                if listed:
+                    api.state["requests"][0]["interrupted_runs"].append(103)
+                self.assertEqual(self.advance(api)["status"], "waiting" if listed else "paused")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_interruption_does_not_allow_wrong_source_or_wrong_campaign_resume(self):
+        changes = [dict(head_sha="d" * 40), dict(display_title="Continue spectra 999")]
+        for change in changes:
+            with self.subTest(change=change):
+                api, saved = self.resumed()
+                api.runs[103].update(change)
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+        api, saved = self.resumed()
+        api.runs[101]["head_sha"] = "c" * 40
+        self.assertEqual(self.advance(api)["status"], "blocked")
+
+    def test_interruption_does_not_allow_unapproved_or_foreign_middle_wave(self):
+        for source, title in (("d" * 40, "Continue spectra 101"),
+                              ("c" * 40, "Continue spectra 999")):
+            with self.subTest(source=source, title=title):
+                api, saved = self.resumed()
+                api.finish(103, "cancelled")
+                api.runs[103].update(head_sha=source, display_title=title)
+                api.runs[104] = dict(api.run(104, dict(campaign_id="101")), head_sha="c" * 40)
+                saved["waves"].append(dict(run_id=104))
+                api.state["requests"][0]["interrupted_runs"].append(103)
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_unknown_uncancelled_duplicate_or_nonnewer_history_cannot_bypass_pause(self):
+        for mode in ("unknown", "uncancelled", "duplicate", "nonnewer"):
+            with self.subTest(mode=mode):
+                api, saved = self.resumed()
+                if mode == "unknown":
+                    api.state["requests"][0]["interrupted_runs"].append(999)
+                elif mode == "uncancelled":
+                    api.finish(101)
+                elif mode == "duplicate":
+                    saved["waves"].insert(1, dict(run_id=101))
+                else:
+                    api.runs[99] = dict(api.run(99, dict(campaign_id="101")), head_sha="c" * 40,
+                                        status="in_progress", conclusion=None)
+                    saved["waves"][-1] = dict(run_id=99)
+                self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
+    def test_invalid_interrupted_metadata_is_rejected(self):
+        values = [None, "101", ["101"], [True], [0], [-1], [101, 101], list(range(1, 102))]
+        for value in values:
+            with self.subTest(value=value):
+                api, saved = self.ready()
+                api.state["requests"][0]["interrupted_runs"] = value
+                with self.assertRaisesRegex(ValueError, "interrupted parallel run"):
+                    self.advance(api)
+                self.assertEqual(len(api.dispatches()), 1)
+        api = FakeParallelAPI()
+        api.state["requests"][0]["interrupted_runs"] = [101]
+        with self.assertRaisesRegex(ValueError, "existing stage receipt"):
+            self.advance(api)
+        self.assertFalse(api.dispatches())
+
+    def test_interruption_approval_does_not_stop_an_active_original_run(self):
+        api, saved = self.ready()
+        api.state["requests"][0]["interrupted_runs"] = [101]
+        api.runs[101].update(status="in_progress", conclusion=None)
+        self.assertEqual(self.advance(api)["status"], "waiting")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_interruption_cannot_be_added_to_an_uncertain_dispatch_intent(self):
+        api = FakeParallelAPI()
+        api.dispatch_error = TimeoutError("Uncertain dispatch")
+        with self.assertRaises(TimeoutError):
+            self.advance(api)
+        api.state["dispatch_intent"]["interrupted_runs"] = [101]
+        with self.assertRaisesRegex(ValueError, "dispatch intent"):
+            self.advance(api)
+        self.assertEqual(len(api.dispatches()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
