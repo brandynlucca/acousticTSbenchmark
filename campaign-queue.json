@@ -67,7 +67,10 @@
       "dispatch_ref": "spectra-five-replicates-20261106",
       "approved_controllers": [
         "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-        "82d29be2390988de52977a3dc1b0ac3b33cf9ac2"
+        "94f40b109ccf9ab27c3f0128f130f3731148f85b"
+      ],
+      "interrupted_runs": [
+        42336582198
       ]
     },
     {
@@ -88,8 +91,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "prol-remaining-a0-001",
@@ -109,8 +112,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "4"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "prol-remaining-a0-01",
@@ -130,8 +133,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "prol-remaining-a0-07",
@@ -151,8 +154,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "4"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "prol-remaining-a0-1",
@@ -172,8 +175,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "4"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "liquid-existing",
@@ -193,8 +196,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "liquid-new-a0-001",
@@ -214,8 +217,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "liquid-new-a0-07",
@@ -235,8 +238,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "liquid-new-a0-1",
@@ -256,13 +259,13 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
-      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
+      "source_ref": "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+      "dispatch_ref": "spectra-timeout120-defer60-20261107"
     },
     {
       "key": "acousticts-macos",
-      "source_ref": "8d44380602c51185383012153fbd5bfce9f51074",
-      "dispatch_ref": "spectra-platform-controller-20261106",
+      "source_ref": "c7e37c693225bb73f03fc4a03c14edc1132e3720",
+      "dispatch_ref": "spectra-platform-timeout120-defer60-20261107",
       "inputs": {
         "campaign_id": "41692575909",
         "platform": "macos-latest",
@@ -271,8 +274,8 @@
     },
     {
       "key": "acousticts-windows",
-      "source_ref": "8d44380602c51185383012153fbd5bfce9f51074",
-      "dispatch_ref": "spectra-platform-controller-20261106",
+      "source_ref": "c7e37c693225bb73f03fc4a03c14edc1132e3720",
+      "dispatch_ref": "spectra-platform-timeout120-defer60-20261107",
       "inputs": {
         "campaign_id": "41694015656",
         "platform": "windows-latest",
@@ -349,7 +352,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T05:32:59.037010+00:00",
+  "updated_at": "2026-11-07T05:41:10.155418+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
