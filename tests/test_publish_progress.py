@@ -21,6 +21,64 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import publish_progress as progress
 
 
+class InferredTimeoutRuleTests(unittest.TestCase):
+    def row(self, count):
+        rule = {5: "five_consecutive_prediction_timeouts", 10: "ten_consecutive_prediction_timeouts"}[count]
+        return dict(software="echosms", boundary="liquid", semimajor_m=.07, aspect_ratio=5,
+                    incidence_deg=37, frequency_hz=11000, repetition=1, status="timeout",
+                    prediction_attempted=False, timeout_basis=dict(rule=rule,
+                        trigger_case_ids=[format(index + 1, "064x") for index in range(count)]))
+
+    def test_five_and_historical_ten_rules_survive_snapshot_roundtrip(self):
+        rows = [self.row(5), dict(self.row(10), frequency_hz=21000)]
+        original = copy.deepcopy(rows)
+        payload = progress.compact_payload("owner/repo", "ubuntu-latest", 100, 1, rows)
+        with patch.object(progress, "SNAPSHOT_COMPRESSION_THRESHOLD", 1):
+            restored = progress.decode_snapshot(progress.encode_snapshot(payload))
+        self.assertEqual(rows, original)
+        self.assertEqual(restored["status"]["recorded"], 2)
+        for source, exported in zip(rows, restored["rows"]):
+            self.assertIs(exported["prediction_attempted"], False)
+            self.assertEqual(exported["timeout_basis"], source["timeout_basis"])
+            self.assertEqual(exported["status"], "timeout")
+            self.assertIsNone(exported["elapsed_seconds"])
+            self.assertIsNone(exported["ts_db"])
+        payload["rows"][0]["timeout_basis"]["trigger_case_ids"].reverse()
+        self.assertEqual(rows, original)
+
+    def test_each_rule_requires_matching_unique_trigger_count(self):
+        for count in (5, 10):
+            row = self.row(count)
+            basis = row["timeout_basis"]
+            invalid = [dict(basis, trigger_case_ids=basis["trigger_case_ids"][:-1]),
+                       dict(basis, trigger_case_ids=basis["trigger_case_ids"] + ["f" * 64]),
+                       dict(basis, trigger_case_ids=["a" * 64] * count),
+                       dict(basis, trigger_case_ids=["invalid"] * count),
+                       dict(basis, rule="unsupported_rule"), dict(basis, extra=True)]
+            for changed in invalid:
+                with self.subTest(count=count, proof=changed):
+                    with self.assertRaises(ValueError):
+                        progress.compact_payload("owner/repo", "ubuntu-latest", 100, 1,
+                                                 [dict(row, timeout_basis=changed)])
+
+    def test_inferred_rules_never_publish_prediction_or_memory_measurements(self):
+        metrics = ("elapsed_seconds", "wall_seconds", "solve_lower_bound_seconds", "ts_db",
+                   "delta_ts_db", "amplitude_real_m", "amplitude_imag_m", "memory_delta_peak_bytes",
+                   "memory_baseline_rss_bytes", "memory_peak_rss_bytes", "memory_samples")
+        for count in (5, 10):
+            row = self.row(count)
+            for metric in metrics:
+                with self.subTest(count=count, metric=metric):
+                    with self.assertRaises(ValueError):
+                        progress.compact_payload("owner/repo", "ubuntu-latest", 100, 1,
+                                                 [dict(row, **{metric: 0})])
+            for attempted, status in ((True, "timeout"), (False, "ok")):
+                with self.subTest(count=count, attempted=attempted, status=status):
+                    with self.assertRaises(ValueError):
+                        progress.compact_payload("owner/repo", "ubuntu-latest", 100, 1,
+                            [dict(row, prediction_attempted=attempted, status=status)])
+
+
 class GitAPI:
     """Small in-memory Git object store with an atomic branch reference."""
 
