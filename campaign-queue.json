@@ -69,7 +69,7 @@
         "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
         "94f40b109ccf9ab27c3f0128f130f3731148f85b",
         "965dc063576cdee63ebca1601a7b3c4fdea412a5",
-        "a985aaaaecbef6cee613fa0ca6036a61f657389b"
+        "9563a04b6519a6d91e303fde18b4be0dcd9d1569"
       ],
       "interrupted_runs": [
         42336582198,
@@ -95,8 +95,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "prol-remaining-a0-001",
@@ -116,8 +116,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "4"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "prol-remaining-a0-01",
@@ -137,8 +137,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "prol-remaining-a0-07",
@@ -158,8 +158,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "4"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "prol-remaining-a0-1",
@@ -179,8 +179,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "4"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "liquid-existing",
@@ -200,8 +200,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "liquid-new-a0-001",
@@ -221,8 +221,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "liquid-new-a0-07",
@@ -242,8 +242,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "liquid-new-a0-1",
@@ -263,13 +263,13 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "a985aaaaecbef6cee613fa0ca6036a61f657389b",
-      "dispatch_ref": "spectra-throughput-repair-20261107"
+      "source_ref": "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+      "dispatch_ref": "spectra-recovery-cache-20261107"
     },
     {
       "key": "acousticts-macos",
-      "source_ref": "67c1f162818880613ababe49ce5945ba421ff77e",
-      "dispatch_ref": "spectra-platform-throughput-repair-20261107",
+      "source_ref": "5c35e23ad5bebd119d0c9819c7d8a52841f01d4b",
+      "dispatch_ref": "spectra-platform-recovery-cache-20261107",
       "inputs": {
         "campaign_id": "41692575909",
         "platform": "macos-latest",
@@ -278,8 +278,8 @@
     },
     {
       "key": "acousticts-windows",
-      "source_ref": "67c1f162818880613ababe49ce5945ba421ff77e",
-      "dispatch_ref": "spectra-platform-throughput-repair-20261107",
+      "source_ref": "5c35e23ad5bebd119d0c9819c7d8a52841f01d4b",
+      "dispatch_ref": "spectra-platform-recovery-cache-20261107",
       "inputs": {
         "campaign_id": "41694015656",
         "platform": "windows-latest",
@@ -356,7 +356,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T17:45:28.937342+00:00",
+  "updated_at": "2026-11-07T18:08:34.031721+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
