@@ -64,7 +64,11 @@
         "additional_repetitions": "5"
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "dispatch_ref": "spectra-five-replicates-20261106",
+      "approved_controllers": [
+        "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "82d29be2390988de52977a3dc1b0ac3b33cf9ac2"
+      ]
     },
     {
       "key": "echo-new-a0-1",
@@ -84,8 +88,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "prol-remaining-a0-001",
@@ -105,8 +109,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "4"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "prol-remaining-a0-01",
@@ -126,8 +130,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "prol-remaining-a0-07",
@@ -147,8 +151,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "4"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "prol-remaining-a0-1",
@@ -168,8 +172,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "4"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "liquid-existing",
@@ -189,8 +193,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "liquid-new-a0-001",
@@ -210,8 +214,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "liquid-new-a0-07",
@@ -231,8 +235,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "liquid-new-a0-1",
@@ -252,8 +256,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
+      "source_ref": "82d29be2390988de52977a3dc1b0ac3b33cf9ac2",
+      "dispatch_ref": "spectra-slow-frequency-scheduler-20261107"
     },
     {
       "key": "acousticts-macos",
@@ -345,7 +349,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-07T04:01:35.415668+00:00",
+  "updated_at": "2026-11-07T05:02:25.301535+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
