@@ -1222,7 +1222,8 @@ assert.deepEqual(track.children.map(node=>[node.className,node.style.width]),
 assert.equal(track.attrs['aria-valuenow'],'5');
 assert.equal(track.attrs['aria-valuemax'],'8');
 assert.match(track.attrs['aria-valuetext'],/2 timeouts/);
-assert.match(track.attrs['aria-valuetext'],/1 failed or skipped/);
+assert.match(track.attrs['aria-valuetext'],/1 failed/);
+assert.doesNotMatch(track.attrs['aria-valuetext'],/skipped/);
 const reference=progressBar({software:'reference',kind:'reference',label:'Qualified references',color:'green',
  success:3,other:0,recorded:3,planned:4,pending:1,detail:'3 qualified references'});
 const referenceTrack=descendants(reference).find(node=>node.className==='progress-track');
@@ -1301,6 +1302,130 @@ assert.equal(isTimeout({status:'pending'}),false);
 assert.equal(isTimeout({status:'unsupported'}),false);
 """
         self.run_node(harness)
+
+@unittest.skipUnless(shutil.which("node"), "Node.js exercises dashboard timing ranges")
+class TimingRangeDashboardTests(unittest.TestCase):
+    helpers = staticmethod(TimeoutDashboardTests.helpers)
+    run_node = staticmethod(TimeoutDashboardTests.run_node)
+
+    def timing_harness(self):
+        return r"""
+const assert=require('node:assert/strict');
+const observation=(physical_id,repetition,elapsed_seconds,extra={})=>({
+ software:'echosms',source_sha:'source',physical_id,repetition,elapsed_seconds,
+ status:'ok',semimajor_m:.07,aspect_ratio:1.01,boundary:'liquid',incidence_deg:37,
+ ...extra
+});
+""" + self.helpers("mean", "timingGroups", "timingSummary")
+
+    def test_unequal_successful_coverage_retains_mean_and_bounding_range(self):
+        harness = self.timing_harness() + r"""
+const rows=[observation('a',1,1),observation('a',2,3),observation('b',1,10),
+ observation('b',2,null,{status:'timeout'}),observation('c',1,null,{status:'pending'})];
+const summary=timingSummary(rows);
+assert.equal(summary.total,12);
+assert.equal(summary.average,6);
+assert.deepEqual(summary.totalRange,[11,13]);
+assert.deepEqual(summary.averageRange,[5.5,6.5]);
+assert.equal(summary.points.length,2);
+assert.ok(summary.totalRange[0]<=summary.total&&summary.total<=summary.totalRange[1]);
+assert.ok(summary.averageRange[0]<=summary.average&&summary.average<=summary.averageRange[1]);
+assert.deepEqual(timingSummary([...rows].reverse()).totalRange,summary.totalRange);
+"""
+        self.run_node(harness)
+
+    def test_casewise_range_handles_opposing_repetition_extremes_and_single_samples(self):
+        harness = self.timing_harness() + r"""
+const opposing=[observation('a',1,1),observation('a',2,9),
+ observation('b',1,9),observation('b',2,1)];
+const summary=timingSummary(opposing);
+assert.equal(summary.total,10);
+assert.equal(summary.average,5);
+assert.deepEqual(summary.totalRange,[2,18]);
+assert.deepEqual(summary.averageRange,[1,9]);
+const single=timingSummary([observation('single',1,.25)]);
+assert.equal(single.total,.25);assert.equal(single.average,.25);
+assert.deepEqual(single.totalRange,[.25,.25]);
+assert.deepEqual(single.averageRange,[.25,.25]);
+"""
+        self.run_node(harness)
+
+    def test_timeout_error_and_invalid_timings_cannot_enter_successful_ranges(self):
+        harness = self.timing_harness() + r"""
+const valid=[observation('a',1,2),observation('a',2,4)];
+const excluded=['timeout','setup_timeout','numerical_error','nonconverged','worker_error',
+ 'pending','unsupported'].map((status,index)=>observation('excluded'+index,1,1e99,{status}));
+for(const elapsed_seconds of [null,undefined,NaN,Infinity,-Infinity,0,-1])
+ excluded.push(observation('invalid'+String(elapsed_seconds),1,elapsed_seconds));
+assert.deepEqual(timingSummary([...valid,...excluded]),timingSummary(valid));
+const empty=timingSummary(excluded);
+assert.equal(empty.total,0);assert.equal(empty.average,null);
+assert.deepEqual(empty.totalRange,[]);assert.deepEqual(empty.averageRange,[]);
+assert.deepEqual(empty.points,[]);
+"""
+        self.run_node(harness)
+
+    def test_prol_spheroid_successes_retain_ranges_despite_failed_predictions(self):
+        harness = self.timing_harness() + r"""
+const common={software:'prol_spheroid',boundary:'liquid'};
+const valid=[observation('p',1,.25,common),observation('p',2,.5,common),
+ observation('q',1,1.25,common)];
+const summary=timingSummary([...valid,
+ observation('q',2,120,{...common,status:'numerical_error',ts_db:NaN}),
+ observation('r',1,240,{...common,status:'nonconverged',ts_db:Infinity})]);
+assert.equal(summary.total,1.625);assert.equal(summary.average,.8125);
+assert.deepEqual(summary.totalRange,[1.5,1.75]);
+assert.deepEqual(summary.averageRange,[.75,.875]);
+assert.deepEqual(summary,timingSummary(valid));
+"""
+        self.run_node(harness)
+
+    def test_range_labels_distinguish_casewise_timings_from_observed_rmse(self):
+        harness = TimeoutDashboardTests.DOM + self.helpers("formatted", "meanWithRange") + r"""
+const timing=meanWithRange('12.00',[11,13],'casewise range');
+assert.equal(timing.children[0].textContent,'12.00');
+assert.equal(timing.children[1].textContent,'casewise range 11.00–13.00');
+const rmse=meanWithRange('2.00',[1,3]);
+assert.equal(rmse.children[1].textContent,'min–max 1.00–3.00');
+const unavailable=meanWithRange('Unavailable',[],'casewise range');
+assert.equal(unavailable.children.length,1);
+assert.equal(unavailable.children[0].textContent,'Unavailable');
+assert.ok(descendants(unavailable).every(node=>node.textContent!=='Range pending'));
+"""
+        self.run_node(harness)
+
+    def test_no_successful_timing_renders_unavailable_totals_without_pending_range(self):
+        source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
+        start = source.index(" const table=document.getElementById('coverage');")
+        end = source.index("\n}\naspect.addEventListener", start)
+        harness = TimeoutDashboardTests.DOM + r"""
+Element.prototype.replaceChildren=function(...nodes){this.children=nodes;};
+const Node=Element,coverageTable=new Element('tbody');
+document.getElementById=()=>coverageTable;
+const boundaryLabels={liquid:'Liquid'},supportsBoundary=software=>software==='echosms';
+const aspect={value:'1.01'},data={},selectedAngles=[37],allFreq=[1000];
+const coverageGroups=null,plannedGroups=[{software:'echosms',boundary:'liquid'}];
+const selected=[{software:'echosms',boundary:'liquid',status:'timeout',repetition:1,
+ physical_id:'failed',elapsed_seconds:null,reference_id:'reference',delta_ts_db:null}];
+const benchmarkProgress=()=>[{software:'echosms',success:0,other:1,timeouts:1,
+ recorded:1,planned:1,pending:0}];
+const progressBar=()=>new Element('div');
+""" + self.helpers("mean", "timingGroups", "timingSummary", "repetitionRMSE",
+                    "meanWithRange", "median", "comparisonSummary", "validValue", "formatted")
+        harness += source[start:end] + r"""
+assert.equal(table.children.length,1);
+const cells=table.children[0].children;
+for(const index of [6,7]){
+ const values=descendants(cells[index]).map(node=>node.textContent).filter(Boolean);
+ assert.deepEqual(values,['Unavailable']);
+}
+assert.ok(descendants(table).every(node=>node.textContent!=='Range pending'));
+"""
+        self.run_node(harness)
+        self.assertIn("diagonal stripes = failed, gray = pending", source)
+        self.assertNotIn("failed or skipped", source)
+        self.assertNotIn("failures or skips", source)
+
 
 if __name__ == "__main__":
     unittest.main()

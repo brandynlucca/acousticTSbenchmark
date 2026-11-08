@@ -55,7 +55,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <label>View <select id="layout"><option value="paired">Measure + ΔTS</option><option value="single">Single measure</option><option value="tradeoff">Cost vs |ΔTS|</option></select></label>
 <label>Horizontal axis <select id="axis"><option value="frequency_hz">Frequency (kHz)</option><option value="h0">h₀</option><option value="k0a">k₀a</option></select></label>
 <label>Measure <select id="metric"><option value="elapsed_seconds">Solve time (s, log scale)</option><option value="memory_delta_peak_bytes">Additional RAM per prediction (MiB)</option><option value="ts_db">TS (dB)</option><option value="delta_ts_db">ΔTS (dB, software minus reference)</option></select></label></p>
-<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only supported boundaries count toward completion. Solid color = successful, <span class="progress-key progress-timeout" aria-hidden="true"></span>horizontal stripes = timeout, <span class="progress-key progress-other" aria-hidden="true"></span>diagonal stripes = failed or skipped, gray = pending. Planned repetitions count separately. Percentages count recorded cases, not elapsed time.</p></section>
+<section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only supported boundaries count toward completion. Solid color = successful, <span class="progress-key progress-timeout" aria-hidden="true"></span>horizontal stripes = timeout, <span class="progress-key progress-other" aria-hidden="true"></span>diagonal stripes = failed, gray = pending. Planned repetitions count separately. Percentages count recorded cases, not elapsed time.</p></section>
 <section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
 <p class="note" id="failure-note">X = failed prediction at the recorded time to failure, colored by software. Failed repetitions appear separately. Failures without a positive recorded prediction duration remain in the coverage counts.</p>
@@ -63,7 +63,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
 <h2>Coverage and comparison error by software and boundary</h2><p class="note" id="coverage-note"></p><div class="coverage"><table><thead><tr><th>Software</th><th>Boundary</th><th>Completion</th><th>Success</th><th>Other recorded</th><th>Pending</th><th>Mean total solve time (s)</th><th>Mean average solve time (s)</th><th>Mean RMSE ΔTS (dB)</th><th title="Largest absolute difference across matched successful measurements">Max |ΔTS| (dB)</th><th>Repetitions</th><th>Predictions with reference</th></tr></thead><tbody id="coverage"></tbody></table></div>
-<p class="note">Mean total solve time sums the mean for each physical case once. Mean average solve time divides that total by the number of timed cases. Totals remain partial until coverage is complete. Time ranges use complete successful repetitions. Repetitions counts successful measurements per case, shown as a range when unequal.</p>
+<p class="note">Timing means give physical cases equal weight. Totals remain partial until coverage is complete. Table timing ranges combine per-case minima and maxima across available successful repetitions. Timeouts and failed predictions are excluded. Repetition counts report successful measurements per case, shown as a range when unequal.</p>
 <p class="note" id="rmse-note">Mean RMSE averages the RMSE calculated separately for each repetition using its available matched predictions. Its min–max spans those repetition RMSE values. Predictions with reference counts the frequency and incidence combinations that have a matching BEM/FEM-BEM reference. Repetitions count once. No matched reference means successful predictions exist but their exact reference cases are missing. No successful prediction means there is no completed successful result in this selection.</p>
 <script id="data" type="application/json">PAYLOAD</script>
 <script>
@@ -143,8 +143,8 @@ function updateStatus(){
  const planned=known?active.reduce((sum,g)=>sum+g.planned,0):null,recorded=known?active.reduce((sum,g)=>sum+g.recorded,0):observations.length;
  const success=known?active.reduce((sum,g)=>sum+g.success,0):observations.filter(r=>r.status==='ok').length,pending=known?planned-recorded:null;
  const other=Math.max(0,(recorded||0)-success),timeouts=known?active.reduce((sum,g)=>sum+g.timeouts,0):observations.filter(isTimeout).length,failed=Math.max(0,other-timeouts),finished=data.state==='completed'||s.state==='complete';
- const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with timeouts, failures or skips':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
- document.getElementById('status').textContent=planned?`${recorded} / ${planned} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed or skipped · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:known?'No supported benchmark cases in this run.':recorded?`${recorded} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed or skipped · Planned total unavailable`:'Waiting for the benchmark plan.';
+ const phase=finished?(pending?(s.state==='budget_paused'?'Paused with pending cases. Resume to continue':'Run stopped with pending cases'):other?'Run finished with timeouts, failures':'Run finished'):data.state==='setup'?'Waiting for first timing checkpoint':'Benchmarking';
+ document.getElementById('status').textContent=planned?`${recorded} / ${planned} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed · ${pending} pending · ${phase} · Data updated ${s.updated_at||data.published_at||'pending'}`:known?'No supported benchmark cases in this run.':recorded?`${recorded} recorded · ${success} successful · ${timeouts} timeouts · ${failed} failed · Planned total unavailable`:'Waiting for the benchmark plan.';
  const latest=rows.filter(r=>applicable(r)&&r.measurement_role!=='retained'&&r.status!=='pending').at(-1),latestNote=document.getElementById('latest-prediction');
  latestNote.hidden=!latest;
  if(latest)latestNote.textContent=`Latest recorded prediction: ${labels[latest.software]||latest.software}, ${boundaryLabels[latest.boundary]||latest.boundary}, a = ${latest.semimajor_m??snapshotSize(data)} m, aspect ratio ${latest.aspect_ratio}, ${latest.incidence_deg}°, ${latest.frequency_hz/1000} kHz. Other selections update when their predictions run.`;
@@ -168,16 +168,12 @@ function timingGroups(group){
  }
  return [...points.values()];
 }
-function timingSummary(group,expectedCases){
+function timingSummary(group){
  const points=timingGroups(group),total=points.reduce((sum,point)=>sum+mean(point.map(row=>row.elapsed_seconds)),0);
- const repetitions=new Map();
- for(const point of points)for(const row of point){
-  if(!repetitions.has(row.repetition))repetitions.set(row.repetition,[]);
-  repetitions.get(row.repetition).push(row);
- }
- const passes=[...repetitions.values()].filter(pass=>pass.length===expectedCases&&timingGroups(pass).length===expectedCases)
-  .map(pass=>pass.reduce((sum,row)=>sum+row.elapsed_seconds,0));
- return {total,average:points.length?total/points.length:null,passes,points};
+ const totalRange=points.length?[0,0]:[];
+ for(const point of points){const times=point.map(row=>row.elapsed_seconds);totalRange[0]+=Math.min(...times);totalRange[1]+=Math.max(...times);}
+ return {total,average:points.length?total/points.length:null,totalRange,
+  averageRange:totalRange.map(value=>value/points.length),points};
 }
 function repetitionRMSE(group){
  const repetitions=new Map();
@@ -186,10 +182,11 @@ function repetitionRMSE(group){
  const summary=comparisonSummary(group);
  return {value:values.length?mean(values):null,values,count:summary.count,maxAbs:summary.maxAbs};
 }
-function meanWithRange(value,range){
+function meanWithRange(value,range,label='min–max'){
  const cell=document.createElement('span'),main=document.createElement('span');main.textContent=value;cell.append(main);
+ if(!range.length)return cell;
  const detail=document.createElement('small');detail.style.display='block';detail.style.whiteSpace='nowrap';
- detail.textContent=range.length?`min–max ${formatted(Math.min(...range))}–${formatted(Math.max(...range))}`:'Range pending';
+ detail.textContent=`${label} ${formatted(Math.min(...range))}–${formatted(Math.max(...range))}`;
  cell.append(detail);return cell;
 }
 
@@ -254,9 +251,9 @@ function progressBar(summary,showName=true){
  const number=document.createElement('span');number.textContent=percent===null?'Total unavailable':`${percent.toFixed(2)}%`;title.append(number);node.append(title);
  const track=document.createElement('div');track.className='progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label',`${label} ${reference?'qualified references':'recorded cases'}`);track.setAttribute('aria-valuemin','0');
  const countText=planned===null?`${recorded.toLocaleString()} ${reference?'qualified':'recorded'} · planned total unavailable`:`${recorded.toLocaleString()} / ${planned.toLocaleString()} ${reference?'qualified':'recorded'} · ${pending.toLocaleString()} ${reference?'missing':'pending'}`;
- const detailText=summary.detail||`${success.toLocaleString()} successful · ${timeouts.toLocaleString()} timeouts · ${(other-timeouts).toLocaleString()} failed or skipped`;
+ const detailText=summary.detail||`${success.toLocaleString()} successful · ${timeouts.toLocaleString()} timeouts · ${(other-timeouts).toLocaleString()} failed`;
  track.setAttribute('aria-valuetext',`${countText} · ${detailText}`);
- if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['timeout',timeouts],['other',other-timeouts]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${planned?100*count/planned:0}%`;segment.title=`${count.toLocaleString()} ${kind==='timeout'?'timeouts':kind==='success'?'successful':'failed or skipped'}`;track.append(segment);}}
+ if(planned!==null){track.setAttribute('aria-valuemax',String(planned));track.setAttribute('aria-valuenow',String(recorded));for(const [kind,count] of [['success',success],['timeout',timeouts],['other',other-timeouts]]){const segment=document.createElement('span');segment.className=`progress-${kind}`;segment.style.width=`${planned?100*count/planned:0}%`;segment.title=`${count.toLocaleString()} ${kind==='timeout'?'timeouts':kind==='success'?'successful':'failed'}`;track.append(segment);}}
  else track.classList.add('progress-unknown');
  node.append(track);const counts=document.createElement('div');counts.className='progress-counts';counts.textContent=countText;
  if(showName){const detail=document.createElement('div');detail.textContent=detailText;counts.append(detail);}node.append(counts);return node;
@@ -516,7 +513,7 @@ function render(){
   const good=group.filter(r=>r.status==='ok'),pending=group.filter(r=>r.status==='pending');
   const timed=good.filter(r=>Number.isFinite(r.elapsed_seconds)&&r.elapsed_seconds>=0);
   const expectedCases=(data.axes?.[aspect.value]?.software_frequencies_hz?.[software]||allFreq).length*selectedAngles.length;
-  const timing=timingSummary(group,expectedCases),total=timing.total,shownTotal=total>0&&total<.01?total.toExponential(2):total.toFixed(2);
+  const timing=timingSummary(group),total=timing.total,shownTotal=timing.points.length?formatted(total):'Unavailable';
   const counts=timing.points.map(point=>point.length);if(timing.points.length<expectedCases)counts.push(0);
   const least=counts.length?Math.min(...counts):0,most=counts.length?Math.max(...counts):0,repetitions=least===most?String(least):`${least}–${most}`;
   const average=timing.average;
@@ -529,7 +526,7 @@ function render(){
   const softwareLabel=labels[software];
   for(const value of [softwareLabel,boundaryLabels[boundary]]){const td=document.createElement('td');td.textContent=value;tr.append(td);}
   const progress=document.createElement('td');if(completion)progress.append(progressBar(completion,false));else progress.textContent='Unavailable';tr.append(progress);
-  for(const value of [successful,other,remaining,meanWithRange(shownTotal,timing.passes),meanWithRange(shownAverage,timing.passes.map(total=>total/expectedCases)),comparison.count?meanWithRange(shownRMSE,comparison.values):shownRMSE,shownMax,repetitions,comparison.count]){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=value;tr.append(td);}table.append(tr);
+  for(const value of [successful,other,remaining,meanWithRange(shownTotal,timing.totalRange,'casewise range'),meanWithRange(shownAverage,timing.averageRange,'casewise range'),comparison.count?meanWithRange(shownRMSE,comparison.values):shownRMSE,shownMax,repetitions,comparison.count]){const td=document.createElement('td');if(value instanceof Node)td.append(value);else td.textContent=value;tr.append(td);}table.append(tr);
  }
 }
 aspect.addEventListener('change',()=>{preferredAspect=aspect.value;try{localStorage.setItem('benchmark-aspect',preferredAspect);}catch(e){}render();});incidence.addEventListener('change',()=>{preferredIncidence=incidence.value;try{localStorage.setItem('benchmark-incidence',preferredIncidence);}catch(e){}render();});metric.addEventListener('change',()=>{if(!['elapsed_seconds','memory_delta_peak_bytes'].includes(metric.value))layout.value='single';render();});axis.addEventListener('change',render);layout.addEventListener('change',render);render();
