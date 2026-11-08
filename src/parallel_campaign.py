@@ -1703,6 +1703,25 @@ def monitor(api, campaign_id, directory):
         time.sleep(30)
 
 
+def wake_ordered_queue(api, campaign_id):
+    """Wake the saved sequence after complete publication without retrying dispatch."""
+    try:
+        workflow = api.request('GET', '/actions/workflows/queue.yml')
+        if not isinstance(workflow, dict):
+            raise ValueError('Invalid ordered queue workflow metadata')
+        if workflow.get('state') != 'active':
+            print(f'QUEUE_HANDOFF_SKIPPED campaign={campaign_id} workflow_inactive', flush=True)
+            return
+        api.request('POST', '/actions/workflows/queue.yml/dispatches',
+                    dict(ref='main', inputs=dict(wait_seconds='120')))
+    except (APIError, OSError, TimeoutError, ValueError) as error:
+        print(f'::warning::QUEUE_HANDOFF_UNCONFIRMED campaign={campaign_id} '
+              f'error={type(error).__name__} status={getattr(error, "status", None)}. '
+              'Published results remain complete. Dispatch was not retried.', flush=True)
+        return
+    print(f'QUEUE_HANDOFF_DISPATCHED campaign={campaign_id}', flush=True)
+
+
 def finish(api, campaign_id, directory):
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
     state, state_sha = get_document(api, filename(campaign_id, 'state'))
@@ -1764,6 +1783,8 @@ def finish(api, campaign_id, directory):
         state['next_platform_dispatched'] = core.utc_now()
         put_document(api, filename(campaign_id, 'state'), state)
         print(f"NEXT_PLATFORM_DISPATCHED campaign={next_inputs['campaign_id']} platform={next_inputs['platform']}", flush=True)
+    elif state['status'] == 'complete' and not following:
+        wake_ordered_queue(api, campaign_id)
 
 
 def main():
