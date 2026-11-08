@@ -500,6 +500,121 @@ class PublicationTests(unittest.TestCase):
         api.request.assert_not_called()
 
 
+class OrderedQueueHandoffTests(unittest.TestCase):
+    def finish_campaign(self, *, complete=True, workflow='active', request_error=None,
+                        error_method='GET', publication_error=None, state_changes=None):
+        plan, task, runtime = pending_plan()
+        plan['automatic_continue'] = True
+        packet = packet_for(plan, task, runtime, len(task['cases']) if complete else 1)
+        original = copy.deepcopy(packet)
+        state = dict(waves=[dict(run_id=100, tasks=[task['id']])], attempts={}, blocked=[])
+        state.update(state_changes or {})
+        saved, events = [], []
+        api = Mock()
+
+        def request(method, path, body=None):
+            events.append((method, path))
+            if path.startswith('/actions/workflows/queue.yml'):
+                self.assertEqual(saved[-1]['status'], 'complete')
+                self.assertFalse(saved[-1]['publication_pending'])
+                if request_error and method == error_method:
+                    raise request_error
+                return dict(state=workflow) if method == 'GET' else None
+            return None
+
+        def save(api, path, value, *args):
+            saved.append(copy.deepcopy(value))
+            events.append(('save', value['status']))
+            return 's'
+
+        def publish(*args, **kwargs):
+            events.append(('publish', None))
+            if publication_error:
+                raise publication_error
+
+        api.request.side_effect = request
+        with patch.dict(os.environ, GITHUB_RUN_ID='100'), \
+             patch.object(parallel, 'get_document', side_effect=[(plan, 'p'), (state, 's')]), \
+             patch.object(parallel, 'recover_artifacts'), \
+             patch.object(parallel, 'read_packets', return_value={task['id']: packet}), \
+             patch.object(parallel, 'put_document', side_effect=save), \
+             patch.object(parallel, 'publish_datasets', side_effect=publish), \
+             patch.object(parallel, 'write_outputs') as outputs, patch('sys.stdout', new_callable=io.StringIO) as log:
+            parallel.finish(api, '100', Path('unused'))
+        self.assertEqual(packet, original)
+        return api, saved, events, outputs.call_args.args[0], log.getvalue()
+
+    def test_complete_publication_wakes_main_queue_after_durable_completion(self):
+        api, saved, events, output, log = self.finish_campaign()
+        self.assertEqual(events, [('save', 'publishing'), ('publish', None), ('save', 'complete'),
+                                 ('GET', '/actions/workflows/queue.yml'),
+                                 ('POST', '/actions/workflows/queue.yml/dispatches')])
+        self.assertEqual(api.request.call_args.args,
+            ('POST', '/actions/workflows/queue.yml/dispatches',
+             dict(ref='main', inputs=dict(wait_seconds='120'))))
+        self.assertEqual(output['state'], 'complete')
+        self.assertIn('QUEUE_HANDOFF_DISPATCHED campaign=100', log)
+
+    def test_disabled_queue_remains_disabled(self):
+        for status in ('disabled_manually', 'disabled_inactivity', 'deleted'):
+            with self.subTest(status=status):
+                api, saved, _, _, log = self.finish_campaign(workflow=status)
+                api.request.assert_called_once_with('GET', '/actions/workflows/queue.yml')
+                self.assertEqual(saved[-1]['status'], 'complete')
+                self.assertIn('QUEUE_HANDOFF_SKIPPED', log)
+
+    def test_incomplete_or_blocked_campaign_never_wakes_ordered_queue(self):
+        _, task, _ = pending_plan()
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                api, saved, _, _, _ = self.finish_campaign(complete=False,
+                    state_changes=dict(blocked=[task['id']]) if blocked else None)
+                self.assertEqual(saved[-1]['status'], 'blocked' if blocked else 'active')
+                self.assertFalse(any('/queue.yml' in call.args[1] for call in api.request.call_args_list))
+
+    def test_incomplete_publication_retains_recovery_without_queue_handoff(self):
+        api, saved, _, _, _ = self.finish_campaign(publication_error=parallel.PublicationConflict('busy'))
+        self.assertEqual(saved[-1]['status'], 'publishing')
+        self.assertTrue(saved[-1]['publication_pending'])
+        self.assertEqual(api.request.call_args.args,
+            ('POST', '/actions/workflows/parallel-spectra.yml/dispatches',
+             dict(ref='spectra-100', inputs=dict(campaign_id='100'))))
+        self.assertFalse(any('/queue.yml' in call.args[1] for call in api.request.call_args_list))
+
+    def test_legacy_platform_handoff_does_not_wake_ordered_queue(self):
+        for already_dispatched in (False, True):
+            with self.subTest(already_dispatched=already_dispatched):
+                changes = dict(next_platform_campaign=dict(campaign_id='200', platform='windows-latest'))
+                if already_dispatched:
+                    changes['next_platform_dispatched'] = 'saved'
+                api, saved, _, _, _ = self.finish_campaign(state_changes=changes)
+                self.assertEqual(saved[-1]['status'], 'complete')
+                self.assertFalse(any('/queue.yml' in call.args[1] for call in api.request.call_args_list))
+                self.assertEqual(api.request.call_count, 0 if already_dispatched else 1)
+
+    def test_request_failures_preserve_completion_without_uncertain_dispatch_retry(self):
+        for method in ('GET', 'POST'):
+            for failure in (parallel.APIError(503, 'Unavailable'), TimeoutError('No receipt')):
+                with self.subTest(method=method, failure=type(failure).__name__):
+                    api, saved, _, output, log = self.finish_campaign(request_error=failure, error_method=method)
+                    self.assertEqual(saved[-1]['status'], 'complete')
+                    self.assertFalse(saved[-1]['publication_pending'])
+                    self.assertEqual(output['state'], 'complete')
+                    self.assertEqual(api.request.call_count, 1 if method == 'GET' else 2)
+                    self.assertEqual(sum(call.args[0] == 'POST' for call in api.request.call_args_list),
+                                     0 if method == 'GET' else 1)
+                    self.assertEqual(len(saved), 2)
+                    self.assertIn('::warning::QUEUE_HANDOFF_UNCONFIRMED', log)
+
+    def test_malformed_workflow_metadata_never_dispatches(self):
+        api = Mock()
+        api.request.return_value = None
+        with patch('sys.stdout', new_callable=io.StringIO) as log:
+            parallel.wake_ordered_queue(api, '100')
+        api.request.assert_called_once_with('GET', '/actions/workflows/queue.yml')
+        self.assertIn('::warning::QUEUE_HANDOFF_UNCONFIRMED', log.getvalue())
+
+
 class DashboardTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'),'Node.js exercises the actual dashboard aggregation')
     def test_means_ranges_complete_passes_and_failed_samples(self):
