@@ -355,10 +355,32 @@
       },
       "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42336582198"
+    },
+    "echo-new-a0-1": {
+      "run_id": 42497534872,
+      "campaign_id": "42497534872",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "300",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "echosms",
+        "semimajor_axes": "0.1",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42497534872"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-08T15:59:09.401707+00:00",
+  "updated_at": "2026-11-08T15:59:13.405644+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -451,27 +473,5 @@
         }
       ]
     }
-  ],
-  "dispatch_intent": {
-    "key": "echo-new-a0-1",
-    "inputs": {
-      "mode": "repeat",
-      "aspect_ratios": "1.001,1.01,5,10,50,100",
-      "incidences_deg": "0,37,90",
-      "boundaries": "rigid,pressure_release,liquid,gas",
-      "frequency_start_khz": "1",
-      "frequency_end_khz": "300",
-      "frequency_interval_khz": "2",
-      "max_parallel": "16",
-      "automatic_continue": "true",
-      "timing_budget_minutes": "330",
-      "platform": "ubuntu-latest",
-      "software": "echosms",
-      "semimajor_axes": "0.1",
-      "additional_repetitions": "5"
-    },
-    "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
-    "dispatch_ref": "spectra-whole-sweep-20261107",
-    "created_at": "2026-11-08T15:59:09.401682+00:00"
-  }
+  ]
 }
