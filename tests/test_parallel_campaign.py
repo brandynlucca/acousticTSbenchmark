@@ -617,7 +617,7 @@ class OrderedQueueHandoffTests(unittest.TestCase):
 
 class DashboardTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'),'Node.js exercises the actual dashboard aggregation')
-    def test_means_ranges_complete_passes_and_failed_samples(self):
+    def test_means_casewise_ranges_and_failed_samples(self):
         import report
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/'index.html'
@@ -631,11 +631,11 @@ const rows=[];
 for(const physical_id of ['p','q'])for(const [index,elapsed_seconds] of [1,2,9].entries())
  rows.push({software:'acousticts',source_sha:'a',physical_id,status:'ok',repetition:index+1,elapsed_seconds});
 const complete=timingSummary(rows,2);
-assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.passes,[2,4,18]);
+assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.totalRange,[2,18]);assert.deepEqual(complete.averageRange,[1,9]);
 rows[5].status='timeout';
 const partial=timingSummary(rows,2);
-assert.equal(partial.total,5.5);assert.deepEqual(partial.passes,[2,4]);
-assert.deepEqual(timingSummary(rows,3).passes,[]);
+assert.equal(partial.total,5.5);assert.deepEqual(partial.totalRange,[2,11]);assert.deepEqual(partial.averageRange,[1,5.5]);
+assert.deepEqual(timingSummary(rows,3).totalRange,partial.totalRange);
 assert.equal(timingSummary([...rows,{...rows[0],source_sha:'b',elapsed_seconds:10}],2).points.length,3);
 const comparisons=[];
 for(const [index,errors] of [[.03,.04],[.06,.08]].entries())for(const [physical,delta_ts_db] of errors.entries())
