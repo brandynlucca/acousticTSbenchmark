@@ -3,10 +3,12 @@
 import copy
 import itertools
 import math
+import os
 from pathlib import Path
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -209,6 +211,58 @@ class ReferenceTests(unittest.TestCase):
             self.assertNotIn("--threads=1", command)
             stop.assert_called_once()
 
+    @unittest.skipUnless(os.name == "nt", "Windows marker read conflicts")
+    def test_batch_keeps_running_through_denied_marker_and_collects_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            marker = directory / "reference-active.json"
+            process = MagicMock(returncode=0)
+            polls = [0]
+            def poll():
+                polls[0] += 1
+                if polls[0] == 2:
+                    b.atomic_json(directory / "reference-attempts" / (self.job["reference_id"] + ".json"), evidence())
+                    return 0
+                return None
+            process.poll.side_effect = poll
+            original_read = b.read_json
+            reads = [0]
+            def read(path, **kwargs):
+                if path == marker:
+                    reads[0] += 1
+                    if reads[0] == 1:
+                        raise PermissionError(13, "fixture marker locked")
+                    return dict(reference_id=self.job["reference_id"], started_epoch=100, phase="solving")
+                return original_read(path, **kwargs)
+            runtime = dict(executables={"acousticscattering": ["julia"]})
+            accepted = MagicMock()
+            with patch.object(r.subprocess, "Popen", return_value=process), patch.object(r, "_stop") as stop, \
+                 patch("process_control.WindowsJob"), patch.object(r, "read_json", side_effect=read), \
+                 patch.object(r.time, "time", return_value=100), patch.object(r.time, "sleep"):
+                done = r._run_batch([self.job], runtime, directory, 4, 1000, 600, accepted, MagicMock())
+            self.assertEqual(done, {self.job["reference_id"]})
+            self.assertEqual(reads[0], 2)
+            self.assertEqual(accepted.call_args.args[1], evidence())
+            accepted.assert_called_once()
+            stop.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "Windows marker deadline supervision")
+    def test_locked_marker_does_not_delay_case_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            process = MagicMock(returncode=0)
+            process.poll.return_value = None
+            runtime = dict(executables={"acousticscattering": ["julia"]})
+            accepted = MagicMock()
+            with patch.object(r.subprocess, "Popen", return_value=process), patch.object(r, "_stop") as stop, \
+                 patch("process_control.WindowsJob"), \
+                 patch.object(r, "read_json", side_effect=PermissionError(13, "fixture marker locked")), \
+                 patch.object(r.time, "time", side_effect=[100, 101, 101, 101]):
+                done = r._run_batch([self.job], runtime, directory, 4, 1000, 0.5, accepted, MagicMock())
+            self.assertEqual(done, {self.job["reference_id"]})
+            self.assertEqual(accepted.call_args.args[1]["status"], "timeout")
+            stop.assert_called_once()
+
     def test_batch_timeout_records_failure_and_terminates_owned_process_once(self):
         scratch = ROOT / ".scratch/codex/dense-benchmark/tests"
         scratch.mkdir(parents=True, exist_ok=True)
@@ -225,6 +279,49 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(completed, {self.job["reference_id"]})
             self.assertEqual(accepted.call_args.args[1]["status"], "timeout")
             self.assertFalse(r.reference_record(self.job, accepted.call_args.args[1])["qualified"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows open-reader cleanup")
+    def test_reference_cleanup_retries_actual_reader_and_missing_is_noop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "marker.json"
+            b.atomic_json(path, {"generation": 1})
+            reader = path.open("r", encoding="utf-8")
+            release = threading.Timer(.15, reader.close)
+            try:
+                with self.assertRaises(PermissionError):
+                    path.unlink()
+                release.start()
+                r._remove_reference_file(path)
+                self.assertFalse(path.exists())
+                r._remove_reference_file(path)
+                self.assertFalse(path.exists())
+            finally:
+                reader.close()
+                if release.ident is not None:
+                    release.join()
+
+    @unittest.skipUnless(os.name == "nt", "Windows persistent marker denial")
+    def test_permanent_marker_denial_stops_without_recording_numerical_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            process = MagicMock(returncode=0)
+            process.poll.return_value = None
+            runtime = dict(executables={"acousticscattering": ["julia"]})
+            accepted = MagicMock()
+            clock = [0]
+            def denied_read(*args, **kwargs):
+                clock[0] += 6
+                raise PermissionError(13, "fixture marker locked")
+            with patch.object(r.subprocess, "Popen", return_value=process), patch.object(r, "_stop") as stop, \
+                 patch("process_control.WindowsJob"), \
+                 patch.object(r, "read_json", side_effect=denied_read), \
+                 patch.object(r, "_remove_reference_file", side_effect=lambda path: path.unlink(missing_ok=True)), \
+                 patch.object(r.time, "monotonic", side_effect=lambda: clock[0]), \
+                 patch.object(r.time, "time", return_value=100), patch.object(r.time, "sleep"):
+                with self.assertRaisesRegex(PermissionError, "fixture marker locked"):
+                    r._run_batch([self.job], runtime, directory, 4, 1000, 600, accepted, MagicMock())
+            accepted.assert_not_called()
+            stop.assert_called_once()
 
     def test_source_signature_ignores_checkout_line_endings(self):
         scratch = ROOT / ".scratch/codex/dense-benchmark/tests"

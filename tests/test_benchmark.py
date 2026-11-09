@@ -576,5 +576,120 @@ class CampaignWorkflowTests(unittest.TestCase):
                 self.namespace["main"]()
         self.assertEqual(b.read_json(self.directory / "status.json")["recorded"], 123)
 
+class AtomicJsonReplacementTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows exclusive-reader regression")
+    def test_snapshot_read_survives_exclusive_windows_handle(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                       wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "active.json"
+            path.write_text('{"phase":"solving"}', encoding="utf-8")
+            handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+            self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+            denied, results, failures = threading.Event(), [], []
+            original = Path.read_text
+            def observed_read(target, *args, **kwargs):
+                try:
+                    return original(target, *args, **kwargs)
+                except PermissionError:
+                    denied.set()
+                    raise
+            def read():
+                try:
+                    results.append(b.read_json(path))
+                except BaseException as error:
+                    failures.append(error)
+            worker = threading.Thread(target=read)
+            with patch.object(Path, "read_text", observed_read):
+                try:
+                    worker.start()
+                    self.assertTrue(denied.wait(2), "Reader did not encounter the exclusive handle")
+                finally:
+                    kernel.CloseHandle(handle)
+                    worker.join(3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(results, [{"phase":"solving"}])
+
+    @unittest.skipUnless(os.name == "nt", "Windows errno-only read denial")
+    def test_errno_only_read_denial_is_bounded_and_invalid_json_is_not_retried(self):
+        error = PermissionError(13, "fixture access denied")
+        self.assertIsNone(getattr(error, "winerror", None))
+        started = time.monotonic()
+        with patch.object(Path, "read_text", side_effect=error) as read:
+            with self.assertRaises(PermissionError):
+                b.read_json("active.json", timeout_seconds=0.1)
+            self.assertGreaterEqual(read.call_count, 2)
+        self.assertLess(time.monotonic() - started, 1)
+        with patch.object(Path, "read_text", return_value="invalid") as read, patch.object(b.time, "sleep") as sleep:
+            with self.assertRaises(json.JSONDecodeError):
+                b.read_json("active.json")
+            read.assert_called_once()
+            sleep.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows reader lock regression")
+    def test_reader_lock_is_retried_and_replacement_remains_atomic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status.json"
+            b.atomic_json(path, {"generation": 1})
+            attempted = threading.Event()
+            failures = []
+            original_replace = os.replace
+            def observed_replace(source, destination):
+                try:
+                    return original_replace(source, destination)
+                except PermissionError:
+                    attempted.set()
+                    raise
+            def write():
+                try:
+                    b.atomic_json(path, {"generation": 2})
+                except BaseException as error:
+                    failures.append(error)
+            with patch.object(b.os, "replace", side_effect=observed_replace) as replace:
+                with path.open(encoding="utf-8") as reader:
+                    worker = threading.Thread(target=write)
+                    worker.start()
+                    self.assertTrue(attempted.wait(2), "Writer did not encounter the held reader lock")
+                    self.assertEqual(json.load(reader), {"generation": 1})
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(failures, [])
+                self.assertGreaterEqual(replace.call_count, 2)
+            self.assertEqual(b.read_json(path), {"generation": 2})
+
+    @unittest.skipUnless(os.name == "nt", "Windows retry boundary")
+    def test_persistent_denial_is_bounded_and_preserves_original_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, temporary = Path(directory) / "status.json", Path(directory) / "status.json.tmp"
+            path.write_text('{"generation":1}', encoding="utf-8")
+            temporary.write_text('{"generation":2}', encoding="utf-8")
+            error = PermissionError("fixture access denied")
+            error.winerror = 5
+            started = time.monotonic()
+            with patch.object(b.os, "replace", side_effect=error) as replace:
+                with self.assertRaises(PermissionError):
+                    b._replace_json_file(temporary, path, timeout_seconds=0.1)
+                self.assertGreaterEqual(replace.call_count, 2)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(b.read_json(path), {"generation": 1})
+            self.assertEqual(b.read_json(temporary), {"generation": 2})
+
+    def test_unrelated_replacement_error_is_immediate(self):
+        error = PermissionError("fixture unrelated error")
+        error.winerror = 87
+        with patch.object(b.os, "replace", side_effect=error) as replace, patch.object(b.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                b._replace_json_file("temporary", "destination")
+            replace.assert_called_once()
+            sleep.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

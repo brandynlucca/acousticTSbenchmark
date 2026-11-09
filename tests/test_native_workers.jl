@@ -92,3 +92,88 @@ end
     @test roundtrip["matrix"]["values"] == [1.0, 2.0, nothing, 4.0]
     @test roundtrip["amplitude"] == Dict("real" => 2, "imag" => 3)
 end
+
+
+@testset "Reference checkpoint retries remain atomic and bounded" begin
+    mktempdir() do directory
+        destination = joinpath(directory, "snapshot.json")
+        temporary = destination * ".tmp"
+        reference_save(destination, Dict("generation" => 1))
+        write(temporary, "replacement")
+        attempts = Ref(0)
+        function denied(source, target)
+            attempts[] += 1
+            throw(Base.IOError("locked fixture", Base.UV_EACCES))
+        end
+        started = time_ns()
+        @test_throws Base.IOError reference_rename(temporary, destination;
+            timeout_seconds=.10, rename_file=denied, windows=true)
+        @test (time_ns() - started) / 1e9 < 2
+        @test attempts[] >= 2
+        @test JSON3.read(read(destination, String))["generation"] == 1
+        @test read(temporary, String) == "replacement"
+        attempts[] = 0
+        @test_throws Base.IOError reference_rename(temporary, destination;
+            rename_file=denied, windows=false)
+        @test attempts[] == 1
+        attempts[] = 0
+        function unrelated(source, target)
+            attempts[] += 1
+            throw(Base.IOError("missing fixture", Base.UV_ENOENT))
+        end
+        @test_throws Base.IOError reference_rename(temporary, destination;
+            rename_file=unrelated, windows=true)
+        @test attempts[] == 1
+        @test JSON3.read(read(destination, String))["generation"] == 1
+        if Sys.iswindows()
+            reader = open(destination, "r")
+            denied_count = Ref(0)
+            function observed_rename(source, target)
+                try
+                    Base.Filesystem.rename(source, target)
+                catch exception
+                    denied_count[] += 1
+                    rethrow()
+                end
+            end
+            release = @async begin
+                sleep(.15)
+                close(reader)
+            end
+            try
+                reference_rename(temporary, destination; rename_file=observed_rename)
+            finally
+                isopen(reader) && close(reader)
+                wait(release)
+            end
+            @test denied_count[] >= 1
+            @test read(destination, String) == "replacement"
+            @test !isfile(temporary)
+        end
+    end
+end
+
+@testset "Reference error evidence retains original errors and numeric metadata" begin
+    failure = try
+        error("original fixture error")
+    catch exception
+        reference_failure(exception, "solving", catch_backtrace())
+    end
+    failure["elapsed_seconds"] = .25
+    failure["warmup_seconds"] = 0.0
+    failure["julia_threads"] = Threads.nthreads()
+    @test failure["status"] == "numerical_error"
+    @test occursin("original fixture error", failure["message"])
+    @test failure["phase"] == "solving"
+    roundtrip = JSON3.read(JSON3.write(json_safe(failure)), Dict{String,Any})
+    @test roundtrip["elapsed_seconds"] == .25
+    @test roundtrip["julia_threads"] == Threads.nthreads()
+    for exception in (Base.IOError("checkpoint fixture", Base.UV_EACCES),
+                      SystemError("checkpoint fixture", Int32(13)))
+        infrastructure = reference_failure(exception, "recorded")
+        infrastructure["elapsed_seconds"] = .5
+        @test infrastructure["status"] == "worker_error"
+        @test occursin("checkpoint fixture", infrastructure["message"])
+        @test infrastructure["elapsed_seconds"] == .5
+    end
+end
