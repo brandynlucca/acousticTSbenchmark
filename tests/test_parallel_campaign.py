@@ -2363,6 +2363,129 @@ class WholeSweepPolicyTests(unittest.TestCase):
             parallel.timeout_basis_frequency(task, packet['records'], new_basis)
 
 
+# Runtime-pool plan storage regressions.
+
+class PlanRuntimeStorageTests(unittest.TestCase):
+    def sample(self):
+        plan, task, runtime = pending_plan()
+        plan['datasets']['0.07']['environments'] = [
+            dict(runtime=copy.deepcopy(runtime), started_at='first', github_job='worker-1'),
+            dict(runtime=copy.deepcopy(runtime), started_at='second', github_job='worker-2'),
+            dict(started_at='missing'), dict(runtime=None, started_at='null'),
+            dict(runtime=dict(runtime, compiler='distinct'), started_at='third')]
+        plan['datasets']['0.1'] = dict(rows=[], environments=[])
+        plan['datasets']['0.001'] = dict(rows=[], configuration={})
+        plan['datasets']['0.07']['archived_rows'] = [dict(case_id='retained', status='error')]
+        return plan
+
+    def wire(self, payload, encoding=None):
+        raw = json.dumps(payload, allow_nan=False, separators=(',', ':')).encode()
+        return dict(encoding=encoding or parallel.PLAN_RUNTIME_ENCODING,
+                    sha256=parallel.hashlib.sha256(raw).hexdigest(),
+                    data=parallel.base64.b64encode(parallel.gzip.compress(raw, mtime=0)).decode())
+
+    def payload(self, packed):
+        return json.loads(parallel.gzip.decompress(parallel.base64.b64decode(packed['data'])))
+
+    def test_exact_roundtrip_retains_rows_tasks_archives_and_environment_order(self):
+        plan = self.sample()
+        before = copy.deepcopy(plan)
+        packed = parallel.pack(plan)
+        self.assertEqual(packed['encoding'], parallel.PLAN_RUNTIME_ENCODING)
+        self.assertEqual(plan, before)
+        restored = parallel.unpack(packed)
+        self.assertEqual(restored, before)
+        payload = self.payload(packed)
+        self.assertEqual(len(payload['runtimes']), 3)
+        self.assertEqual(payload['environment_runtimes']['0.07'], [0, 0, -1, 1, 2])
+        self.assertEqual(restored['tasks'], plan['tasks'])
+        self.assertEqual(restored['datasets']['0.07']['rows'], plan['datasets']['0.07']['rows'])
+
+    def test_reconstructed_runtime_objects_remain_independent(self):
+        plan = self.sample()
+        restored = parallel.unpack(parallel.pack(plan))
+        environments = restored['datasets']['0.07']['environments']
+        environments[0]['runtime']['source_shas']['acousticts'] = 'changed'
+        self.assertEqual(environments[1]['runtime'], plan['datasets']['0.07']['environments'][1]['runtime'])
+        self.assertNotEqual(environments[0]['runtime'], environments[1]['runtime'])
+
+    def test_legacy_plan_and_nonplan_documents_remain_supported(self):
+        plan = self.sample()
+        self.assertEqual(parallel.unpack(self.wire(plan, 'gzip-base64')), plan)
+        for value in [dict(campaign_id='100', status='active'), dict(records={}, environments={}),
+                      dict(datasets={}, tasks=[], source_ref='c'*40, campaign_id='100')]:
+            with self.subTest(value=value):
+                packed = parallel.pack(value)
+                self.assertEqual(packed['encoding'], 'gzip-base64')
+                self.assertEqual(parallel.unpack(packed), value)
+
+    def test_pooling_handles_plan_above_old_size_limit(self):
+        plan = self.sample()
+        plan['datasets']['0.07']['environments'] = [dict(runtime=dict(log='x'*4000), started_at=str(index))
+                                                   for index in range(8)]
+        original_size = len(json.dumps(plan, separators=(',', ':')).encode())
+        compact_size = len(json.dumps(parallel._plan_runtime_payload(plan), separators=(',', ':')).encode())
+        self.assertLess(compact_size, original_size)
+        with patch.object(parallel, 'MAX_BYTES', compact_size), \
+             patch.object(parallel, 'MAX_EXPANDED_PLAN_BYTES', original_size):
+            packed = parallel.pack(plan)
+            self.assertEqual(parallel.unpack(packed), plan)
+            with self.assertRaises(ValueError):
+                parallel.unpack(self.wire(plan, 'gzip-base64'))
+        with patch.object(parallel, 'MAX_BYTES', compact_size-1):
+            with self.assertRaisesRegex(ValueError, 'size limit'):
+                parallel.pack(plan)
+
+    def test_expanded_limit_uses_exact_json_length_before_copying(self):
+        plan = self.sample()
+        plan['datasets']['0.07']['environments'][0]['note'] = '?'
+        plan['datasets']['0.07']['environments'].append(dict(runtime=dict(unicode='?')))
+        exact = len(json.dumps(plan, separators=(',', ':')).encode())
+        packed = parallel.pack(plan)
+        with patch.object(parallel, 'MAX_EXPANDED_PLAN_BYTES', exact):
+            self.assertEqual(parallel.unpack(packed), plan)
+        with patch.object(parallel, 'MAX_EXPANDED_PLAN_BYTES', exact-1):
+            with self.assertRaisesRegex(ValueError, 'Expanded spectrum plan'):
+                parallel.pack(plan)
+            with patch.object(parallel.copy, 'deepcopy', side_effect=AssertionError('copied too early')):
+                with self.assertRaisesRegex(ValueError, 'Expanded spectrum plan'):
+                    parallel.unpack(packed)
+
+    def test_digest_tampering_is_rejected(self):
+        packed = parallel.pack(self.sample())
+        packed['sha256'] = '0'*64
+        with self.assertRaisesRegex(ValueError, 'digest'):
+            parallel.unpack(packed)
+
+    def test_invalid_pool_indexes_and_metadata_are_rejected(self):
+        original = self.payload(parallel.pack(self.sample()))
+        mutations = [
+            lambda value: value['environment_runtimes']['0.07'].__setitem__(0, 100),
+            lambda value: value['environment_runtimes']['0.07'].__setitem__(0, -2),
+            lambda value: value['environment_runtimes']['0.07'].__setitem__(0, True),
+            lambda value: value['environment_runtimes']['0.07'].pop(),
+            lambda value: value['environment_runtimes'].pop('0.07'),
+            lambda value: value['environment_runtimes'].__setitem__('extra', []),
+            lambda value: value['runtimes'].append(copy.deepcopy(value['runtimes'][0])),
+            lambda value: value['runtimes'].append(dict(unused=True)),
+            lambda value: value['plan']['datasets']['0.07']['environments'][0].__setitem__('runtime', {}),
+            lambda value: value.__setitem__('schema_version', True),
+            lambda value: value.__setitem__('extra', None),
+            lambda value: value.__setitem__('runtimes', {}),
+        ]
+        for index, mutation in enumerate(mutations):
+            with self.subTest(mutation=index):
+                changed = copy.deepcopy(original)
+                mutation(changed)
+                with self.assertRaises(ValueError):
+                    parallel.unpack(self.wire(changed))
+
+    def test_document_reader_supports_pooled_plan(self):
+        plan = self.sample()
+        raw = json.dumps(parallel.pack(plan), separators=(',', ':')).encode()
+        self.assertEqual(parallel._unpack_document(Mock(), raw), plan)
+
+
 if __name__ == "__main__":
     unittest.main()
 

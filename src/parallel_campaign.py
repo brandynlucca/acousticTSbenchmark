@@ -34,6 +34,8 @@ PLATFORMS = {'ubuntu-latest': ('ubuntu-24.04', 'Linux'),
              'windows-latest': ('windows-latest', 'Windows'),
              'macos-latest': ('macos-latest', 'Darwin')}
 MAX_BYTES = 512 * 1024 * 1024
+MAX_EXPANDED_PLAN_BYTES = 1024 * 1024 * 1024
+PLAN_RUNTIME_ENCODING = 'gzip-base64-plan-runtime-pool-v1'
 DOCUMENT_PART_BYTES = 4 * 1024 * 1024
 FREQUENCY_TIMEOUT_SECONDS = 300
 TIMEOUT_STREAK_LENGTH = 5
@@ -191,22 +193,121 @@ class GitDataStore:
         raise ValueError('Unsupported Git data operation')
 
 
+def _is_plan_document(value):
+    return (isinstance(value, dict) and 'campaign_id' in value and 'source_ref' in value
+            and isinstance(value.get('datasets'), dict) and isinstance(value.get('tasks'), list))
+
+
+def _plan_runtime_payload(value):
+    # Pool exact runtime values while retaining every environment and observation.
+    plan = dict(value, datasets={})
+    runtimes, runtime_indexes, environment_runtimes = [], {}, {}
+    for size, dataset in value['datasets'].items():
+        if not isinstance(dataset, dict):
+            raise ValueError('Invalid plan dataset')
+        saved = dict(dataset)
+        if 'environments' in dataset:
+            if not isinstance(dataset['environments'], list):
+                raise ValueError('Invalid plan environments')
+            environments, indexes = [], []
+            for environment in dataset['environments']:
+                if not isinstance(environment, dict):
+                    raise ValueError('Invalid plan environment')
+                compact = dict(environment)
+                index = -1
+                if 'runtime' in compact:
+                    runtime = compact.pop('runtime')
+                    key = json.dumps(runtime, allow_nan=False, separators=(',', ':'))
+                    if key not in runtime_indexes:
+                        runtime_indexes[key] = len(runtimes)
+                        runtimes.append(runtime)
+                    index = runtime_indexes[key]
+                environments.append(compact)
+                indexes.append(index)
+            saved['environments'] = environments
+            environment_runtimes[size] = indexes
+        plan['datasets'][size] = saved
+    return dict(schema_version=1, plan=plan, runtimes=runtimes,
+                environment_runtimes=environment_runtimes)
+
+
+def _check_plan_runtime_payload(payload):
+    if (not isinstance(payload, dict)
+            or set(payload) != {'schema_version', 'plan', 'runtimes', 'environment_runtimes'}
+            or type(payload['schema_version']) is not int or payload['schema_version'] != 1
+            or not _is_plan_document(payload['plan'])
+            or not isinstance(payload['runtimes'], list)
+            or not isinstance(payload['environment_runtimes'], dict)):
+        raise ValueError('Invalid pooled plan envelope')
+    plan, runtimes, indexes = payload['plan'], payload['runtimes'], payload['environment_runtimes']
+    lengths, unique = [], set()
+    for runtime in runtimes:
+        key = json.dumps(runtime, allow_nan=False, separators=(',', ':'))
+        if key in unique:
+            raise ValueError('Duplicate pooled plan runtime')
+        unique.add(key)
+        lengths.append(len(key))
+    # Count exact expanded JSON bytes before allocating independent runtime copies.
+    encoder = json.JSONEncoder(allow_nan=False, separators=(',', ':'))
+    expanded = sum(map(len, encoder.iterencode(plan)))
+    expected, used = set(), set()
+    for size, dataset in plan['datasets'].items():
+        if not isinstance(dataset, dict):
+            raise ValueError('Invalid pooled plan dataset')
+        if 'environments' not in dataset:
+            continue
+        expected.add(size)
+        environments, references = dataset['environments'], indexes.get(size)
+        if (not isinstance(environments, list) or not isinstance(references, list)
+                or len(environments) != len(references)):
+            raise ValueError('Pooled plan environment indexes differ from the dataset')
+        for environment, reference in zip(environments, references):
+            if (not isinstance(environment, dict) or 'runtime' in environment
+                    or type(reference) is not int or not -1 <= reference < len(runtimes)):
+                raise ValueError('Invalid pooled plan runtime reference')
+            if reference >= 0:
+                used.add(reference)
+                expanded += lengths[reference] + len('"runtime":') + bool(environment)
+                if expanded > MAX_EXPANDED_PLAN_BYTES:
+                    raise ValueError('Expanded spectrum plan exceeds its size limit')
+    if set(indexes) != expected or used != set(range(len(runtimes))):
+        raise ValueError('Pooled plan contains unmatched runtime data')
+    if expanded > MAX_EXPANDED_PLAN_BYTES:
+        raise ValueError('Expanded spectrum plan exceeds its size limit')
+
+
 def pack(value):
-    raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
+    pooled = _is_plan_document(value) and any(
+        isinstance(dataset, dict) and 'environments' in dataset for dataset in value['datasets'].values())
+    payload = _plan_runtime_payload(value) if pooled else value
+    if pooled:
+        _check_plan_runtime_payload(payload)
+    raw = json.dumps(payload, allow_nan=False, separators=(',', ':')).encode()
     if len(raw) > MAX_BYTES:
         raise ValueError('Spectrum state exceeds its size limit')
-    return dict(encoding='gzip-base64', sha256=hashlib.sha256(raw).hexdigest(),
+    return dict(encoding=PLAN_RUNTIME_ENCODING if pooled else 'gzip-base64',
+                sha256=hashlib.sha256(raw).hexdigest(),
                 data=base64.b64encode(gzip.compress(raw, mtime=0)).decode())
 
 
 def unpack(value):
-    if value.get('encoding') != 'gzip-base64':
+    encoding = value.get('encoding')
+    if encoding not in ('gzip-base64', PLAN_RUNTIME_ENCODING):
         raise ValueError('Unrecognized spectrum state encoding')
     with gzip.GzipFile(fileobj=io.BytesIO(base64.b64decode(value['data'], validate=True))) as stream:
         raw = stream.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES or hashlib.sha256(raw).hexdigest() != value['sha256']:
         raise ValueError('Spectrum state content does not match its digest')
-    return json.loads(raw)
+    payload = json.loads(raw)
+    if encoding == 'gzip-base64':
+        return payload
+    _check_plan_runtime_payload(payload)
+    plan, runtimes = payload['plan'], payload['runtimes']
+    for size, references in payload['environment_runtimes'].items():
+        for environment, reference in zip(plan['datasets'][size]['environments'], references):
+            if reference >= 0:
+                environment['runtime'] = copy.deepcopy(runtimes[reference])
+    return plan
 
 
 def identifier(value):
