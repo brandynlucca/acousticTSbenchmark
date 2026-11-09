@@ -2121,6 +2121,39 @@ class AtomicCompletionAndPublicationTests(unittest.TestCase):
 
 
 class ArtifactRecoveryCacheTests(unittest.TestCase):
+    def test_complete_published_spectrum_skips_oversized_archive(self):
+        plan, task, runtime, current, store, wave, units = self.fixture()
+        current = fixtures.actual_packet(plan, task, runtime, range(len(task["cases"])), timeout=False)
+        current["state"] = "complete"
+        self.assertEqual(current["state"], "complete")
+        artifacts = [dict(id=1, name=f"spectrum-{wave['workers'][0]}-1", size_in_bytes=7*1024**3)]
+        store.api.archive = Mock(side_effect=AssertionError("Published results need no archive"))
+        with patch.object(parallel,"get_document",side_effect=store.get), \
+             patch.object(parallel,"all_artifacts",return_value=artifacts), \
+             patch.object(parallel,"read_task_packet",return_value=current), \
+             patch.object(parallel,"merge_task_packet") as merge:
+            parallel.recover_artifacts(store.api,plan,wave)
+        store.api.archive.assert_not_called()
+        merge.assert_not_called()
+        self.assertEqual(store.writes,[])
+
+    def test_complete_marker_cannot_hide_missing_or_invalid_observations(self):
+        for mutation in ("missing", "source"):
+            with self.subTest(mutation=mutation):
+                plan, task, runtime, current, store, wave, units = self.fixture()
+                current = fixtures.actual_packet(plan, task, runtime, range(len(task["cases"])), timeout=False)
+                current["state"] = "complete"
+                if mutation == "missing":
+                    current["records"].pop(next(iter(current["records"])))
+                else:
+                    current["source_ref"] = "f" * 40
+                artifacts=[dict(id=1,name=f"spectrum-{wave['workers'][0]}-1")]
+                with patch.object(parallel,"get_document",side_effect=store.get), \
+                     patch.object(parallel,"all_artifacts",return_value=artifacts), \
+                     patch.object(parallel,"read_task_packet",return_value=current):
+                    with self.assertRaises(ValueError):
+                        parallel.recover_artifacts(store.api,plan,wave)
+
     def fixture(self, worker_count=2, recorded=range(16)):
         plan, runtime = fixtures.long_plan()
         task = plan["tasks"][0]

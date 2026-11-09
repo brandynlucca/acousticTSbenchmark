@@ -979,6 +979,24 @@ def recover_artifacts(api, plan, wave):
             current, sha = get_document(api, path)
             if current and current.get('state') == 'complete':
                 continue
+        if frequency_queue:
+            claimed = {queue['units'][identity]['task_id'] for identity, owner in queue['claims'].items()
+                       if owner == match[1]}
+            if claimed - tasks.keys():
+                raise ValueError('Recovery worker claims a spectrum outside the allocation')
+            complete = bool(claimed)
+            for task_id in sorted(claimed):
+                if task_id not in recovered_tasks:
+                    recovered_tasks[task_id] = read_task_packet(api, plan, tasks[task_id])
+                published = recovered_tasks[task_id]
+                if published is None:
+                    complete = False
+                    continue
+                validate_packet(plan, tasks[task_id], published)
+                complete = complete and published.get('state') == 'complete'
+            if complete:
+                print(f'RECOVERY artifact={artifact["id"]} already_complete=true tasks={len(claimed)}', flush=True)
+                continue
         print(f'RECOVERY artifact={artifact["id"]} stage=download', flush=True)
         raw = api.archive(artifact['id'])
         if artifact.get('digest') and artifact['digest'] != 'sha256:' + hashlib.sha256(raw).hexdigest():
