@@ -434,6 +434,7 @@ jobs:
         name: spectrum-${{ matrix.id }}-${{ github.run_attempt }}
         path: |-
           ${{ runner.temp }}/spectrum
+          !${{ runner.temp }}/spectrum/**/fort.*
           ${{ runner.temp }}/benchmark-env/runtime.json
           ${{ runner.temp }}/benchmark-env/prepare.log
         if-no-files-found: warn
