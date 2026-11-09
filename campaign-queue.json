@@ -164,8 +164,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "4"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "prol-remaining-a0-1",
@@ -185,8 +185,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "4"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "liquid-existing",
@@ -206,8 +206,8 @@
         "semimajor_axes": "0.01",
         "additional_repetitions": "4"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "liquid-new-a0-001",
@@ -227,8 +227,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "liquid-new-a0-07",
@@ -248,8 +248,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "liquid-new-a0-1",
@@ -269,13 +269,13 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
+      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+      "dispatch_ref": "spectra-runtime-pool-20261109"
     },
     {
       "key": "acousticts-macos",
-      "source_ref": "f55e4bb9ab3e4d9b182a77f0aa2f5646011e201c",
-      "dispatch_ref": "spectra-platform-queue-handoff-20261108",
+      "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
+      "dispatch_ref": "spectra-platform-runtime-pool-20261109",
       "inputs": {
         "campaign_id": "41692575909",
         "platform": "macos-latest",
@@ -284,8 +284,8 @@
     },
     {
       "key": "acousticts-windows",
-      "source_ref": "f55e4bb9ab3e4d9b182a77f0aa2f5646011e201c",
-      "dispatch_ref": "spectra-platform-queue-handoff-20261108",
+      "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
+      "dispatch_ref": "spectra-platform-runtime-pool-20261109",
       "inputs": {
         "campaign_id": "41694015656",
         "platform": "windows-latest",
@@ -425,32 +425,10 @@
       },
       "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42651798450"
-    },
-    "prol-remaining-a0-07": {
-      "run_id": 42660538323,
-      "campaign_id": "42660538323",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-09T17:01:25.436654+00:00",
+  "updated_at": "2026-11-09T17:36:05.494181+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -542,6 +520,53 @@
           ]
         }
       ]
+    },
+    {
+      "recorded_at": "2026-11-09T17:36:05.494181+00:00",
+      "reason": "Planning exceeded the serialized-state size limit before publication or worker dispatch. Pool exact repeated runtime metadata and replace the unstarted campaign.",
+      "failed_request": {
+        "key": "prol-remaining-a0-07",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.07",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "dispatch_ref": "spectra-queue-handoff-20261108"
+      },
+      "failed_receipt": {
+        "run_id": 42660538323,
+        "campaign_id": "42660538323",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.07",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
+      }
     }
   ]
 }
