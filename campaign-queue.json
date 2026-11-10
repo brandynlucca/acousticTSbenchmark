@@ -211,7 +211,14 @@
         "additional_repetitions": "4"
       },
       "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109"
+      "dispatch_ref": "spectra-runtime-pool-20261109",
+      "approved_controllers": [
+        "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+        "862f94c67ee7e3d39112af905ca0ecd5f46c6888"
+      ],
+      "interrupted_runs": [
+        42763596562
+      ]
     },
     {
       "key": "liquid-new-a0-001",
@@ -231,8 +238,8 @@
         "semimajor_axes": "0.001",
         "additional_repetitions": "5"
       },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109"
+      "source_ref": "88ec8c05e3358a668e3a777d8c56c918f0827606",
+      "dispatch_ref": "spectra-liquid-locked-20261110"
     },
     {
       "key": "liquid-new-a0-07",
@@ -252,8 +259,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109"
+      "source_ref": "88ec8c05e3358a668e3a777d8c56c918f0827606",
+      "dispatch_ref": "spectra-liquid-locked-20261110"
     },
     {
       "key": "liquid-new-a0-1",
@@ -273,8 +280,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109"
+      "source_ref": "88ec8c05e3358a668e3a777d8c56c918f0827606",
+      "dispatch_ref": "spectra-liquid-locked-20261110"
     },
     {
       "key": "acousticts-macos",
