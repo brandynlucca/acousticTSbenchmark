@@ -2519,6 +2519,36 @@ class PlanRuntimeStorageTests(unittest.TestCase):
         self.assertEqual(parallel._unpack_document(Mock(), raw), plan)
 
 
+
+
+class ArtifactOnlyControllerTests(unittest.TestCase):
+    def test_only_exact_checkpoint_path_change_is_accepted(self):
+        prefix = 'worker: unchanged\n        path: |-\n'
+        suffix = '          ${{ runner.temp }}/benchmark-env/runtime.json\ntimeout: unchanged\n'
+        old = '          ${{ runner.temp }}/spectrum\n'
+        excluded = '          !${{ runner.temp }}/spectrum/**/fort.*\n'
+        new = ''.join('          ${{ runner.temp }}/spectrum/**/' + name + '\n' for name in
+                      ('checkpoint.json', 'manifest.json', 'results.json', 'environments/*.json'))
+        files = [dict(filename='.github/workflows/parallel-spectra.yml', status='modified')]
+        for exclusion in ('', excluded):
+            before = prefix + old + exclusion + suffix
+            after = prefix + new + suffix
+            for candidate, accepted in ((after, True), (after.replace('timeout: unchanged', 'timeout: 999'), False),
+                                        (after.replace('worker: unchanged', 'worker: new solver'), False),
+                                        (after.replace('checkpoint.json', '*.json'), False), (before, False)):
+                api = Mock()
+                api.request.side_effect = [dict(encoding='base64', size=len(text),
+                    content=base64.b64encode(text.encode()).decode()) for text in (before, candidate)]
+                self.assertEqual(parallel.controller_files_allowed(api, files, 'a'*40, 'b'*40), accepted)
+
+    def test_protected_files_and_unbounded_workflow_reads_are_rejected(self):
+        for filename in ('sources.lock.json', 'benchmark.json', 'src/worker_python.py'):
+            self.assertFalse(parallel.controller_files_allowed(Mock(), [dict(filename=filename)], 'a', 'b'))
+        api = Mock()
+        api.request.return_value = dict(encoding='base64', size=1024*1024, content='')
+        self.assertFalse(parallel.controller_files_allowed(api,
+            [dict(filename='.github/workflows/parallel-spectra.yml', status='modified')], 'a', 'b'))
+
 if __name__ == "__main__":
     unittest.main()
 

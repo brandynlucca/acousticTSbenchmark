@@ -1052,6 +1052,12 @@ class ParallelControllerUpgradeTests(unittest.TestCase):
                 comparison = next(iter(api.comparisons.values()))
                 comparison["files"].append(dict(filename=path, status="modified"))
                 saved["controller_history"][0]["files"].append(path)
+                request = api.request
+                def with_workflow(method, endpoint, body=None):
+                    if endpoint.startswith('/contents/.github/workflows/parallel-spectra.yml?ref='):
+                        return dict(encoding='base64', size=3, content=base64.b64encode(b'bad').decode())
+                    return request(method, endpoint, body)
+                api.request = with_workflow
                 self.assertEqual(self.advance(api)["status"], "blocked")
                 self.assertEqual(len(api.dispatches()), 1)
 

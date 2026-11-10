@@ -449,6 +449,7 @@ def parallel_state_document(api, campaign):
 
 def approved_parallel_controller(api, request, saved):
     """Verify applied controller changes without changing the original dispatch identity."""
+    from parallel_campaign import controller_files_allowed
     approved = request.get("approved_controllers", [request["source_ref"]])
     current = saved.get("controller_ref", request["source_ref"])
     if current not in approved:
@@ -481,8 +482,7 @@ def approved_parallel_controller(api, request, saved):
         files = comparison.get("files")
         if (comparison.get("status") != "ahead" or not isinstance(files, list) or
                 not files or len(files) >= 300 or
-                any(not isinstance(item, dict) or item.get("filename") not in PARALLEL_CONTROLLER_FILES
-                    or item.get("status") == "renamed" for item in files)):
+                not controller_files_allowed(api, files, previous, target, PARALLEL_CONTROLLER_FILES)):
             raise ValueError("Controller change modifies protected numerical sources or adapters")
         if set(changed) != {item["filename"] for item in files}:
             raise ValueError("Recorded controller files differ from the verified revision")
