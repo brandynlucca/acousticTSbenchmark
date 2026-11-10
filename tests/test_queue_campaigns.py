@@ -793,6 +793,46 @@ class ParallelQueueTests(unittest.TestCase):
             self.assertEqual(self.advance(api)["status"], "paused")
             self.assertEqual(len(api.dispatches()), 1)
 
+    def test_completed_shared_queue_advances_after_worker_setup_failure(self):
+        api, saved = self.ready()
+        saved["waves"][0]["tasks"] = ["task"]
+        api.finish(101, "failure")
+        api.runs[101]["run_attempt"] = 1
+        finalizer = dict(name="finish", run_id=101, run_attempt=1, status="completed", conclusion="success",
+            steps=[dict(name="Publish merged results and queue unfinished tasks", status="completed", conclusion="success")])
+        original = api.request
+        def request(method, path, body=None):
+            if path.endswith("/jobs?filter=latest&per_page=100"):
+                return dict(total_count=1, jobs=[finalizer])
+            return original(method,path,body)
+        api.ref_sha = "b" * 40
+        with patch.object(api,"request",side_effect=request):
+            self.assertEqual(self.advance(api)["status"], "dispatched")
+        self.assertEqual(len(api.dispatches()), 2)
+
+    def test_failed_workflow_requires_complete_tasks_and_exact_final_publication(self):
+        for mutation in ("missing_task", "missing_finish", "failed_finish", "wrong_run", "wrong_attempt", "missing_step"):
+            with self.subTest(mutation=mutation):
+                api,saved = self.ready()
+                saved["waves"][0]["tasks"] = ["task", "missing"] if mutation == "missing_task" else ["task"]
+                api.finish(101, "failure")
+                api.runs[101]["run_attempt"] = 1
+                finalizer = dict(name="finish", run_id=101, run_attempt=1, status="completed", conclusion="success",
+                    steps=[dict(name="Publish merged results and queue unfinished tasks", status="completed", conclusion="success")])
+                if mutation == "failed_finish": finalizer["conclusion"] = "failure"
+                if mutation == "wrong_run": finalizer["run_id"] = 999
+                if mutation == "wrong_attempt": finalizer["run_attempt"] = 2
+                if mutation == "missing_step": finalizer["steps"] = []
+                jobs = [] if mutation == "missing_finish" else [finalizer]
+                original = api.request
+                def request(method,path,body=None):
+                    if path.endswith("/jobs?filter=latest&per_page=100"):
+                        return dict(total_count=len(jobs),jobs=jobs)
+                    return original(method,path,body)
+                with patch.object(api,"request",side_effect=request):
+                    self.assertEqual(self.advance(api)["status"], "blocked")
+                self.assertEqual(len(api.dispatches()), 1)
+
     def test_incomplete_publication_and_conflicting_platform_link_block(self):
         changes = [dict(blocked=["task"]), dict(publication_pending=True),
                    dict(completed=None), dict(status="unknown"),

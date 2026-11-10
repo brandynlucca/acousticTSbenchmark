@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -71,10 +72,23 @@ def liquid_linux_libraries(executable, workspace):
     """Provide the stock executable's MPFR ABI without changing system libraries."""
     archive = workspace / "libmpfr4_3.1.6-1_amd64.deb"
     if not archive.exists():
-        with urllib.request.urlopen(LIQUID_MPFR_URL, timeout=min(30, remaining_budget())) as response:
-            content = response.read(1024 * 1024 + 1)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(LIQUID_MPFR_URL, timeout=min(30, remaining_budget())) as response:
+                    content = response.read(1024 * 1024 + 1)
+                break
+            except (OSError, http.client.IncompleteRead) as error:
+                code = getattr(error, "code", None)
+                if attempt == 2 or code is not None and code != 429 and not 500 <= code < 600:
+                    raise
+                delay = min(2 ** attempt, remaining_budget())
+                print(f"LIQUID_LIBRARY_DOWNLOAD_RETRY attempt={attempt + 1}/3 "
+                      f"error={type(error).__name__} delay_seconds={delay:g}", flush=True)
+                time.sleep(delay)
         if len(content) > 1024 * 1024:
             raise ValueError("Legacy MPFR package exceeds the expected size")
+        if hashlib.sha256(content).hexdigest() != LIQUID_MPFR_SHA256:
+            raise ValueError("Legacy MPFR package checksum does not match the pinned Ubuntu archive")
         archive.write_bytes(content)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != LIQUID_MPFR_SHA256:
         raise ValueError("Legacy MPFR package checksum does not match the pinned Ubuntu archive")

@@ -298,7 +298,7 @@ def recover_intent(api, state, sha):
 
 
 PARALLEL_WORKFLOW = ".github/workflows/parallel-spectra.yml"
-PARALLEL_CONTROLLER_FILES = {"src/setup_julia.jl", "src/parallel_campaign.py", "src/publish_progress.py",
+PARALLEL_CONTROLLER_FILES = {"src/setup_julia.jl", "src/prepare.py", "tests/test_prepare.py", "src/parallel_campaign.py", "src/publish_progress.py",
     "src/dataset.py", "src/report.py", "tests/test_parallel_campaign.py",
     "tests/test_publish_progress.py", "tests/test_dataset.py"}
 PARALLEL_INPUTS = {"mode", "software", "semimajor_axes", "baseline_runs", "aspect_ratios",
@@ -489,6 +489,32 @@ def approved_parallel_controller(api, request, saved):
     return current
 
 
+def successful_parallel_publication(api, latest, saved):
+    """Recognize completed shared work despite a failed redundant worker slot."""
+    if latest.get("conclusion") == "success":
+        return True
+    if latest.get("conclusion") != "failure":
+        return False
+    required = {task for wave in saved["waves"] for task in wave.get("tasks", [])}
+    if not required or not required.issubset(set(saved["completed"])):
+        return False
+    jobs = api.request("GET", f"/actions/runs/{latest['id']}/jobs?filter=latest&per_page=100")
+    entries = jobs.get("jobs", [])
+    if jobs.get("total_count") != len(entries):
+        return False
+    finalizers = [job for job in entries if job.get("name") == "finish"]
+    if len(finalizers) != 1:
+        return False
+    job = finalizers[0]
+    return (job.get("run_id") == latest["id"] and
+            job.get("run_attempt") == latest.get("run_attempt") and
+            type(job.get("run_attempt")) is int and
+            job.get("status") == "completed" and job.get("conclusion") == "success" and
+            any(step.get("name") == "Publish merged results and queue unfinished tasks" and
+                step.get("status") == "completed" and step.get("conclusion") == "success"
+                for step in job.get("steps", [])))
+
+
 def parallel_predecessor(api, state, sha):
     request = state["requests"][len(state["dispatched"])-1]
     receipt = state["dispatched"][request["key"]]
@@ -554,7 +580,7 @@ def parallel_predecessor(api, state, sha):
     if status != "complete":
         return pause(api, state, sha, "Unknown parallel campaign status", "blocked")
     if (saved.get("blocked") or saved.get("publication_pending") or
-            not isinstance(saved.get("completed"), list) or latest.get("conclusion") != "success"):
+            not isinstance(saved.get("completed"), list) or not successful_parallel_publication(api, latest, saved)):
         return pause(api, state, sha, "Parallel campaign completion lacks a successful final publication", "blocked")
     if saved.get("next_platform_campaign"):
         return pause(api, state, sha, "An existing platform continuation conflicts with the ordered sequence", "blocked")
