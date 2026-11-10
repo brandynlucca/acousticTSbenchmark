@@ -298,7 +298,7 @@ def recover_intent(api, state, sha):
 
 
 PARALLEL_WORKFLOW = ".github/workflows/parallel-spectra.yml"
-PARALLEL_CONTROLLER_FILES = {"src/parallel_campaign.py", "src/publish_progress.py",
+PARALLEL_CONTROLLER_FILES = {"src/setup_julia.jl", "src/parallel_campaign.py", "src/publish_progress.py",
     "src/dataset.py", "src/report.py", "tests/test_parallel_campaign.py",
     "tests/test_publish_progress.py", "tests/test_dataset.py"}
 PARALLEL_INPUTS = {"mode", "software", "semimajor_axes", "baseline_runs", "aspect_ratios",
