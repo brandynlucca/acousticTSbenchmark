@@ -350,6 +350,41 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(runtime["availability"]["echosms"]["status"], "setup_error")
         self.assertEqual(runtime["availability"]["prol_spheroid"]["status"], "ready")
 
+    def test_liquid_download_retries_read_timeout_before_verified_installation(self):
+        content = b"verified package after interrupted download"
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.side_effect = TimeoutError("network read timed out")
+        def extract(command, **kwargs):
+            if command[0] == "dpkg-deb":
+                library = Path(command[-1]) / "usr/lib/x86_64-linux-gnu/libmpfr.so.4"
+                library.parent.mkdir(parents=True)
+                library.write_bytes(b"verified library")
+            return "libmpfr.so.4 => verified library"
+        with patch.object(prepare.urllib.request, "urlopen", side_effect=[response, io.BytesIO(content)]) as download, \
+                patch.object(prepare, "LIQUID_MPFR_SHA256", hashlib.sha256(content).hexdigest()), \
+                patch.object(prepare.time, "sleep") as sleep, \
+                patch.object(prepare, "execute", side_effect=extract):
+            _, evidence = prepare.liquid_linux_libraries(self.path / "pro_sphwv", self.path)
+        self.assertEqual(download.call_count, 2)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(evidence["package_sha256"], hashlib.sha256(content).hexdigest())
+        self.assertEqual((self.path / "libmpfr4_3.1.6-1_amd64.deb").read_bytes(), content)
+
+    def test_liquid_download_exhaustion_and_corrupt_data_leave_no_cached_package(self):
+        for invalid in (False, True):
+            with self.subTest(invalid=invalid):
+                response = io.BytesIO(b"corrupt archive") if invalid else None
+                with patch.object(prepare.urllib.request, "urlopen", return_value=response,
+                        side_effect=None if invalid else TimeoutError("download stalled")) as download, \
+                        patch.object(prepare.time, "sleep"), patch.object(prepare, "execute") as execute:
+                    with self.assertRaises(ValueError if invalid else TimeoutError):
+                        prepare.liquid_linux_libraries(self.path / "pro_sphwv", self.path)
+                self.assertEqual(download.call_count, 1 if invalid else 3)
+                execute.assert_not_called()
+                self.assertFalse((self.path / "libmpfr4_3.1.6-1_amd64.deb").exists())
+
     def test_liquid_legacy_library_is_verified_and_scoped_to_native_loading(self):
         package = b"verified package fixture"
         package_hash = hashlib.sha256(package).hexdigest()
