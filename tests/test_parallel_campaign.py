@@ -617,7 +617,7 @@ class OrderedQueueHandoffTests(unittest.TestCase):
 
 class DashboardTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'),'Node.js exercises the actual dashboard aggregation')
-    def test_means_ranges_complete_passes_and_failed_samples(self):
+    def test_means_casewise_ranges_and_failed_samples(self):
         import report
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/'index.html'
@@ -631,11 +631,11 @@ const rows=[];
 for(const physical_id of ['p','q'])for(const [index,elapsed_seconds] of [1,2,9].entries())
  rows.push({software:'acousticts',source_sha:'a',physical_id,status:'ok',repetition:index+1,elapsed_seconds});
 const complete=timingSummary(rows,2);
-assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.passes,[2,4,18]);
+assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.totalRange,[2,18]);assert.deepEqual(complete.averageRange,[1,9]);
 rows[5].status='timeout';
 const partial=timingSummary(rows,2);
-assert.equal(partial.total,5.5);assert.deepEqual(partial.passes,[2,4]);
-assert.deepEqual(timingSummary(rows,3).passes,[]);
+assert.equal(partial.total,5.5);assert.deepEqual(partial.totalRange,[2,11]);assert.deepEqual(partial.averageRange,[1,5.5]);
+assert.deepEqual(timingSummary(rows,3).totalRange,partial.totalRange);
 assert.equal(timingSummary([...rows,{...rows[0],source_sha:'b',elapsed_seconds:10}],2).points.length,3);
 const comparisons=[];
 for(const [index,errors] of [[.03,.04],[.06,.08]].entries())for(const [physical,delta_ts_db] of errors.entries())
@@ -2518,6 +2518,36 @@ class PlanRuntimeStorageTests(unittest.TestCase):
         raw = json.dumps(parallel.pack(plan), separators=(',', ':')).encode()
         self.assertEqual(parallel._unpack_document(Mock(), raw), plan)
 
+
+
+
+class ArtifactOnlyControllerTests(unittest.TestCase):
+    def test_only_exact_checkpoint_path_change_is_accepted(self):
+        prefix = 'worker: unchanged\n        path: |-\n'
+        suffix = '          ${{ runner.temp }}/benchmark-env/runtime.json\ntimeout: unchanged\n'
+        old = '          ${{ runner.temp }}/spectrum\n'
+        excluded = '          !${{ runner.temp }}/spectrum/**/fort.*\n'
+        new = ''.join('          ${{ runner.temp }}/spectrum/**/' + name + '\n' for name in
+                      ('checkpoint.json', 'manifest.json', 'results.json', 'environments/*.json'))
+        files = [dict(filename='.github/workflows/parallel-spectra.yml', status='modified')]
+        for exclusion in ('', excluded):
+            before = prefix + old + exclusion + suffix
+            after = prefix + new + suffix
+            for candidate, accepted in ((after, True), (after.replace('timeout: unchanged', 'timeout: 999'), False),
+                                        (after.replace('worker: unchanged', 'worker: new solver'), False),
+                                        (after.replace('checkpoint.json', '*.json'), False), (before, False)):
+                api = Mock()
+                api.request.side_effect = [dict(encoding='base64', size=len(text),
+                    content=base64.b64encode(text.encode()).decode()) for text in (before, candidate)]
+                self.assertEqual(parallel.controller_files_allowed(api, files, 'a'*40, 'b'*40), accepted)
+
+    def test_protected_files_and_unbounded_workflow_reads_are_rejected(self):
+        for filename in ('sources.lock.json', 'benchmark.json', 'src/worker_python.py'):
+            self.assertFalse(parallel.controller_files_allowed(Mock(), [dict(filename=filename)], 'a', 'b'))
+        api = Mock()
+        api.request.return_value = dict(encoding='base64', size=1024*1024, content='')
+        self.assertFalse(parallel.controller_files_allowed(api,
+            [dict(filename='.github/workflows/parallel-spectra.yml', status='modified')], 'a', 'b'))
 
 if __name__ == "__main__":
     unittest.main()

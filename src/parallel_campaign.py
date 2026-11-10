@@ -1234,6 +1234,38 @@ def write_outputs(values):
                 stream.write(f'{key}={text}\n')
 
 
+def controller_files_allowed(api, files, previous, current, allowed=None):
+    """Allow an artifact-only workflow repair without changing execution settings."""
+    allowed = CONTROLLER_FILES if allowed is None else allowed
+    for item in files:
+        if not isinstance(item, dict) or item.get('status') == 'renamed':
+            return False
+        path = item.get('filename')
+        if path in allowed:
+            continue
+        if path != '.github/workflows/parallel-spectra.yml' or item.get('status') != 'modified':
+            return False
+        texts = []
+        for revision in (previous, current):
+            document = api.request('GET', f'/contents/{path}?ref={revision}')
+            if (document.get('encoding') != 'base64' or
+                    not isinstance(document.get('size'), int) or document['size'] > 256 * 1024):
+                return False
+            texts.append(base64.b64decode(document['content'], validate=False).decode('utf-8'))
+        old = '          ${{ runner.temp }}/spectrum\n'
+        excluded = '          !${{ runner.temp }}/spectrum/**/fort.*\n'
+        new = ''.join('          ${{ runner.temp }}/spectrum/**/' + name + '\n' for name in
+                      ('checkpoint.json', 'manifest.json', 'results.json', 'environments/*.json'))
+        before, after = texts
+        if before.count(old) != 1:
+            return False
+        if old + excluded in before:
+            old += excluded
+        if before.replace(old, new, 1) != after:
+            return False
+    return True
+
+
 def select_controller(api, plan, state):
     """Permit a recorded orchestration repair while retaining the original numerical plan."""
     current = os.environ['GITHUB_SHA']
@@ -1243,7 +1275,7 @@ def select_controller(api, plan, state):
     comparison = api.request('GET', f'/compare/{previous}...{current}')
     files = comparison.get('files', [])
     if (comparison.get('status') != 'ahead' or not files or len(files) >= 300 or
-            any(item['filename'] not in CONTROLLER_FILES or item.get('status') == 'renamed' for item in files)):
+            not controller_files_allowed(api, files, previous, current)):
         raise ValueError('A controller repair must leave numerical sources, inputs and timing adapters unchanged')
     tag = f"spectra-{plan['campaign_id']}-controller-{current[:12]}"
     try:
