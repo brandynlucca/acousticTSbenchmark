@@ -551,10 +551,32 @@
       },
       "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42958957433"
+    },
+    "liquid-new-a0-1": {
+      "run_id": 43049632023,
+      "campaign_id": "43049632023",
+      "inputs": {
+        "mode": "repeat",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "frequency_start_khz": "1",
+        "frequency_end_khz": "99",
+        "frequency_interval_khz": "2",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330",
+        "platform": "ubuntu-latest",
+        "software": "liquid_spheroid",
+        "semimajor_axes": "0.1",
+        "additional_repetitions": "5"
+      },
+      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43049632023"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-11T15:33:59.151907+00:00",
+  "updated_at": "2026-11-11T16:22:42.576241+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -694,27 +716,5 @@
         "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
       }
     }
-  ],
-  "dispatch_intent": {
-    "key": "liquid-new-a0-1",
-    "inputs": {
-      "mode": "repeat",
-      "aspect_ratios": "1.001,1.01,5,10,50,100",
-      "incidences_deg": "0,37,90",
-      "boundaries": "rigid,pressure_release,liquid,gas",
-      "frequency_start_khz": "1",
-      "frequency_end_khz": "99",
-      "frequency_interval_khz": "2",
-      "max_parallel": "16",
-      "automatic_continue": "true",
-      "timing_budget_minutes": "330",
-      "platform": "ubuntu-latest",
-      "software": "liquid_spheroid",
-      "semimajor_axes": "0.1",
-      "additional_repetitions": "5"
-    },
-    "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
-    "dispatch_ref": "spectra-batched-checkpoints-20261110",
-    "created_at": "2026-11-11T15:33:59.151886+00:00"
-  }
+  ]
 }
