@@ -240,7 +240,11 @@
         "additional_repetitions": "5"
       },
       "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
-      "dispatch_ref": "spectra-liquid-checkpoints-20261110"
+      "dispatch_ref": "spectra-liquid-checkpoints-20261110",
+      "approved_controllers": [
+        "362776017059f00c8e675493dd7f613b22f27b4d",
+        "31fa27afebe664a949eaea4f3610c3338fada13f"
+      ]
     },
     {
       "key": "liquid-new-a0-07",
@@ -260,8 +264,8 @@
         "semimajor_axes": "0.07",
         "additional_repetitions": "5"
       },
-      "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
-      "dispatch_ref": "spectra-liquid-checkpoints-20261110"
+      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+      "dispatch_ref": "spectra-batched-checkpoints-20261110"
     },
     {
       "key": "liquid-new-a0-1",
@@ -281,8 +285,8 @@
         "semimajor_axes": "0.1",
         "additional_repetitions": "5"
       },
-      "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
-      "dispatch_ref": "spectra-liquid-checkpoints-20261110"
+      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+      "dispatch_ref": "spectra-batched-checkpoints-20261110"
     },
     {
       "key": "acousticts-macos",
