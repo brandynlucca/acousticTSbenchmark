@@ -617,7 +617,7 @@ class OrderedQueueHandoffTests(unittest.TestCase):
 
 class DashboardTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'),'Node.js exercises the actual dashboard aggregation')
-    def test_means_casewise_ranges_and_failed_samples(self):
+    def test_means_ranges_complete_passes_and_failed_samples(self):
         import report
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/'index.html'
@@ -631,11 +631,11 @@ const rows=[];
 for(const physical_id of ['p','q'])for(const [index,elapsed_seconds] of [1,2,9].entries())
  rows.push({software:'acousticts',source_sha:'a',physical_id,status:'ok',repetition:index+1,elapsed_seconds});
 const complete=timingSummary(rows,2);
-assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.totalRange,[2,18]);assert.deepEqual(complete.averageRange,[1,9]);
+assert.equal(complete.total,8);assert.equal(complete.average,4);assert.deepEqual(complete.passes,[2,4,18]);
 rows[5].status='timeout';
 const partial=timingSummary(rows,2);
-assert.equal(partial.total,5.5);assert.deepEqual(partial.totalRange,[2,11]);assert.deepEqual(partial.averageRange,[1,5.5]);
-assert.deepEqual(timingSummary(rows,3).totalRange,partial.totalRange);
+assert.equal(partial.total,5.5);assert.deepEqual(partial.passes,[2,4]);
+assert.deepEqual(timingSummary(rows,3).passes,[]);
 assert.equal(timingSummary([...rows,{...rows[0],source_sha:'b',elapsed_seconds:10}],2).points.length,3);
 const comparisons=[];
 for(const [index,errors] of [[.03,.04],[.06,.08]].entries())for(const [physical,delta_ts_db] of errors.entries())
@@ -2548,6 +2548,64 @@ class ArtifactOnlyControllerTests(unittest.TestCase):
         api.request.return_value = dict(encoding='base64', size=1024*1024, content='')
         self.assertFalse(parallel.controller_files_allowed(api,
             [dict(filename='.github/workflows/parallel-spectra.yml', status='modified')], 'a', 'b'))
+
+
+
+class CheckpointBatchTests(unittest.TestCase):
+    def test_chunked_batch_roundtrip_uses_one_atomic_commit(self):
+        api, files = DocumentStorageTests().api()
+        values = [(f'task-{i}.json', dict(values=list(range(40)), identity=i), None) for i in range(32)]
+        with patch.object(parallel, 'DOCUMENT_PART_BYTES', 60):
+            shas = parallel.put_documents(api, values)
+        self.assertEqual(sum(c.args[:2] == ('POST', '/git/commits') for c in api.request.call_args_list), 1)
+        for path, value, _ in values:
+            self.assertEqual(parallel.get_document(api, path), (value, shas[path]))
+        before = len(api.request.call_args_list)
+        with patch.object(parallel, 'DOCUMENT_PART_BYTES', 60):
+            parallel.put_documents(api, [(path, value, shas[path]) for path, value, _ in values])
+        self.assertFalse(any(c.args[:2] == ('POST', '/git/commits') for c in api.request.call_args_list[before:]))
+
+    def test_failed_upload_and_stale_checkpoint_leave_entire_batch_unpublished(self):
+        for mode in ('upload', 'stale'):
+            api, files = DocumentStorageTests().api()
+            old = parallel.put_document(api, 'one.json', dict(value='old'))
+            original = api.request.side_effect
+            if mode == 'stale':
+                parallel.put_document(api, 'one.json', dict(value='other writer'), old)
+            baseline = dict(files)
+            uploads = []
+            def failure(method, path, body=None):
+                if mode == 'upload' and method == 'POST' and path == '/git/blobs':
+                    uploads.append(1)
+                    if len(uploads) == 2:
+                        raise parallel.APIError(503, 'interrupted')
+                return original(method, path, body)
+            api.request.side_effect = failure
+            with self.assertRaises((parallel.APIError, parallel.DocumentConflict)):
+                parallel.put_documents(api, [('one.json', dict(value='new'), old), ('two.json', dict(value=2), None)])
+            self.assertEqual(files, baseline)
+
+    def test_batch_rebases_unrelated_writer_without_losing_either_document(self):
+        api, files = DocumentStorageTests().api()
+        original = api.request.side_effect
+        conflicts = []
+        def competing(method, path, body=None):
+            if method == 'PATCH' and not conflicts:
+                conflicts.append(1)
+                other = Mock(request=Mock(side_effect=original))
+                parallel.put_document(other, 'other.json', dict(saved=True))
+                raise parallel.APIError(409, 'competing writer')
+            return original(method, path, body)
+        api.request.side_effect = competing
+        with patch.object(parallel.time, 'sleep'):
+            parallel.put_documents(api, [('one.json', dict(value=1), None), ('two.json', dict(value=2), None)])
+        self.assertEqual(set(files), {'one.json', 'two.json', 'other.json'})
+        self.assertEqual(parallel.get_document(api, 'other.json')[0], dict(saved=True))
+
+    def test_batch_rejects_duplicate_paths_and_unbounded_batches(self):
+        for updates in ([('same.json', {}, None)]*2, [(f'{i}.json', {}, None) for i in range(33)]):
+            with self.assertRaises(ValueError):
+                parallel.put_documents(Mock(), updates)
 
 if __name__ == "__main__":
     unittest.main()
