@@ -89,10 +89,10 @@ def install_prefix(directory):
     download_bottle(archive, digest)
     if prefix.exists():
         run([brew, "uninstall", "--ignore-dependencies", "gcc@14"])
-    # Homebrew 7 requires developer opt-in for verified local bottles.
+    # Homebrew 7 requires explicit opt-in for verified local bottles.
     # A bare filename also avoids interpreting an absolute path as a tap.
     run([brew, "install", "--force-bottle", archive.name], cwd=archive.parent,
-        env=dict(os.environ, HOMEBREW_DEVELOPER="1"))
+        env=dict(os.environ, HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS="1"))
     verify_compilers(compiler_paths(prefix, system))
     return prefix
 

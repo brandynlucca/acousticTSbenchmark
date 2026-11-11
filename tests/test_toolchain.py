@@ -110,7 +110,7 @@ class ToolchainTests(unittest.TestCase):
             setup_toolchain.install_prefix(self.directory)
         command.assert_any_call(["brew", "install", "--force-bottle",
             "gcc@14--14.3.0.x86_64_linux.bottle.4.tar.gz"], cwd=self.directory, env=ANY)
-        self.assertEqual(command.call_args.kwargs["env"]["HOMEBREW_DEVELOPER"], "1")
+        self.assertEqual(command.call_args.kwargs["env"]["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"], "1")
 
 
 if __name__ == "__main__":
