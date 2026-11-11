@@ -22,6 +22,15 @@ BREW_BOTTLES = {
     ("Darwin", "arm64"): ("arm64_tahoe", "0684ab0865925ab2cde02c508212aaf063188b73a1d689e3b0be779a915b8d3b"),
 }
 
+BREW_POSTINSTALL = """require 'formulary'
+require 'formula_installer'
+path = Pathname(ARGV.fetch(0))
+formula = Formulary.from_contents('gcc@14', path, path.read, :stable, from_metadata: true)
+raise 'Unexpected compiler formula version' unless formula.version.to_s == '14.3.0'
+FormulaInstaller.new(formula).post_install
+exit(Homebrew.failed? ? 1 : 0)
+"""
+
 
 def run(command, *, cwd=None, env=None):
     result = subprocess.run([str(value) for value in command], check=False,
@@ -89,10 +98,16 @@ def install_prefix(directory):
     download_bottle(archive, digest)
     if prefix.exists():
         run([brew, "uninstall", "--ignore-dependencies", "gcc@14"])
-    # Homebrew 7 requires explicit opt-in for verified local bottles.
-    # A bare filename also avoids interpreting an absolute path as a tap.
-    run([brew, "install", "--force-bottle", archive.name], cwd=archive.parent,
-        env=dict(os.environ, HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS="1"))
+    # Developer mode permits the verified local bottle, but rejects the old hook.
+    run([brew, "install", "--force-bottle", "--skip-post-install", archive.name],
+        cwd=archive.parent, env=dict(os.environ, HOMEBREW_DEVELOPER="1"))
+    # Run the exact installed recipe through the official post-install sandbox.
+    postinstall = archive.parent / "pinned-gcc-postinstall.rb"
+    postinstall.write_text(BREW_POSTINSTALL, encoding="utf-8")
+    postinstall_environment = dict(os.environ)
+    postinstall_environment.pop("HOMEBREW_DEVELOPER", None)
+    run([brew, "ruby", postinstall, prefix.resolve() / ".brew/gcc@14.rb"],
+        env=postinstall_environment)
     verify_compilers(compiler_paths(prefix, system))
     return prefix
 

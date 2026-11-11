@@ -108,9 +108,12 @@ class ToolchainTests(unittest.TestCase):
                 patch.object(setup_toolchain, "download_bottle"), \
                 patch.object(setup_toolchain, "run", return_value=str(self.directory / "brew")) as command:
             setup_toolchain.install_prefix(self.directory)
-        command.assert_any_call(["brew", "install", "--force-bottle",
+        command.assert_any_call(["brew", "install", "--force-bottle", "--skip-post-install",
             "gcc@14--14.3.0.x86_64_linux.bottle.4.tar.gz"], cwd=self.directory, env=ANY)
-        self.assertEqual(command.call_args.kwargs["env"]["HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS"], "1")
+        installation = next(call for call in command.call_args_list if call.args[0][1] == "install")
+        self.assertEqual(installation.kwargs["env"]["HOMEBREW_DEVELOPER"], "1")
+        self.assertEqual(command.call_args.args[0][1], "ruby")
+        self.assertNotIn("HOMEBREW_DEVELOPER", command.call_args.kwargs["env"])
 
 
 if __name__ == "__main__":
