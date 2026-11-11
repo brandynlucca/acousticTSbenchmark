@@ -123,7 +123,7 @@ jobs:
     name: ${{ matrix.name }}
     needs: plan
     if: needs.plan.outputs.has_work == 'true'
-    runs-on: ${{ needs.plan.outputs.runner }}
+    runs-on: ${{ needs.plan.outputs.runner == 'ubuntu-latest' && 'ubuntu-24.04' || needs.plan.outputs.runner }}
     timeout-minutes: 350
     strategy:
       fail-fast: false

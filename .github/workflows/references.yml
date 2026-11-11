@@ -65,7 +65,7 @@ permissions:
 jobs:
   configuration:
     if: ${{ inputs.queue_id == '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       profile: ${{ steps.resolve.outputs.profile }}
@@ -106,7 +106,7 @@ jobs:
   reference:
     if: ${{ inputs.queue_id == '' }}
     name: references (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: configuration
     timeout-minutes: 140
     concurrency:

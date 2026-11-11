@@ -108,7 +108,7 @@ jobs:
   notify-queue:
     if: ${{ always() && inputs.mode != 'prepare' }}
     needs: [matrix, benchmark, references, comparisons]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       actions: write
@@ -151,7 +151,7 @@ jobs:
       source_ref: ${{ needs.matrix.outputs.source_ref }}
       budget_minutes: ${{ fromJSON(inputs.reference_budget_minutes) }}
   matrix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     outputs:
       platforms: ${{ steps.choose.outputs.platforms }}
