@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - name: Resolve reference campaign
         id: resolve
         env:
@@ -131,7 +131,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - name: Preserve reference publication controllers
         run: |
           python - <<'PY'
@@ -289,7 +289,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
-        python-version: '3.12'
+        python-version: '3.12.10'
     - id: queue
       name: Resume only transferred missing references
       run: python src/reference_store.py queue-init --queue-id "$QUEUE_ID"
@@ -322,7 +322,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
-        python-version: '3.12'
+        python-version: '3.12.10'
     - name: Restore exact transferred source and adapter settings
       run: python src/reference_store.py queue-settings --queue-id "$QUEUE_ID" --output "$RUNNER_TEMP/reference-sources.json"
     - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
@@ -375,7 +375,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
-        python-version: '3.12'
+        python-version: '3.12.10'
     - name: Publish saved qualified references during calculation
       run: python src/reference_store.py queue-monitor --queue-id "$QUEUE_ID" --directory "$RUNNER_TEMP/reference-publication"
         --budget-seconds "$((QUEUE_BUDGET * 60))"
@@ -402,7 +402,7 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
-        python-version: '3.12'
+        python-version: '3.12.10'
     - name: Recover saved references and continue unfinished work
       run: python src/reference_store.py queue-finish --queue-id "$QUEUE_ID" --directory "$RUNNER_TEMP/reference-publication"
         --budget-seconds "$((QUEUE_BUDGET * 60))"

@@ -7,7 +7,7 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 25
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -15,7 +15,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
+      - name: Select Rtools45 on Windows
+        if: runner.os == 'Windows'
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
+        with:
+          r-version: 4.5.2
+          rtools-version: '45'
+      - name: Verify common compiler versions and binary128 ABI
+        shell: bash
+        run: python src/setup_toolchain.py --directory "$RUNNER_TEMP/benchmark-toolchain-check"
       - run: python -m pip install pytest psutil==7.2.2 ijson==3.4.0
       - run: python -m pytest tests -q
       - run: python src/benchmark.py --plan

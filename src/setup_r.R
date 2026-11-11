@@ -1,6 +1,12 @@
 args <- commandArgs(trailingOnly = TRUE)
 stopifnot(length(args) == 3L)
 library_path <- normalizePath(args[[1L]], mustWork = TRUE)
+toolchain_file <- Sys.getenv("BENCHMARK_TOOLCHAIN_FILE", unset = "")
+if (nzchar(toolchain_file)) {
+  makevars <- Sys.getenv("R_MAKEVARS_USER", unset = "")
+  if (!nzchar(makevars) || !file.exists(makevars)) stop("Pinned R compiler configuration is missing")
+  if (!identical(Sys.getenv("BENCHMARK_GNU_VERSION"), "14.3.0")) stop("GNU14.3.0 is required")
+}
 .libPaths(c(library_path, .libPaths()))
 repository <- Sys.getenv("RSPM", unset = "")
 if (!nzchar(repository)) repository <- "https://cloud.r-project.org"
@@ -13,7 +19,10 @@ missing <- dependencies[!vapply(dependencies, function(package) {
 }, logical(1))]
 if (length(missing)) {
   message("Installing missing R dependencies: ", paste(missing, collapse = ", "))
-  install.packages(missing, lib = library_path)
+  ordinary <- setdiff(missing, c("Rcpp", "RcppArmadillo"))
+  compiled <- intersect(missing, c("Rcpp", "RcppArmadillo"))
+  if (length(ordinary)) install.packages(ordinary, lib = library_path)
+  if (length(compiled)) install.packages(compiled, lib = library_path, type = "source")
 } else {
   message("Reusing all cached R dependencies")
 }

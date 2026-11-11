@@ -168,7 +168,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - name: Resolve and validate campaign
         id: choose
         env:
@@ -229,7 +229,7 @@ jobs:
     steps:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - name: Start campaign deadline
         shell: bash
         run: |
@@ -260,7 +260,7 @@ jobs:
           import os, shutil
           from pathlib import Path
           with open(os.environ['GITHUB_ENV'], 'a') as output:
-              for name, variable in [('setup_macos.py', 'MACOS_SETUP_SCRIPT'), ('resume_order.py', 'RESUME_ORDER_SCRIPT')]:
+              for name, variable in [('setup_macos.py', 'MACOS_SETUP_SCRIPT'), ('setup_toolchain.py', 'TOOLCHAIN_SETUP_SCRIPT'), ('resume_order.py', 'RESUME_ORDER_SCRIPT')]:
                   target = Path(os.environ['RUNNER_TEMP']) / name
                   shutil.copyfile(Path('src') / name, target)
                   output.write(f'{variable}={target}\n')
@@ -468,10 +468,11 @@ jobs:
           PY
       - name: Set up R 4.5.2 environment
         uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05
-        if: contains(env.SOFTWARE, 'acousticts')
+        if: contains(env.SOFTWARE, 'acousticts') || runner.os == 'Windows'
         timeout-minutes: 5
         with:
           r-version: '4.5.2'
+          rtools-version: '45'
           install-r: ${{ runner.os != 'Linux' }}
           use-public-rspm: true
       - name: Verify requested R runtime
@@ -491,65 +492,26 @@ jobs:
             /opt/R/4.5.2
             ${{ runner.temp }}/r-runtime-deps/*.deb
           key: ${{ steps.r-runtime-cache.outputs.cache-primary-key }}
-      - name: Configure native macOS GNU compilers and SDK
-        if: runner.os == 'macOS'
-        timeout-minutes: 3
+      - name: Configure Python3.12.10 and GNU14.3.0
+        timeout-minutes: 15
         shell: bash
         run: |
-          arguments=(configure --directory "$RUNNER_TEMP/benchmark-env")
+          arguments=(--directory "$RUNNER_TEMP/benchmark-env")
           if [[ "$SOFTWARE" == *acousticts* ]]; then arguments+=(--with-r); fi
-          python "$MACOS_SETUP_SCRIPT" "${arguments[@]}"
+          python "$TOOLCHAIN_SETUP_SCRIPT" "${arguments[@]}"
       - name: Restore R package library
         if: contains(env.SOFTWARE, 'acousticts')
         id: r-library-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: ${{ runner.temp }}/benchmark-env/r-library
-          key: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-{3}', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY, hashFiles('src/setup_r.R', 'sources.lock.json')) || format('r-library-v1-{0}-{1}-4.5.2-{2}', steps.r-cache-platform.outputs.image, runner.arch, hashFiles('src/setup_r.R', 'sources.lock.json', '.github/workflows/benchmark.yml')) }}
-          restore-keys: ${{ runner.os == 'macOS' && format('r-library-macos-gnu-v1-{0}-{1}-4.5.2-{2}-', steps.r-cache-platform.outputs.image, runner.arch, env.MACOS_TOOLCHAIN_KEY) || format('r-library-v1-{0}-{1}-4.5.2-', steps.r-cache-platform.outputs.image, runner.arch) }}
+          key: r-library-pinned-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ env.BENCHMARK_TOOLCHAIN_KEY }}-${{ hashFiles('src/setup_r.R', 'sources.lock.json') }}
+          restore-keys: r-library-pinned-v1-${{ steps.r-cache-platform.outputs.image }}-${{ runner.arch }}-4.5.2-${{ env.BENCHMARK_TOOLCHAIN_KEY }}-
       - uses: julia-actions/setup-julia@da908477b5db94c10ffce8cfea9f2b3b9d5db687
         if: contains(env.SOFTWARE, 'acousticscattering') || contains(env.SOFTWARE, 'liquid_spheroid')
         timeout-minutes: 5
         with:
           version: '1.12.1'
-      - name: Reuse installed Linux GCC 14 compilers
-        if: runner.os == 'Linux'
-        id: compiler-reuse
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os, shutil, subprocess
-          compilers = {"FC": "gfortran-14", "CC": "gcc-14", "CXX": "g++-14"}
-          usable = True
-          for variable, compiler in compilers.items():
-              executable = shutil.which(compiler)
-              if executable is None:
-                  print("Compiler unavailable:", compiler)
-                  usable = False
-                  continue
-              try:
-                  result = subprocess.run([executable, "-dumpversion"], capture_output=True,
-                                          text=True, timeout=10)
-                  valid = result.returncode == 0 and result.stdout.strip().split(".")[0] == "14"
-                  print(compiler, "version", result.stdout.strip(), "usable", valid)
-                  usable = usable and valid
-              except (OSError, subprocess.TimeoutExpired) as error:
-                  print("Compiler validation failed:", compiler, error)
-                  usable = False
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"usable={str(usable).lower()}\n")
-          if usable:
-              with open(os.environ["GITHUB_ENV"], "a") as output:
-                  for variable, compiler in compilers.items():
-                      output.write(f"{variable}={compiler}\nFPM_{variable}={compiler}\n")
-          PY
-      - name: Install fallback Linux GCC 14 compilers
-        uses: fortran-lang/setup-fortran@be037f0a45b1160f139d4ccd0b96f9e9bfd6a682
-        if: runner.os == 'Linux' && steps.compiler-reuse.outputs.usable != 'true'
-        timeout-minutes: 5
-        with:
-          compiler: gcc
-          version: '14'
       - name: Cache downloaded dependencies
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
@@ -560,7 +522,7 @@ jobs:
             ~/.julia/artifacts
             ~/.julia/packages
             ~/.julia/registries
-          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
+          key: deps-py3.12.10-gnu14.3.0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('sources.lock.json', 'src/python-constraints.txt', 'src/setup_julia.jl') }}
       - name: Build compatible macOS Rcpp libraries
         if: runner.os == 'macOS' && contains(env.SOFTWARE, 'acousticts') && steps.r-library-cache.outputs.cache-hit != 'true'
         timeout-minutes: 8
@@ -980,4 +942,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python "$BENCHMARK_PUBLISHER" --config "$BENCHMARK_CONFIG" --repository "$GITHUB_REPOSITORY" --directory "$RUNNER_TEMP/benchmark-results" --platform "$BENCHMARK_PLATFORM" --state completed
-

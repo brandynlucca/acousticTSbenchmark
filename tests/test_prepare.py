@@ -131,7 +131,7 @@ class PreparationTests(unittest.TestCase):
         libraries = [prefix / "lib/libgfortran.dylib", prefix / "lib/libquadmath.dylib"]
         for library in libraries:
             library.write_bytes(b"runtime fixture")
-        with patch.object(setup_macos, "run", side_effect=[str(prefix), "14.4.0", "14.4.0", "14.4.0"]):
+        with patch.object(setup_macos, "run", side_effect=[str(prefix), "14.3.0", "14.3.0", "14.3.0"]):
             compilers, versions = setup_macos.gnu_compilers()
         self.assertEqual(compilers["FC"], prefix / "bin/gfortran-14")
         with patch.object(setup_macos, "run", side_effect=list(map(str, libraries))):

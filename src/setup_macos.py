@@ -113,7 +113,7 @@ def select_sdk(applications=Path("/Applications")):
 
 
 def gnu_compilers():
-    prefix = Path(run(["brew", "--prefix", "gcc@14"]))
+    prefix = Path(os.environ.get("BENCHMARK_GNU_PREFIX") or run(["brew", "--prefix", "gcc@14"]))
     if not prefix.is_absolute():
         raise RuntimeError("Homebrew returned a non-absolute GCC 14 installation path")
     compilers = {name: prefix / "bin" / executable for name, executable in
@@ -123,8 +123,8 @@ def gnu_compilers():
         if not executable.is_file():
             raise RuntimeError(f"Installed Homebrew GCC 14 compiler is missing: {executable}")
         version = run([executable, "-dumpfullversion", "-dumpversion"])
-        if not re.fullmatch(r"14(?:\.\d+){1,2}", version):
-            raise RuntimeError(f"Expected GCC 14 for {name}, found {version}")
+        if version != "14.3.0":
+            raise RuntimeError(f"Expected GCC14.3.0 for {name}, found {version}")
         versions[name] = version
     if len(set(versions.values())) != 1:
         raise RuntimeError(f"C, C++, and Fortran compiler versions differ: {versions}")

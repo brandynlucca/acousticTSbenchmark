@@ -313,6 +313,9 @@ def main():
     runtime = dict(source_paths={}, source_shas={name: sources[name]["sha"] for name in names},
                    executables={}, native_executables={}, availability={}, capabilities={}, env={})
     lock_evidence = {}
+    toolchain_path = os.environ.get("BENCHMARK_TOOLCHAIN_FILE")
+    if toolchain_path:
+        lock_evidence["toolchain"] = read_json(toolchain_path)
     for name in names:
         try:
             path = obtain_source(name, sources[name], workspace)
