@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -60,8 +60,8 @@ class ToolchainTests(unittest.TestCase):
         compilers = setup_toolchain.compiler_paths(self.directory, "Linux")
         with patch.object(setup_toolchain, "run", side_effect=list(map(str, libraries))):
             values = setup_toolchain.r_makevars(compilers, system="Linux", directory=self.directory)
-        self.assertIn(f"-L{self.directory}", values["FLIBS"])
-        self.assertIn(f"-Wl,-rpath,{self.directory}", values["FLIBS"])
+        self.assertIn(f"-L{self.directory.resolve()}", values["FLIBS"])
+        self.assertIn(f"-Wl,-rpath,{self.directory.resolve()}", values["FLIBS"])
 
     def test_compiler_binary_or_policy_changes_invalidate_cache(self):
         base = dict(python="3.12.10", gnu={"CC": "14.3.0", "CXX": "14.3.0", "FC": "14.3.0"},
@@ -109,7 +109,8 @@ class ToolchainTests(unittest.TestCase):
                 patch.object(setup_toolchain, "run", return_value=str(self.directory / "brew")) as command:
             setup_toolchain.install_prefix(self.directory)
         command.assert_any_call(["brew", "install", "--force-bottle",
-            "gcc@14--14.3.0.x86_64_linux.bottle.4.tar.gz"], cwd=self.directory)
+            "gcc@14--14.3.0.x86_64_linux.bottle.4.tar.gz"], cwd=self.directory, env=ANY)
+        self.assertEqual(command.call_args.kwargs["env"]["HOMEBREW_DEVELOPER"], "1")
 
 
 if __name__ == "__main__":
