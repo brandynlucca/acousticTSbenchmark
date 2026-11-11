@@ -23,9 +23,9 @@ BREW_BOTTLES = {
 }
 
 
-def run(command):
+def run(command, *, cwd=None):
     result = subprocess.run([str(value) for value in command], check=False,
-                            capture_output=True, text=True, timeout=600)
+                            capture_output=True, text=True, timeout=600, cwd=cwd)
     if result.returncode:
         output = (result.stdout + "\n" + result.stderr)[-12000:]
         raise RuntimeError(f"Toolchain command failed ({result.returncode}): {command[0]}\n{output}")
@@ -89,7 +89,8 @@ def install_prefix(directory):
     download_bottle(archive, digest)
     if prefix.exists():
         run([brew, "uninstall", "--ignore-dependencies", "gcc@14"])
-    run([brew, "install", "--force-bottle", archive])
+    # An absolute bottle path is parsed as a tap name by Homebrew 7.
+    run([brew, "install", "--force-bottle", archive.name], cwd=archive.parent)
     verify_compilers(compiler_paths(prefix, system))
     return prefix
 
