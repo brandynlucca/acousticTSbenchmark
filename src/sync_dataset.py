@@ -25,6 +25,7 @@ from publish_progress import APIError, BRANCH, GitHub
 CATALOG = "dataset.json"
 RELEASE_TAG = "benchmark-dataset"
 MAX_DOWNLOAD = 2 * 1024 ** 3 - 1
+MAX_SPECTRUM_DOWNLOAD = 8 * 1024 ** 3
 MAX_DATABASE = 8 * 1024 ** 3
 MAX_CATALOG = 4 * 1024 ** 2
 ASSET_NAME = re.compile(r"dataset-\d+-[a-f0-9]+-(benchmarks\.sqlite|measurements\.csv|comparisons\.csv)\.gz\Z")
@@ -271,6 +272,24 @@ def publish_dataset(api, connection, database, catalog, previous_sha, processed,
     return value
 
 
+def download_artifact(api, artifact, destination, expected):
+    """Stream large historical spectra with their original full-archive checksum."""
+    path = f"/actions/artifacts/{artifact['id']}/zip"
+    size = artifact.get('size_in_bytes', 0)
+    if type(size) is not int or size < 0:
+        raise ValueError('Invalid artifact download size')
+    if size <= MAX_DOWNLOAD:
+        return api.download(path, destination, expected)
+    if (size > MAX_SPECTRUM_DOWNLOAD or
+            not re.fullmatch(r'spectrum-[a-f0-9]{24}-[1-9][0-9]*', artifact['name']) or
+            not isinstance(expected, str) or not re.fullmatch(r'[a-f0-9]{64}', expected)):
+        raise ValueError('Oversized artifact lacks supported spectrum identity and checksum')
+    if shutil.disk_usage(Path(destination).parent).free < size + 256 * 1024 ** 2:
+        raise ValueError('Insufficient disk space for verified historical spectrum download')
+    print(f"DATASET_LARGE_ARCHIVE artifact={artifact['id']} bytes={size} mode=one_per_batch", flush=True)
+    return api.download(path, destination, expected, maximum=size)
+
+
 def synchronize(api, directory, maximum=8):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -290,7 +309,7 @@ def synchronize(api, directory, maximum=8):
             try:
                 expected = artifact.get("digest") or ""
                 expected = expected.removeprefix("sha256:") if expected.startswith("sha256:") else None
-                digest = api.download(f"/actions/artifacts/{artifact['id']}/zip", path, expected)
+                digest = download_artifact(api, artifact, path, expected)
                 result = import_artifact(connection, path, dict(artifact, archive_sha256=digest), api.repository)
                 processed[str(artifact["id"])] = dict(name=artifact["name"], run_id=artifact["workflow_run"]["id"], sha256=digest)
                 errors_by_id.pop(artifact["id"], None)
@@ -302,6 +321,8 @@ def synchronize(api, directory, maximum=8):
                 print(f"Artifact {artifact['id']} was not imported: {type(error).__name__}: {str(error)[:200]}", file=sys.stderr, flush=True)
             finally:
                 path.unlink(missing_ok=True)
+            if artifact.get('size_in_bytes', 0) > MAX_DOWNLOAD:
+                break
         remaining = sum(str(item["id"]) not in processed for item in candidates)
         untried = sum(str(item["id"]) not in processed and item["id"] not in errors_by_id for item in candidates)
         errors = list(errors_by_id.values())

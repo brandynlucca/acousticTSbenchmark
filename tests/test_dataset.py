@@ -354,6 +354,31 @@ class DatasetTests(unittest.TestCase):
                 progress.compact_payload("owner/repository", "ubuntu-latest", 12, 1, [corrupt])
 
 
+
+
+class IncidentalFortranOutputTests(unittest.TestCase):
+    def test_large_fortran_output_is_excluded_without_excluding_measurement_json(self):
+        from unittest.mock import patch
+        fixture=DatasetTests()
+        fixture.setUp()
+        try:
+            contents=files()
+            contents['work/fort.20']='x'*8192
+            with patch.object(dataset,'MAX_ENTRY_BYTES',4096):
+                result=fixture.load(contents)
+            self.assertEqual(result['observations'],1)
+            self.assertEqual(dataset.database_summary(fixture.connection)['measurements'],1)
+            contents['records/extra.json']='x'*8192
+            with patch.object(dataset,'MAX_ENTRY_BYTES',4096):
+                with self.assertRaisesRegex(ValueError,'oversized'):
+                    fixture.load(contents,2)
+            contents=files()
+            contents['../fort.20']='output'
+            with self.assertRaisesRegex(ValueError,'Unsafe'):
+                fixture.load(contents,3)
+        finally:
+            fixture.doCleanups()
+
 if __name__ == "__main__":
     unittest.main()
 

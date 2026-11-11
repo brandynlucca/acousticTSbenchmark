@@ -457,6 +457,63 @@ def put_document(api, path, value, previous_sha=None, *, immutable=False):
     raise RuntimeError('Unable to checkpoint spectrum state')
 
 
+def put_documents(api, updates):
+    """Commit a bounded checkpoint batch with per-document conflict checks."""
+    if len(updates) == 1:
+        path, value, previous_sha = updates[0]
+        return {path: put_document(api, path, value, previous_sha)}
+    if not updates:
+        return {}
+    if len(updates) > 32 or len({path for path, _, _ in updates}) != len(updates):
+        raise ValueError('Invalid checkpoint batch size or duplicate path')
+    entries, expected, proposed = [], {}, {}
+    for path, value, previous_sha in updates:
+        expected[path] = previous_sha
+        raw = (json.dumps(pack(value), separators=(',', ':')) + '\n').encode()
+        if len(raw) > DOCUMENT_PART_BYTES:
+            parts = []
+            for offset in range(0, len(raw), DOCUMENT_PART_BYTES):
+                chunk = raw[offset:offset + DOCUMENT_PART_BYTES]
+                digest = hashlib.sha256(chunk).hexdigest()
+                parts.append(digest)
+                entries.append(dict(path=f'spectra-part-{digest}.part', mode='100644',
+                    type='blob', sha=_document_blob(api, chunk)))
+            raw = json.dumps(dict(encoding='spectrum-parts-v1', parts=parts, size=len(raw),
+                sha256=hashlib.sha256(raw).hexdigest()), separators=(',', ':')).encode()
+        proposed[path] = _document_blob(api, raw)
+        entries.append(dict(path=path, mode='100644', type='blob', sha=proposed[path]))
+    entries = list({entry['path']: entry for entry in entries}.values())
+    for attempt in range(12):
+        head, tree_sha, existing = _progress_tree(api)
+        current = {path: existing.get(path, {}).get('sha') for path in proposed}
+        if current == proposed:
+            return proposed
+        if any(current[path] not in (expected[path], proposed[path]) for path in proposed):
+            invalidate_data_cache(api)
+            raise DocumentConflict('Another writer changed a checkpoint in the batch')
+        body = dict(tree=entries)
+        if tree_sha:
+            body['base_tree'] = tree_sha
+        tree = api.request('POST', '/git/trees', body)
+        commit = api.request('POST', '/git/commits', dict(
+            message=f'Consolidate {len(updates)} spectrum checkpoints',
+            tree=tree['sha'], parents=[head] if head else []))
+        try:
+            if head:
+                api.request('PATCH', '/git/refs/heads/' + BRANCH, dict(sha=commit['sha'], force=False))
+            else:
+                api.request('POST', '/git/refs', dict(ref='refs/heads/' + BRANCH, sha=commit['sha']))
+            return proposed
+        except APIError as error:
+            if error.status not in (409, 422) or attempt == 11:
+                raise
+            latest, _, _ = _progress_tree(api)
+            if latest == head and error.status != 409:
+                raise
+            time.sleep(random.uniform(.5, min(8., 2. ** attempt)))
+    raise RuntimeError('Unable to checkpoint spectrum batch')
+
+
 def queue_filename(campaign_id, run_id):
     return f'spectra-{identifier(campaign_id)}-queue-{identifier(run_id)}.json'
 
@@ -896,7 +953,17 @@ def read_task_packet(api, plan, task):
 
 
 def consolidate_worker_packets(api, plan, packets):
-    """Integrate stopped-worker records once and retain exact fragment digests."""
+    """Integrate stopped-worker records in bounded atomic batches."""
+    updates, merged = [], {}
+    def flush():
+        if not updates:
+            return
+        put_documents(api, updates)
+        packets.update(merged)
+        print(f'CONSOLIDATED_BATCH spectra={len(updates)} '
+              f'records={sum(len(value["records"]) for value in merged.values())}', flush=True)
+        updates.clear()
+        merged.clear()
     for task in plan['tasks']:
         packet = packets.get(task['id'])
         if not packet or not packet.get('_worker_packet_shas'):
@@ -913,10 +980,11 @@ def consolidate_worker_packets(api, plan, packets):
                 consolidated.pop(key)
         if any(consolidated['records'].get(identity) != row for identity, row in packet['records'].items()):
             raise ValueError('Consolidation changed a saved measurement')
-        put_document(api, path, consolidated, sha)
-        packets[task['id']] = consolidated
-        print(f'CONSOLIDATED task={task["id"]} records={len(consolidated["records"])} '
-              f'worker_files={len(integrated)}', flush=True)
+        updates.append((path, consolidated, sha))
+        merged[task['id']] = consolidated
+        if len(updates) == 32:
+            flush()
+    flush()
 
 
 def validate_packet(plan, task, packet, *, check_tail_evidence=True):

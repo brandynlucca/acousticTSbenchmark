@@ -221,7 +221,7 @@ def _files(archive):
         if (path.is_absolute() or ".." in path.parts or "\\" in entry.filename or ":" in entry.filename
                 or ((entry.external_attr >> 16) & 0o170000) == 0o120000):
             raise ValueError("Unsafe artifact path")
-        if entry.is_dir():
+        if entry.is_dir() or re.fullmatch(r'fort\.[0-9]+', path.name):
             continue
         if entry.filename in files or entry.file_size > MAX_ENTRY_BYTES:
             raise ValueError("Duplicate or oversized artifact entry")

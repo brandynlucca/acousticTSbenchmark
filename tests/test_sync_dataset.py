@@ -223,5 +223,43 @@ class SyncDatasetTests(unittest.TestCase):
         self.assertEqual(publish.call_args.args[5], {})
 
 
+
+
+class LargeHistoricalArtifactTests(unittest.TestCase):
+    def test_large_spectrum_requires_checksum_identity_disk_space_and_exact_bound(self):
+        size = sync.MAX_DOWNLOAD + 100
+        entry = artifact(123, 'spectrum-'+'a'*24+'-1', size_in_bytes=size)
+        api = Mock()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(sync.shutil, 'disk_usage', return_value=Mock(free=10*1024**3)):
+            destination = Path(temporary)/'incoming.zip'
+            sync.download_artifact(api, entry, destination, 'f'*64)
+            api.download.assert_called_once_with('/actions/artifacts/123/zip', destination, 'f'*64, maximum=size)
+            for changed, digest in ((dict(entry, name='results-ubuntu-latest'), 'f'*64),
+                                    (dict(entry, size_in_bytes=sync.MAX_SPECTRUM_DOWNLOAD+1), 'f'*64),
+                                    (entry, None)):
+                with self.assertRaises(ValueError):
+                    sync.download_artifact(api, changed, destination, digest)
+        with patch.object(sync.shutil, 'disk_usage', return_value=Mock(free=size)):
+            with self.assertRaisesRegex(ValueError, 'disk space'):
+                sync.download_artifact(api, entry, Path('incoming.zip'), 'f'*64)
+
+    def test_one_large_archive_per_batch_preserves_remaining_work(self):
+        size=sync.MAX_DOWNLOAD+100
+        candidates=[artifact(i,'spectrum-'+str(i)*24+'-1',size_in_bytes=size,digest='sha256:'+'f'*64) for i in (1,2)]
+        api=Mock(repository='owner/repository')
+        api.download.return_value='f'*64
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(sync, 'read_catalog', return_value=({'processed':{}}, 'sha')), \
+             patch.object(sync, 'list_artifacts', return_value=candidates), \
+             patch.object(sync, 'restore_database', return_value=(Mock(), Path(temporary)/'data.sqlite')), \
+             patch.object(sync.shutil, 'disk_usage', return_value=Mock(free=10*1024**3)), \
+             patch.object(sync, 'import_artifact', return_value={'imported':True}), \
+             patch.object(sync, 'publish_dataset', return_value={'summary':{},'release_url':'url'}) as publish:
+            result=sync.synchronize(api,Path(temporary),maximum=8)
+        self.assertEqual(api.download.call_count,1)
+        self.assertEqual(result['pending_artifacts'],1)
+        self.assertEqual(result['pending_untried'],1)
+        self.assertEqual(len(publish.call_args.args[5]),1)
+
 if __name__ == "__main__":
     unittest.main()
