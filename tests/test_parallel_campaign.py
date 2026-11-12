@@ -3001,12 +3001,10 @@ class RollingWorkerTests(unittest.TestCase):
         finish.assert_called_once()
 
     def test_workflow_transformation_preserves_calculation_setup(self):
-        import yaml
         current=(ROOT/'.github/workflows/parallel-spectra.yml').read_text(encoding='utf-8')
         self.assertEqual(parallel.rolling_workflow(current),current)
-        document=yaml.safe_load(current)
-        self.assertTrue(document['on']['workflow_dispatch']['inputs']['rolling_workers']['default'])
-        self.assertIn('github.run_id',document['concurrency']['group'])
+        self.assertRegex(current, r'(?m)^      rolling_workers:\n        description: [^\n]+\n        type: boolean\n        default: true\n')
+        self.assertIn("inputs.rolling_workers && format('spheroid-pool-{0}-{1}', inputs.campaign_id || github.run_id, github.run_id)", current)
 
 
 if __name__ == "__main__":
