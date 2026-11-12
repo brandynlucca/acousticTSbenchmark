@@ -573,10 +573,21 @@
       },
       "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43049632023"
+    },
+    "acousticts-macos": {
+      "run_id": 43159316715,
+      "campaign_id": "41692575909",
+      "inputs": {
+        "campaign_id": "41692575909",
+        "platform": "macos-latest",
+        "max_parallel": "16"
+      },
+      "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43159316715"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-12T05:08:03.000229+00:00",
+  "updated_at": "2026-11-12T05:08:09.464926+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -716,16 +727,5 @@
         "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
       }
     }
-  ],
-  "dispatch_intent": {
-    "key": "acousticts-macos",
-    "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
-    "dispatch_ref": "spectra-platform-runtime-pool-20261109",
-    "inputs": {
-      "campaign_id": "41692575909",
-      "platform": "macos-latest",
-      "max_parallel": "16"
-    },
-    "created_at": "2026-11-12T05:08:03.000208+00:00"
-  }
+  ]
 }
