@@ -2607,6 +2607,113 @@ class CheckpointBatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parallel.put_documents(Mock(), updates)
 
+class ProgressRelayTests(unittest.TestCase):
+    def api(self):
+        api = Mock(repository='owner/repository')
+        run = dict(event='workflow_dispatch', head_repository=dict(full_name=api.repository),
+                   path='.github/workflows/parallel-spectra.yml', display_title='Continue spectra 100')
+        return api, run
+
+    def test_takeover_reads_original_run_without_restarting_workers(self):
+        api, run = self.api()
+        api.request.side_effect = [run, dict(jobs=[dict(name='progress', status='completed', conclusion='cancelled')])]
+        state = dict(waves=[dict(run_id=200)])
+        with patch.object(parallel, 'get_document', return_value=(state, 'sha')), \
+             patch.object(parallel, 'monitor', return_value=True) as monitor:
+            parallel.relay_progress(api, 200, Path('results'), campaign_id='100')
+        self.assertEqual(monitor.call_args.args, (api, '100', Path('results')))
+        self.assertEqual(monitor.call_args.kwargs['run_id'], 200)
+        self.assertTrue(all(call.args[0] == 'GET' for call in api.request.call_args_list))
+
+    def test_expiring_takeover_renews_only_publisher(self):
+        api, run = self.api()
+        api.request.side_effect = [run, dict(jobs=[dict(name='progress', status='completed', conclusion='cancelled')]), {}]
+        with patch.object(parallel, 'get_document', return_value=(dict(waves=[dict(run_id=200)]), 'sha')), \
+             patch.object(parallel, 'monitor', return_value=False):
+            parallel.relay_progress(api, 200, Path('results'), campaign_id='100')
+        self.assertEqual(api.request.call_args.args, ('POST', '/actions/workflows/publish-progress.yml/dispatches',
+                         dict(ref='main', inputs=dict(run_id='200', campaign_id='100'))))
+
+    def test_waiting_relay_renews_before_job_timeout(self):
+        api, run = self.api()
+        api.request.side_effect = [run, dict(jobs=[dict(name='progress', status='in_progress', conclusion=None)]), {}]
+        with patch.object(parallel, 'get_document', return_value=(None, None)), \
+             patch.object(parallel.time, 'monotonic', side_effect=[0, 0, 61]), \
+             patch.object(parallel.time, 'sleep') as sleep, patch.object(parallel, 'monitor') as monitor:
+            parallel.relay_progress(api, 200, Path('results'), budget_seconds=60)
+        monitor.assert_not_called()
+        sleep.assert_called_once_with(60)
+        self.assertEqual(api.request.call_args.args[1], '/actions/workflows/publish-progress.yml/dispatches')
+
+    def test_successful_primary_needs_no_replacement(self):
+        api, run = self.api()
+        api.request.side_effect = [run, dict(jobs=[dict(name='progress', status='completed', conclusion='success')])]
+        with patch.object(parallel, 'get_document', return_value=(dict(waves=[dict(run_id=200)]), 'sha')), \
+             patch.object(parallel, 'monitor') as monitor:
+            parallel.relay_progress(api, 200, Path('results'))
+        monitor.assert_not_called()
+        self.assertEqual(api.request.call_count, 2)
+
+    def test_newer_allocation_stops_old_relay(self):
+        api, run = self.api()
+        api.request.side_effect = [run, dict(jobs=[])]
+        with patch.object(parallel, 'get_document', return_value=(dict(waves=[dict(run_id=200),dict(run_id=300)]), 'sha')), \
+             patch.object(parallel, 'monitor') as monitor:
+            parallel.relay_progress(api, 200, Path('results'))
+        monitor.assert_not_called()
+        self.assertEqual(api.request.call_count, 2)
+
+    def test_status_failure_waits_and_renews(self):
+        api, run = self.api()
+        api.request.side_effect = [run, {}]
+        with patch.object(parallel, 'get_document', side_effect=parallel.APIError(503,'transient')), \
+             patch.object(parallel.time, 'monotonic', side_effect=[0,0,61]), \
+             patch.object(parallel.time, 'sleep') as sleep:
+            parallel.relay_progress(api, 200, Path('results'), budget_seconds=60)
+        sleep.assert_called_once_with(30)
+        self.assertEqual(api.request.call_args.args[1], '/actions/workflows/publish-progress.yml/dispatches')
+
+    def test_invalid_run_and_campaign_are_rejected_before_publication(self):
+        for field, value in [('event','pull_request'), ('head_repository',dict(full_name='other/repository')),
+                             ('path','.github/workflows/unrelated.yml')]:
+            api, run = self.api()
+            run[field] = value
+            api.request.return_value = run
+            with self.assertRaises(ValueError):
+                parallel.relay_progress(api, 200, Path('results'))
+            self.assertEqual(api.request.call_count, 1)
+        api, run = self.api()
+        api.request.return_value = run
+        with self.assertRaises(ValueError):
+            parallel.relay_progress(api, 200, Path('results'), campaign_id='999')
+
+    def test_final_publication_failure_is_retried_even_after_workers_stop(self):
+        plan, task, _ = pending_plan()
+        state = dict(waves=[dict(run_id=200, tasks=[task['id']])])
+        api = Mock()
+        api.request.return_value = dict(jobs=[dict(name=task['name'], status='completed')])
+        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel, 'read_packets', return_value={}), \
+             patch.object(parallel.time, 'sleep'), \
+             patch.object(parallel, 'publish_datasets', side_effect=[parallel.PublicationConflict('busy'),None]) as publish:
+            self.assertTrue(parallel.monitor(api, '100', Path('results'), run_id=200))
+        self.assertEqual(publish.call_count, 2)
+        self.assertEqual(publish.call_args.kwargs['run_id'], 200)
+        self.assertTrue(all(call.args[1] == '/actions/runs/200/jobs?per_page=100' for call in api.request.call_args_list))
+
+    def test_checkpoint_read_failure_is_retried(self):
+        plan, task, _ = pending_plan()
+        state = dict(waves=[dict(run_id=200, tasks=[task['id']])])
+        api = Mock()
+        api.request.return_value = dict(jobs=[dict(name=task['name'], status='completed')])
+        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel, 'read_packets', side_effect=[parallel.APIError(503,'transient'),{}]), \
+             patch.object(parallel.time, 'sleep'), \
+             patch.object(parallel, 'publish_datasets') as publish:
+            self.assertTrue(parallel.monitor(api, '100', Path('results'), run_id=200))
+        publish.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
 

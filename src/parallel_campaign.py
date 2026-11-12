@@ -1847,7 +1847,7 @@ def attach_latest_references(api, rows, size):
     return rows
 
 
-def publish_datasets(api, plan, packets, directory, finished=False):
+def publish_datasets(api, plan, packets, directory, finished=False, *, run_id=None):
     platform = campaign_platform(plan)
     for size, dataset in plan['datasets'].items():
         tasks = [task for task in plan['tasks'] if task['size'] == size]
@@ -1863,7 +1863,8 @@ def publish_datasets(api, plan, packets, directory, finished=False):
         payload.update(parallel_campaign_id=plan['campaign_id'], parallel_tasks=dict(planned=len(tasks),
             completed=completed, pending=len(tasks)-completed), timing_statistic='arithmetic_mean')
         payload['active_execution_policy'] = execution_policy()
-        payload['artifact_url'] = f"https://github.com/{api.repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}#artifacts"
+        artifact_run = run_id or os.environ['GITHUB_RUN_ID']
+        payload['artifact_url'] = f"https://github.com/{api.repository}/actions/runs/{artifact_run}#artifacts"
         current, _ = existing_snapshot(api, platform, snapshot_filename(platform, float(size)))
         if current and int(current['run_id']) > int(plan['campaign_id']):
             raise ValueError('A newer campaign owns this benchmark. Refusing to replace its measurements')
@@ -1885,20 +1886,21 @@ def publish_datasets(api, plan, packets, directory, finished=False):
               f"{sum(row['status'] != 'pending' for row in rows)}", flush=True)
 
 
-def monitor(api, campaign_id, directory):
+def monitor(api, campaign_id, directory, *, run_id=None, deadline=None):
+    run_id = int(identifier(run_id or os.environ['GITHUB_RUN_ID']))
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
     state, _ = get_document(api, filename(campaign_id, 'state'))
-    wave = next(item for item in reversed(state['waves']) if item['run_id'] == int(os.environ['GITHUB_RUN_ID']))
+    wave = next(item for item in reversed(state['waves']) if item['run_id'] == run_id)
     names = set(wave.get('worker_names') or
                 [task['name'] for task in plan['tasks'] if task['id'] in wave['tasks']])
     packets = {}
     next_update = 0
     next_job_poll = 0
     done = False
-    while True:
+    while deadline is None or time.monotonic() < deadline:
         if time.time() >= next_job_poll:
             try:
-                jobs = api.request('GET', f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/jobs?per_page=100")['jobs']
+                jobs = api.request('GET', f"/actions/runs/{run_id}/jobs?per_page=100")['jobs']
                 workers = [job for job in jobs if job['name'] in names]
                 done = len(workers) == len(names) and all(job['status'] == 'completed' for job in workers)
             except APIError as error:
@@ -1908,18 +1910,72 @@ def monitor(api, campaign_id, directory):
                     time.time()+getattr(error,'retry_after',0))
                 print(f'JOB_STATUS_DEFERRED status={error.status} retry_epoch={next_job_poll:.0f}',flush=True)
         if time.monotonic() >= next_update or done:
-            packets = read_packets(api, plan, cache=packets)
-            done = done or all(packets.get(task_id,{}).get('state') == 'complete' for task_id in wave['tasks'])
             try:
-                publish_datasets(api, plan, packets, directory)
+                packets = read_packets(api, plan, cache=packets)
+                done = done or all(packets.get(task_id,{}).get('state') == 'complete' for task_id in wave['tasks'])
+                publish_datasets(api, plan, packets, directory, run_id=run_id)
             except (PublicationConflict, APIError, OSError, TimeoutError) as error:
                 print(f'PUBLICATION_DEFERRED {error}. Retrying in 30 seconds', flush=True)
                 next_update = time.monotonic() + 30
             else:
+                if done:
+                    return True
                 next_update = time.monotonic() + 180
-        if done:
-            return
         time.sleep(30)
+    return False
+
+
+def relay_progress(api, run_id, directory, *, campaign_id='', budget_seconds=18000):
+    """Replace an expired publisher while retaining the original calculation jobs."""
+    run_id = int(identifier(run_id))
+    if not 60 <= budget_seconds <= 18000:
+        raise ValueError('Progress relay budget must be between 60 and 18000 seconds')
+    run = api.request('GET', f'/actions/runs/{run_id}')
+    if (run.get('event') != 'workflow_dispatch' or
+            run.get('head_repository', {}).get('full_name') != api.repository or
+            run.get('path', '').split('@')[0] != '.github/workflows/parallel-spectra.yml'):
+        raise ValueError('Progress relay requires a benchmark run from the same repository')
+    match = re.fullmatch(r'Continue spectra ([1-9][0-9]*)', run.get('display_title', ''))
+    expected_campaign = match[1] if match else str(run_id)
+    campaign_id = identifier(campaign_id or expected_campaign)
+    if campaign_id != expected_campaign:
+        raise ValueError('Progress relay campaign differs from the benchmark run')
+    deadline = time.monotonic() + budget_seconds
+    while time.monotonic() < deadline:
+        try:
+            state, _ = get_document(api, filename(campaign_id, 'state'))
+            jobs = api.request('GET', f'/actions/runs/{run_id}/jobs?per_page=100')['jobs']
+        except (APIError, OSError, TimeoutError) as error:
+            if isinstance(error, APIError) and error.status not in (403,429,500,502,503,504):
+                raise
+            print(f'PROGRESS_RELAY_STATUS_DEFERRED run={run_id} error={error}', flush=True)
+            time.sleep(30)
+            continue
+        if state and state.get('waves') and state['waves'][-1]['run_id'] != run_id:
+            if any(wave['run_id'] == run_id for wave in state['waves']):
+                print(f'PROGRESS_RELAY_SUPERSEDED run={run_id}', flush=True)
+                return
+        planners = [job for job in jobs if job['name'] == 'plan']
+        if any(job['status'] == 'completed' and job['conclusion'] != 'success' for job in planners):
+            print(f'PROGRESS_RELAY_NO_PLAN run={run_id}', flush=True)
+            return
+        primary = [job for job in jobs if job['name'] == 'progress']
+        if len(primary) == 1 and primary[0]['status'] == 'completed':
+            if primary[0]['conclusion'] == 'success':
+                print(f'PROGRESS_RELAY_PRIMARY_COMPLETE run={run_id}', flush=True)
+                return
+            if not state or not any(wave['run_id'] == run_id for wave in state.get('waves', [])):
+                raise ValueError('Progress relay has no saved benchmark allocation')
+            print(f'PROGRESS_RELAY_TAKEOVER campaign={campaign_id} run={run_id}', flush=True)
+            if monitor(api, campaign_id, directory, run_id=run_id, deadline=deadline):
+                print(f'PROGRESS_RELAY_COMPLETE run={run_id}', flush=True)
+                return
+            break
+        print(f'PROGRESS_RELAY_WAIT run={run_id} primary=active_or_pending', flush=True)
+        time.sleep(60)
+    api.request('POST', '/actions/workflows/publish-progress.yml/dispatches',
+                dict(ref='main', inputs=dict(run_id=str(run_id), campaign_id=campaign_id)))
+    print(f'PROGRESS_RELAY_RENEWED campaign={campaign_id} run={run_id}', flush=True)
 
 
 def wake_ordered_queue(api, campaign_id):
@@ -2008,21 +2064,26 @@ def finish(api, campaign_id, directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('plan', 'worker', 'monitor', 'finish'))
+    parser.add_argument('action', choices=('plan', 'worker', 'monitor', 'relay', 'finish'))
     parser.add_argument('--campaign-id', default='')
     parser.add_argument('--task-id')
+    parser.add_argument('--run-id')
+    parser.add_argument('--budget-seconds', type=int, default=18000)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--deadline', type=float, default=float('inf'))
     args = parser.parse_args()
     api = LiveGitHub(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], timeout_seconds=90)
-    api.wait_on_rate_limit = args.action != 'monitor'
+    api.wait_on_rate_limit = args.action not in ('monitor', 'relay')
     if os.environ.get('GITHUB_ACTIONS') == 'true':
         api.data_store = GitDataStore(core.ROOT)
     if args.action == 'plan':
         plan_campaign(api, json.loads(os.environ['SPECTRA_INPUTS']), args.directory)
     elif args.action == 'worker':
         run_worker(api, args.campaign_id, args.task_id, args.runtime, args.directory, args.deadline)
+    elif args.action == 'relay':
+        relay_progress(api, args.run_id, args.directory, campaign_id=args.campaign_id,
+                       budget_seconds=args.budget_seconds)
     elif args.action == 'monitor':
         monitor(api, args.campaign_id, args.directory)
     else:
