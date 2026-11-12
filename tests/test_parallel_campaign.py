@@ -426,7 +426,7 @@ class PublicationTests(unittest.TestCase):
                                  for status in ('in_progress','completed')]
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ,GITHUB_RUN_ID='100'), \
-             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s')]), \
+             patch.object(parallel,'get_document',side_effect=[(plan,'p'),(state,'s'),(state,'s'),(state,'s')]), \
              patch.object(parallel,'read_packets',return_value={}), \
              patch.object(parallel.time,'sleep'), \
              patch.object(parallel,'publish_datasets',side_effect=[parallel.PublicationConflict('busy'),None]) as publish:
@@ -2692,7 +2692,7 @@ class ProgressRelayTests(unittest.TestCase):
         state = dict(waves=[dict(run_id=200, tasks=[task['id']])])
         api = Mock()
         api.request.return_value = dict(jobs=[dict(name=task['name'], status='completed')])
-        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s')]), \
+        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s'),(state,'s'),(state,'s')]), \
              patch.object(parallel, 'read_packets', return_value={}), \
              patch.object(parallel.time, 'sleep'), \
              patch.object(parallel, 'publish_datasets', side_effect=[parallel.PublicationConflict('busy'),None]) as publish:
@@ -2706,12 +2706,307 @@ class ProgressRelayTests(unittest.TestCase):
         state = dict(waves=[dict(run_id=200, tasks=[task['id']])])
         api = Mock()
         api.request.return_value = dict(jobs=[dict(name=task['name'], status='completed')])
-        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s')]), \
+        with patch.object(parallel, 'get_document', side_effect=[(plan,'p'),(state,'s'),(state,'s'),(state,'s')]), \
              patch.object(parallel, 'read_packets', side_effect=[parallel.APIError(503,'transient'),{}]), \
              patch.object(parallel.time, 'sleep'), \
              patch.object(parallel, 'publish_datasets') as publish:
             self.assertTrue(parallel.monitor(api, '100', Path('results'), run_id=200))
         publish.assert_called_once()
+
+
+
+
+class RollingWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.plan, self.task, self.runtime = pending_plan()
+        self.plan.update(max_parallel=4, budget_minutes=330, automatic_continue=True)
+        for index in range(1, 7):
+            self.plan['tasks'].append(dict(copy.deepcopy(self.task), id=f'task-{index}', name=f'spectrum {index}'))
+        self.queue, workers = parallel.scheduling_queue(self.plan, self.plan['tasks'], {}, 100, 2)
+        self.wave = dict(run_id=100, queue=parallel.queue_filename('100', 100),
+                         workers=workers, worker_names=['worker 01', 'worker 02'],
+                         tasks=[task['id'] for task in self.plan['tasks']], pool=True, queue_run_id=100)
+        self.state = dict(campaign_id='100', status='active', attempts={}, completed=[], blocked=[],
+                          max_parallel=4, waves=[self.wave],
+                          worker_pool=dict(run_id=100, queue=self.wave['queue']))
+        self.documents = {parallel.filename('100','state'):self.state, self.wave['queue']:self.queue}
+        self.versions = {path:0 for path in self.documents}
+        self.api = Mock(repository='owner/repo')
+        self.api.request.side_effect = self.request
+        self.jobs = [dict(name=name,status='in_progress') for name in self.wave['worker_names']]
+
+    def request(self, method, path, body=None):
+        if method == 'POST':
+            return {}
+        if '/jobs?' in path:
+            return dict(jobs=copy.deepcopy(self.jobs))
+        if '/actions/runs/' in path:
+            return dict(status='in_progress')
+        raise AssertionError((method,path,body))
+
+    def get(self, api, path):
+        return copy.deepcopy(self.documents.get(path)), str(self.versions.get(path,0))
+
+    def put(self, api, path, value, sha=None, **kwargs):
+        self.put_many(api,[(path,value,sha)])
+        return str(self.versions[path])
+
+    def put_many(self, api, changes):
+        for path, value, sha in changes:
+            if sha is not None and sha != str(self.versions.get(path,0)):
+                raise parallel.DocumentConflict('stale document')
+        for path, value, sha in changes:
+            self.documents[path] = copy.deepcopy(value)
+            self.versions[path] = self.versions.get(path,0)+1
+
+    def store(self):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(patch.object(parallel,'get_document',side_effect=self.get))
+        stack.enter_context(patch.object(parallel,'put_document',side_effect=self.put))
+        stack.enter_context(patch.object(parallel,'put_documents',side_effect=self.put_many))
+        return stack
+
+    def test_replacements_share_queue_and_preserve_active_claims(self):
+        tasks={task['id']:task for task in self.plan['tasks']}
+        worker=self.wave['workers'][0]
+        work,_=parallel.claim_queued_work(self.queue,self.plan,tasks,worker)
+        original=copy.deepcopy(self.queue)
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='101',GITHUB_SHA='c'*40), \
+             patch.object(parallel,'write_outputs') as output:
+            parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+        saved=self.documents[self.wave['queue']]
+        wave=self.documents[parallel.filename('100','state')]['waves'][-1]
+        self.assertEqual(saved['claims'],original['claims'])
+        self.assertEqual(saved['pending'],original['pending'])
+        self.assertEqual(saved['owners'][worker],work['id'])
+        self.assertEqual(wave['queue_run_id'],100)
+        self.assertEqual(wave['run_id'],101)
+        self.assertEqual(len(wave['workers']),2)
+        self.assertFalse(set(wave['workers']) & set(self.wave['workers']))
+        self.assertEqual(output.call_args.args[0]['max_parallel'],4)
+
+    def test_registration_retry_reuses_saved_worker_identities(self):
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='101',GITHUB_SHA='c'*40), \
+             patch.object(parallel,'write_outputs'):
+            parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+            saved=copy.deepcopy(self.documents)
+            parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+        self.assertEqual(self.documents,saved)
+
+    def test_second_allocation_counts_already_registered_slots(self):
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='101',GITHUB_SHA='c'*40), \
+             patch.object(parallel,'write_outputs'):
+            parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+            with patch.dict(os.environ,GITHUB_RUN_ID='102'):
+                parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+        waves=self.documents[parallel.filename('100','state')]['waves']
+        self.assertEqual(sum(len(wave['workers']) for wave in waves),4)
+        self.assertEqual(waves[-1]['workers'],[])
+
+    def test_missing_matrix_jobs_reserve_capacity(self):
+        self.jobs=[]
+        active=parallel.pool_allocations(self.api,self.state)[0]['active']
+        self.assertEqual(active,set(self.wave['workers']))
+
+    def test_legacy_finalizer_is_not_modified_concurrently(self):
+        self.wave.pop('pool')
+        self.jobs=[dict(name=name,status='completed') for name in self.wave['worker_names']]
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='101',GITHUB_SHA='c'*40):
+            with self.assertRaisesRegex(RuntimeError,'final publication'):
+                parallel.plan_pool(self.api,{},self.plan,self.state,Path(directory))
+
+    def test_uncertain_dispatch_does_not_create_duplicate_run(self):
+        with self.store(), patch.object(parallel,'pool_dispatch_waiting',return_value=True):
+            parallel.replenish_pool(self.api,self.plan)
+            parallel.replenish_pool(self.api,self.plan)
+        dispatches=[call for call in self.api.request.call_args_list if call.args[0]=='POST']
+        self.assertEqual(len(dispatches),1)
+        self.assertEqual(dispatches[0].args[2]['inputs']['rolling_workers'],'true')
+
+    def test_failed_planning_dispatch_has_bounded_retries(self):
+        with self.store(), patch.object(parallel,'pool_dispatch_waiting',return_value=False):
+            for _ in range(6):
+                parallel.replenish_pool(self.api,self.plan)
+        dispatches=[call for call in self.api.request.call_args_list if call.args[0]=='POST']
+        self.assertEqual(len(dispatches),3)
+        self.assertIn('pool_dispatch_blocked',self.documents[self.wave['queue']])
+
+    def test_dispatch_reconciliation_waits_for_queued_campaign(self):
+        reservation=dict(requested_at='2026-11-12T10:00:00Z')
+        self.api.request.side_effect=None
+        self.api.request.return_value=dict(workflow_runs=[dict(id=101,display_title='Continue spectra 100',
+            created_at='2026-11-12T10:00:01Z',status='queued')])
+        with patch.object(parallel.time,'time',return_value=1794481200):
+            self.assertTrue(parallel.pool_dispatch_waiting(self.api,self.plan,self.state,reservation))
+        self.api.request.return_value['workflow_runs'][0]['status']='completed'
+        with patch.object(parallel.time,'time',return_value=1794481200):
+            self.assertFalse(parallel.pool_dispatch_waiting(self.api,self.plan,self.state,reservation))
+
+    def test_recovery_precedes_retry_and_counts_attempt_once(self):
+        worker=self.wave['workers'][0]
+        tasks={task['id']:task for task in self.plan['tasks']}
+        work,_=parallel.claim_queued_work(self.queue,self.plan,tasks,worker)
+        other=self.wave['workers'][1]
+        active,_=parallel.claim_queued_work(self.queue,self.plan,tasks,other)
+        allocation=dict(wave=self.wave,stopped={worker},active={other})
+        def recover(*args):
+            self.assertEqual(self.documents[self.wave['queue']]['owners'][worker],work['id'])
+        with self.store(), patch.object(parallel,'recover_artifacts',side_effect=recover) as recovered, \
+             patch.object(parallel,'read_packets',return_value={}):
+            parallel.recover_pool(self.api,self.plan,self.state,[allocation])
+            parallel.recover_pool(self.api,self.plan,self.state,[allocation])
+        self.assertEqual(recovered.call_count,1)
+        queue=self.documents[self.wave['queue']]
+        self.assertIsNone(queue['owners'][worker])
+        self.assertEqual(queue['owners'][other],active['id'])
+        retries=[unit for unit in queue['pending'] if queue['units'][unit]['task_id']==work['task_id']]
+        self.assertEqual(len(retries),1)
+        self.assertNotEqual(retries[0],work['id'])
+        self.assertEqual(queue['claims'][work['id']],worker)
+        self.assertEqual(self.documents[parallel.filename('100','state')]['attempts'][work['task_id']]['stalled'],1)
+
+    def test_failed_artifact_recovery_keeps_claim_and_does_not_retry(self):
+        worker=self.wave['workers'][0]
+        tasks={task['id']:task for task in self.plan['tasks']}
+        parallel.claim_queued_work(self.queue,self.plan,tasks,worker)
+        original=copy.deepcopy(self.documents)
+        with self.store(), patch.object(parallel,'recover_artifacts',side_effect=TimeoutError('archive')):
+            with self.assertRaises(TimeoutError):
+                parallel.recover_pool(self.api,self.plan,self.state,[dict(wave=self.wave,stopped={worker})])
+        self.assertEqual(self.documents,original)
+
+    def test_complete_packet_is_never_requeued(self):
+        worker=self.wave['workers'][0]
+        tasks={task['id']:task for task in self.plan['tasks']}
+        work,_=parallel.claim_queued_work(self.queue,self.plan,tasks,worker)
+        parallel.pool_requeue(self.plan,self.queue,{work['task_id']:dict(state='complete')},{worker},[])
+        self.assertFalse(any(self.queue['units'][unit]['task_id']==work['task_id'] for unit in self.queue['pending']))
+
+    def test_lease_collision_retries_instead_of_stopping_publisher(self):
+        with self.store(), patch.object(parallel,'put_document',side_effect=parallel.DocumentConflict('busy')):
+            with self.assertRaises(parallel.PublicationConflict):
+                parallel.pool_publisher(self.api,self.state,100)
+
+    def test_lease_takeover_after_expiry(self):
+        self.queue['pool_publisher']=dict(run_id=100,expires_epoch=500)
+        with self.store(), patch.object(parallel.time,'time',return_value=499):
+            self.assertFalse(parallel.pool_publisher(self.api,self.state,101))
+        with self.store(), patch.object(parallel.time,'time',return_value=501):
+            self.assertTrue(parallel.pool_publisher(self.api,self.state,101))
+
+    def test_worker_uses_shared_queue_and_actual_allocation_provenance(self):
+        wave=dict(self.wave,run_id=101,queue_run_id=100)
+        packet=packet_for(self.plan,self.task,self.runtime,len(self.task['cases']))
+        packet['_publication_complete']=True
+        work=dict(id=self.task['id'],task_id=self.task['id'],kind='sweep')
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'change_work_queue',side_effect=[work,None]) as claim, \
+             patch.object(parallel,'run_task',return_value=packet) as solve:
+            parallel.run_frequency_worker(self.api,self.plan,self.state,wave,wave['workers'][0],
+                                          Path('runtime'),Path(directory),float('inf'))
+        self.assertTrue(all(call.args[2]==100 for call in claim.call_args_list))
+        self.assertEqual(solve.call_args.kwargs['work']['run_id'],101)
+
+    def test_worker_exits_without_waiting_on_slow_claimed_spectrum(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'change_work_queue',return_value=dict(kind='wait')), \
+             patch.object(parallel,'run_task') as solve, patch.object(parallel.time,'sleep') as sleep:
+            parallel.run_frequency_worker(self.api,self.plan,self.state,self.wave,self.wave['workers'][0],
+                                          Path('runtime'),Path(directory),float('inf'))
+        solve.assert_not_called()
+        sleep.assert_not_called()
+
+
+    def test_finalization_keeps_other_allocations_active(self):
+        self.jobs[0]['status']='completed'
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'recover_artifacts'), \
+             patch.object(parallel,'read_packets',return_value={}), \
+             patch.object(parallel,'publish_datasets'), patch.object(parallel,'write_outputs'), \
+             patch.object(parallel,'replenish_pool') as refill, \
+             patch.object(parallel,'wake_ordered_queue') as handoff:
+            parallel.finish_pool(self.api,self.plan,self.wave,Path(directory))
+        self.assertEqual(self.documents[parallel.filename('100','state')]['status'],'active')
+        refill.assert_called_once()
+        handoff.assert_not_called()
+
+    def test_final_handoff_occurs_once_after_all_saved_work_is_complete(self):
+        self.jobs=[dict(name=name,status='completed') for name in self.wave['worker_names']]
+        self.queue['pending']=[]
+        packets={task['id']:dict(state='complete',records={}) for task in self.plan['tasks']}
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'recover_artifacts'), \
+             patch.object(parallel,'read_packets',return_value=packets), \
+             patch.object(parallel,'publish_datasets'), patch.object(parallel,'write_outputs'), \
+             patch.object(parallel,'wake_ordered_queue') as handoff:
+            parallel.finish_pool(self.api,self.plan,self.wave,Path(directory))
+            parallel.finish_pool(self.api,self.plan,self.wave,Path(directory))
+        self.assertEqual(self.documents[parallel.filename('100','state')]['status'],'complete')
+        handoff.assert_called_once()
+
+    def test_recovery_never_releases_active_worker(self):
+        tasks={task['id']:task for task in self.plan['tasks']}
+        worker=self.wave['workers'][0]
+        work,_=parallel.claim_queued_work(self.queue,self.plan,tasks,worker)
+        with self.store(), patch.object(parallel,'recover_artifacts') as recovery:
+            parallel.recover_pool(self.api,self.plan,self.state,[dict(wave=self.wave,stopped=set())])
+        self.assertEqual(self.documents[self.wave['queue']]['owners'][worker],work['id'])
+        recovery.assert_not_called()
+
+    def test_registration_rechecks_capacity_after_conflicting_writer(self):
+        first=True
+        def conflicting_put(api,changes):
+            nonlocal first
+            if first:
+                first=False
+                other=dict(self.wave,run_id=102,workers=['other-1','other-2'],worker_names=['other 1','other 2'])
+                self.documents[parallel.filename('100','state')]['waves'].append(other)
+                self.versions[parallel.filename('100','state')]+=1
+                raise parallel.DocumentConflict('another planner registered workers')
+            return self.put_many(api,changes)
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,GITHUB_RUN_ID='101',GITHUB_SHA='c'*40), \
+             patch.object(parallel,'put_documents',side_effect=conflicting_put), \
+             patch.object(parallel,'write_outputs'):
+            parallel.plan_pool(self.api,{},self.plan,copy.deepcopy(self.state),Path(directory))
+        self.assertEqual(self.documents[parallel.filename('100','state')]['waves'][-1]['workers'],[])
+
+
+    def test_pool_monitor_retries_final_publication_before_handoff(self):
+        self.documents[parallel.filename('100','plan')]=self.plan
+        self.jobs=[dict(name=name,status='completed') for name in self.wave['worker_names']]
+        self.queue['pending']=[]
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'pool_publisher',return_value=True), \
+             patch.object(parallel,'replenish_pool'), patch.object(parallel,'read_packets',return_value={}), \
+             patch.object(parallel.time,'sleep'), \
+             patch.object(parallel,'finish_pool',side_effect=[parallel.PublicationConflict('busy'),None]) as finish:
+            self.assertTrue(parallel.monitor(self.api,'100',Path(directory),run_id=100))
+        self.assertEqual(finish.call_count,2)
+
+    def test_manual_continuation_stops_monitor_after_workers_finish(self):
+        self.plan['automatic_continue']=False
+        self.documents[parallel.filename('100','plan')]=self.plan
+        self.jobs=[dict(name=name,status='completed') for name in self.wave['worker_names']]
+        with self.store(), tempfile.TemporaryDirectory() as directory, \
+             patch.object(parallel,'pool_publisher',return_value=True), \
+             patch.object(parallel,'replenish_pool'), patch.object(parallel,'read_packets',return_value={}), \
+             patch.object(parallel,'finish_pool') as finish:
+            self.assertTrue(parallel.monitor(self.api,'100',Path(directory),run_id=100))
+        finish.assert_called_once()
+
+    def test_workflow_transformation_preserves_calculation_setup(self):
+        import yaml
+        current=(ROOT/'.github/workflows/parallel-spectra.yml').read_text(encoding='utf-8')
+        self.assertEqual(parallel.rolling_workflow(current),current)
+        document=yaml.safe_load(current)
+        self.assertTrue(document['on']['workflow_dispatch']['inputs']['rolling_workers']['default'])
+        self.assertIn('github.run_id',document['concurrency']['group'])
 
 
 if __name__ == "__main__":

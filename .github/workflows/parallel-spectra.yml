@@ -73,6 +73,10 @@ run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.
         description: Saved parallel campaign ID for continuation, blank starts a new request
         type: string
         default: ''
+      rolling_workers:
+        description: Replace completed worker jobs while remaining jobs continue
+        type: boolean
+        default: true
       platform:
         description: Operating system for the selected spectra
         type: choice
@@ -85,7 +89,7 @@ permissions:
   contents: write
   actions: write
 concurrency:
-  group: ${{ format('spheroid-parallel-{0}', inputs.platform) }}
+  group: ${{ inputs.rolling_workers && format('spheroid-pool-{0}-{1}', inputs.campaign_id || github.run_id, github.run_id) || format('spheroid-parallel-{0}', inputs.platform) }}
   cancel-in-progress: false
   queue: max
 env:

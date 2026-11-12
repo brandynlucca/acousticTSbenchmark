@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+from datetime import datetime
 import gzip
 import hashlib
 import io
@@ -1302,8 +1303,18 @@ def write_outputs(values):
                 stream.write(f'{key}={text}\n')
 
 
+def rolling_workflow(source):
+    """Change dispatch concurrency without changing compiler or numerical steps."""
+    old = "  group: ${{ format('spheroid-parallel-{0}', inputs.platform) }}\n"
+    new = "  group: ${{ inputs.rolling_workers && format('spheroid-pool-{0}-{1}', inputs.campaign_id || github.run_id, github.run_id) || format('spheroid-parallel-{0}', inputs.platform) }}\n"
+    option = "      rolling_workers:\n        description: Replace completed worker jobs while remaining jobs continue\n        type: boolean\n        default: true\n"
+    if source.count(old) != 1 or source.count('      platform:\n') != 1:
+        return source
+    return source.replace(old,new,1).replace('      platform:\n',option+'      platform:\n',1)
+
+
 def controller_files_allowed(api, files, previous, current, allowed=None):
-    """Allow an artifact-only workflow repair without changing execution settings."""
+    """Allow exact reporting and scheduling repairs without changing solver setup."""
     allowed = CONTROLLER_FILES if allowed is None else allowed
     for item in files:
         if not isinstance(item, dict) or item.get('status') == 'renamed':
@@ -1325,11 +1336,12 @@ def controller_files_allowed(api, files, previous, current, allowed=None):
         new = ''.join('          ${{ runner.temp }}/spectrum/**/' + name + '\n' for name in
                       ('checkpoint.json', 'manifest.json', 'results.json', 'environments/*.json'))
         before, after = texts
-        if before.count(old) != 1:
-            return False
-        if old + excluded in before:
-            old += excluded
-        if before.replace(old, new, 1) != after:
+        expected = before
+        if old in expected:
+            expected = expected.replace(old + excluded if old + excluded in expected else old, new, 1)
+        if expected == after:
+            continue
+        if rolling_workflow(expected) != after:
             return False
     return True
 
@@ -1361,6 +1373,253 @@ def select_controller(api, plan, state):
     state.pop('controller_upgrade_pending', None)
 
 
+def pool_allocations(api, state):
+    """Count live and queued slots across allocations sharing one claim queue."""
+    root = state['worker_pool']['run_id']
+    allocations = []
+    for wave in state['waves']:
+        if wave['run_id'] != root and wave.get('queue_run_id') != root:
+            continue
+        run = api.request('GET', f"/actions/runs/{wave['run_id']}")
+        jobs = api.request('GET', f"/actions/runs/{wave['run_id']}/jobs?per_page=100")['jobs']
+        names = dict(zip(wave['workers'], wave['worker_names']))
+        by_name = {job['name']: job for job in jobs}
+        stopped = {worker for worker, name in names.items()
+                   if by_name.get(name, {}).get('status') == 'completed' or run['status'] == 'completed'}
+        # Missing matrix jobs still reserve slots while the workflow is active.
+        active = set(names) - stopped
+        legacy_finishing = (not wave.get('pool') and not active and run['status'] != 'completed')
+        allocations.append(dict(wave=wave, stopped=stopped, active=active,
+                                legacy_finishing=legacy_finishing, run=run))
+    return allocations
+
+
+def pool_requeue(plan, queue, packets, stopped, blocked):
+    """Release stopped owners only after final artifact recovery."""
+    tasks = {task['id']: task for task in plan['tasks']}
+    retriable = set()
+    for identity, owner in queue['claims'].items():
+        if owner not in stopped:
+            continue
+        task_id = queue['units'][identity]['task_id']
+        retriable.add(task_id)
+        if queue['owners'].get(owner) == identity:
+            queue['owners'][owner] = None
+            queue['finished'][identity] = 'recovered'
+    occupied = {queue['units'][identity]['task_id'] for identity in
+                queue['pending'] + queue['deferred'] + [value for value in queue['owners'].values() if value]}
+    for task_id in sorted(retriable - occupied - set(blocked)):
+        if packets.get(task_id, {}).get('state') == 'complete':
+            continue
+        if task_id not in tasks:
+            raise ValueError('Recovered queue task is outside the campaign')
+        generation = sum(unit['task_id'] == task_id for unit in queue['units'].values())
+        identity = core.fingerprint([plan['campaign_id'], queue['run_id'], task_id, 'retry', generation])
+        queue['units'][identity] = dict(kind='sweep', task_id=task_id)
+        queue['pending'].append(identity)
+
+
+def plan_pool(api, inputs, plan, state, directory):
+    """Register replacement slots atomically without moving active claims."""
+    campaign_id = plan['campaign_id']
+    current_run = int(os.environ['GITHUB_RUN_ID'])
+    if not state.get('worker_pool'):
+        root = state['waves'][-1]
+        queue, _ = get_document(api, root['queue'])
+        if not queue or queue.get('schema_version') != 2 or queue.get('frequency_deferral') is not False:
+            raise ValueError('Rolling workers require the whole-spectrum claim queue')
+        state['worker_pool'] = dict(run_id=root['run_id'], queue=root['queue'])
+    original_pool = state['worker_pool']
+    allocations = pool_allocations(api, state)
+    if any(item['legacy_finishing'] for item in allocations):
+        raise RuntimeError('Wait for existing final publication before registering replacements')
+    # Preserve queued workers on the old controller until every worker has started.
+    previous_ref = (state.get('controller_history') or [{}])[-1].get('previous')
+    if previous_ref and previous_ref != os.environ['GITHUB_SHA']:
+        for allocation in allocations:
+            if allocation['wave'].get('pool'):
+                continue
+            jobs = api.request('GET', f"/actions/runs/{allocation['wave']['run_id']}/jobs?per_page=100")['jobs']
+            if any(job['name'] in allocation['wave']['worker_names'] and job['status'] == 'queued' for job in jobs):
+                raise ValueError('Wait for queued workers before upgrading the controller')
+    queue, _ = get_document(api, original_pool['queue'])
+    if not queue['pending'] and not queue['deferred']:
+        recover_pool(api, plan, state, allocations)
+    maximum = int(inputs.get('max_parallel') or state.get('max_parallel', plan['max_parallel']))
+    if not 1 <= maximum <= 16:
+        raise ValueError('Concurrent workers must be between 1 and 16')
+    controller = {key:copy.deepcopy(state[key]) for key in
+                  ('controller_ref', 'controller_tag', 'controller_history') if key in state}
+    for attempt in range(32):
+        latest, state_sha = get_document(api, filename(campaign_id, 'state'))
+        latest.update(controller)
+        latest['worker_pool'] = original_pool
+        queue, queue_sha = get_document(api, original_pool['queue'])
+        live = pool_allocations(api, latest)
+        if any(item['legacy_finishing'] for item in live):
+            raise RuntimeError('Existing final publication is still active')
+        existing = next((wave for wave in latest['waves'] if wave['run_id'] == current_run), None)
+        if existing:
+            wave = existing
+            break
+        count = min(maximum - sum(len(item['active']) for item in live), len(queue['pending']) + len(queue['deferred']))
+        count = max(0, count)
+        workers = [core.fingerprint([campaign_id, current_run, 'pool-worker', index])[:24] for index in range(count)]
+        if set(workers) & set(queue['owners']):
+            raise ValueError('Replacement worker identity already exists')
+        tasks = sorted({unit['task_id'] for unit in queue['units'].values()})
+        programs = ','.join(sorted({task['software'] for task in plan['tasks'] if task['id'] in tasks}))
+        wave = dict(run_id=current_run, tasks=tasks, queue=original_pool['queue'],
+                    queue_run_id=original_pool['run_id'], workers=workers, pool=True,
+                    worker_names=[f'{programs} spectrum worker {index + 1:02d}' for index in range(count)],
+                    execution_policy=execution_policy(), started_at=core.utc_now())
+        queue['owners'].update({worker:None for worker in workers})
+        queue.pop('pool_dispatch', None)
+        queue.pop('pool_dispatch_blocked', None)
+        queue['pool_dispatch_failures'] = 0
+        latest['waves'].append(wave)
+        latest.update(max_parallel=maximum, status='active', updated_at=core.utc_now())
+        try:
+            put_documents(api, [(original_pool['queue'], queue, queue_sha),
+                                (filename(campaign_id, 'state'), latest, state_sha)])
+            state = latest
+            break
+        except (DocumentConflict, PublicationConflict):
+            if attempt == 31:
+                raise
+    tasks_by_id = {task['id']: task for task in plan['tasks']}
+    programs = ','.join(sorted({tasks_by_id[task]['software'] for task in wave['tasks']}))
+    matrix = [dict(id=worker, name=name, software=programs)
+              for worker,name in zip(wave['workers'],wave['worker_names'])]
+    print(f"POOL_REGISTERED run={current_run} replacements={len(matrix)} queue_run={original_pool['run_id']}", flush=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    core.atomic_json(directory / 'wave.json', wave)
+    write_outputs(dict(campaign_id=campaign_id, matrix=matrix, has_work=bool(matrix), max_parallel=maximum,
+        budget=plan['budget_minutes'], platform=campaign_platform(plan), runner=PLATFORMS[campaign_platform(plan)][0]))
+
+
+def recover_pool(api, plan, state, allocations):
+    """Recover final artifacts before releasing stopped workers or retrying spectra."""
+    path = state['worker_pool']['queue']
+    queue, _ = get_document(api, path)
+    recovered = set(queue.get('pool_recovered_workers', []))
+    stopped = set()
+    for allocation in allocations:
+        missing = allocation['stopped'] - recovered
+        if missing:
+            recover_artifacts(api, plan, dict(allocation['wave'], workers=sorted(missing)))
+            stopped.update(missing)
+    if not stopped:
+        return
+    packets = read_packets(api, plan)
+    for attempt in range(32):
+        latest, state_sha = get_document(api, filename(plan['campaign_id'], 'state'))
+        queue, queue_sha = get_document(api, path)
+        missing = stopped - set(queue.get('pool_recovered_workers', []))
+        if not missing:
+            return
+        attempted = {queue['units'][identity]['task_id'] for identity, owner in queue['claims'].items()
+                     if owner in missing}
+        for task_id in attempted:
+            packet = packets.get(task_id, {})
+            previous = latest['attempts'].get(task_id, dict(recorded=0, stalled=0))
+            recorded = len(packet.get('records', {}))
+            stalled = 0 if recorded > previous['recorded'] else previous['stalled'] + 1
+            latest['attempts'][task_id] = dict(recorded=max(recorded, previous['recorded']), stalled=stalled)
+            if stalled >= 3 and packet.get('state') != 'complete' and task_id not in latest['blocked']:
+                latest['blocked'].append(task_id)
+        pool_requeue(plan, queue, packets, missing, latest['blocked'])
+        queue['pool_recovered_workers'] = sorted(set(queue.get('pool_recovered_workers', [])) | missing)
+        for field in ('pending', 'deferred'):
+            queue[field] = [identity for identity in queue[field]
+                            if queue['units'][identity]['task_id'] not in latest['blocked']]
+        latest['completed'] = sorted(set(latest['completed']) | {
+            task for task, packet in packets.items() if packet.get('state') == 'complete'})
+        try:
+            put_documents(api, [(path, queue, queue_sha),
+                                (filename(plan['campaign_id'], 'state'), latest, state_sha)])
+            return
+        except (DocumentConflict, PublicationConflict):
+            if attempt == 31:
+                raise
+
+
+def pool_dispatch_waiting(api, plan, state, reservation):
+    """Reconcile uncertain dispatches before retrying a failed planning job."""
+    requested = datetime.fromisoformat(reservation['requested_at'].replace('Z', '+00:00'))
+    age = time.time() - requested.timestamp()
+    if age < 180:
+        return True
+    title = f"Continue spectra {plan['campaign_id']}"
+    # Workflow creation can be delayed. Match every recent campaign dispatch conservatively.
+    for page in range(1, 11):
+        response = api.request('GET', f'/actions/workflows/{WORKFLOW}/runs?event=workflow_dispatch&per_page=100&page={page}')
+        runs = response['workflow_runs']
+        for run in runs:
+            created = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
+            if created.timestamp() < requested.timestamp() - 5:
+                continue
+            if run.get('display_title') == title and run['status'] != 'completed':
+                return True
+        if len(runs) < 100 or any(datetime.fromisoformat(run['created_at'].replace('Z', '+00:00')) < requested for run in runs):
+            return False
+    # Incomplete pagination cannot prove that a replacement allocation is absent.
+    return True
+
+
+def replenish_pool(api, plan, *, cache=None):
+    """Recover stopped slots and reserve one dispatch without a batch-wide wait."""
+    cache = {} if cache is None else cache
+    if time.monotonic() < cache.get('next_poll', 0):
+        return
+    cache['next_poll'] = time.monotonic() + 60
+    state, _ = get_document(api, filename(plan['campaign_id'], 'state'))
+    if not state.get('worker_pool') or not plan['automatic_continue'] or state['status'] != 'active':
+        return
+    live = pool_allocations(api, state)
+    if any(item['legacy_finishing'] for item in live):
+        return
+    active = sum(len(item['active']) for item in live)
+    if active >= state.get('max_parallel', plan['max_parallel']):
+        return
+    path = state['worker_pool']['queue']
+    queue, sha = get_document(api, path)
+    if not queue['pending'] and not queue['deferred']:
+        recover_pool(api, plan, state, live)
+        queue, sha = get_document(api, path)
+    reservation = queue.get('pool_dispatch')
+    if reservation and pool_dispatch_waiting(api, plan, state, reservation):
+        print(f"POOL_DISPATCH_PENDING active={active} reserved_at={reservation['requested_at']}", flush=True)
+        return
+    if reservation:
+        queue.pop('pool_dispatch')
+        queue['pool_dispatch_failures'] = queue.get('pool_dispatch_failures', 0) + 1
+    ready = bool(queue['pending'] or queue['deferred'])
+    if queue.get('pool_dispatch_failures', 0) >= 3:
+        queue['pool_dispatch_blocked'] = 'Three replacement allocations failed before registration'
+        put_document(api, path, queue, sha)
+        print('::error::POOL_DISPATCH_BLOCKED inspect failed planning jobs', flush=True)
+        return
+    if not ready:
+        if reservation:
+            put_document(api, path, queue, sha)
+        return
+    queue['pool_dispatch'] = dict(requested_at=core.utc_now(), active=active)
+    try:
+        put_document(api, path, queue, sha)
+    except (DocumentConflict, PublicationConflict):
+        return
+    continuation = dict(campaign_id=plan['campaign_id'], platform=campaign_platform(plan),
+                        max_parallel=str(state.get('max_parallel', plan['max_parallel'])), rolling_workers='true')
+    try:
+        api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
+                    dict(ref=state.get('controller_tag', f"spectra-{plan['campaign_id']}"), inputs=continuation))
+    except (APIError, OSError, TimeoutError) as error:
+        print(f'POOL_DISPATCH_UNCONFIRMED error={error}', flush=True)
+        return
+    print(f"POOL_REPLACEMENTS_DISPATCHED active={active} maximum={state.get('max_parallel', plan['max_parallel'])}", flush=True)
+
+
 def plan_campaign(api, inputs, directory):
     print('PLANNING stage=load', flush=True)
     campaign_id = inputs.get('campaign_id', '').strip()
@@ -1374,6 +1633,8 @@ def plan_campaign(api, inputs, directory):
         select_controller(api, plan, state)
         if state['status'] not in ('active', 'paused', 'publishing'):
             raise ValueError('Campaign has no resumable work')
+        if state.get('worker_pool') or str(inputs.get('rolling_workers', 'false')).lower() == 'true':
+            return plan_pool(api, inputs, plan, state, directory)
         if state['waves'] and state['waves'][-1]['run_id'] not in state.get('artifacts_recovered_runs', []):
             recover_artifacts(api, plan, state['waves'][-1])
     else:
@@ -1488,6 +1749,9 @@ def plan_campaign(api, inputs, directory):
             queue=queue_path, workers=workers,
             execution_policy=policy,
             worker_names=[item['name'] for item in matrix], started_at=core.utc_now()))
+    if str(inputs.get('rolling_workers', 'false')).lower() == 'true':
+        state['worker_pool'] = dict(run_id=run_id, queue=queue_path)
+        state['waves'][-1].update(pool=True, queue_run_id=run_id)
     put_document(api, filename(campaign_id, 'state'), state, state_sha)
     directory.mkdir(parents=True, exist_ok=True)
     core.atomic_json(directory / 'plan.json', plan)
@@ -1772,12 +2036,13 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
     directory.mkdir(parents=True, exist_ok=True)
     tasks = {task['id']: task for task in plan['tasks']}
     minimum_timeout = FREQUENCY_TIMEOUT_SECONDS
+    queue_run_id = wave.get('queue_run_id', wave['run_id'])
     idle_cache = {}
     next_work, work_ready = None, False
     while time.time() + minimum_timeout + 60 < deadline:
         iteration_started = time.monotonic()
         try:
-            work = next_work if work_ready else change_work_queue(api, plan, wave['run_id'], worker_id)
+            work = next_work if work_ready else change_work_queue(api, plan, queue_run_id, worker_id)
             work_ready = False
         except (PublicationConflict, APIError, OSError, TimeoutError) as error:
             print(f'QUEUE_DEFERRED worker={worker_id} error={type(error).__name__}', flush=True)
@@ -1787,6 +2052,9 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
             print(f'QUEUE_EMPTY worker={worker_id}', flush=True)
             return
         if work['kind'] == 'wait':
+            if wave.get('pool'):
+                print(f'POOL_QUEUE_DRAINED worker={worker_id}', flush=True)
+                return
             if idle_owners_finished(api, plan, wave, worker_id, idle_cache):
                 print(f'IDLE_OWNERS_FINISHED worker={worker_id}', flush=True)
                 return
@@ -1806,7 +2074,7 @@ def run_frequency_worker(api, plan, state, wave, worker_id, runtime_path, direct
         completion = packet
         stopping = packet['state'] in ('budget_paused', 'setup_failed', 'interrupted')
         try:
-            next_work = change_work_queue(api, plan, wave['run_id'], worker_id, work['id'], completion,
+            next_work = change_work_queue(api, plan, queue_run_id, worker_id, work['id'], completion,
                                            claim_next=not stopping)
             work_ready = True
         except (PublicationConflict, APIError, OSError, TimeoutError) as error:
@@ -1897,12 +2165,34 @@ def monitor(api, campaign_id, directory, *, run_id=None, deadline=None):
     next_update = 0
     next_job_poll = 0
     done = False
+    pool_cache = {}
     while deadline is None or time.monotonic() < deadline:
+        try:
+            state, _ = get_document(api, filename(campaign_id, 'state'))
+        except (APIError, OSError, TimeoutError, PublicationConflict) as error:
+            print(f'POOL_STATE_DEFERRED error={error}', flush=True)
+            time.sleep(30)
+            continue
+        if state.get('worker_pool'):
+            try:
+                if not pool_publisher(api, state, run_id):
+                    print(f'POOL_PUBLISHER_ALREADY_ACTIVE run={run_id}', flush=True)
+                    return True
+                replenish_pool(api, plan, cache=pool_cache)
+            except (APIError, OSError, TimeoutError, PublicationConflict) as error:
+                print(f'POOL_REFILL_DEFERRED error={error}', flush=True)
         if time.time() >= next_job_poll:
             try:
                 jobs = api.request('GET', f"/actions/runs/{run_id}/jobs?per_page=100")['jobs']
                 workers = [job for job in jobs if job['name'] in names]
                 done = len(workers) == len(names) and all(job['status'] == 'completed' for job in workers)
+                if state.get('worker_pool'):
+                    current, _ = get_document(api, filename(campaign_id, 'state'))
+                    queue, _ = get_document(api, current['worker_pool']['queue'])
+                    done = (not any(item['active'] for item in pool_allocations(api, current))
+                            and (not plan['automatic_continue'] or (
+                                not queue['pending'] and not queue['deferred']
+                                and not any(queue['owners'].values()) and not queue.get('pool_dispatch'))))
             except APIError as error:
                 if error.status not in (403,429,500,502,503,504):
                     raise
@@ -1912,8 +2202,12 @@ def monitor(api, campaign_id, directory, *, run_id=None, deadline=None):
         if time.monotonic() >= next_update or done:
             try:
                 packets = read_packets(api, plan, cache=packets)
-                done = done or all(packets.get(task_id,{}).get('state') == 'complete' for task_id in wave['tasks'])
-                publish_datasets(api, plan, packets, directory, run_id=run_id)
+                if not state.get('worker_pool'):
+                    done = done or all(packets.get(task_id,{}).get('state') == 'complete' for task_id in wave['tasks'])
+                if done and state.get('worker_pool'):
+                    finish_pool(api, plan, wave, directory)
+                else:
+                    publish_datasets(api, plan, packets, directory, run_id=run_id)
             except (PublicationConflict, APIError, OSError, TimeoutError) as error:
                 print(f'PUBLICATION_DEFERRED {error}. Retrying in 30 seconds', flush=True)
                 next_update = time.monotonic() + 30
@@ -1951,7 +2245,7 @@ def relay_progress(api, run_id, directory, *, campaign_id='', budget_seconds=180
             print(f'PROGRESS_RELAY_STATUS_DEFERRED run={run_id} error={error}', flush=True)
             time.sleep(30)
             continue
-        if state and state.get('waves') and state['waves'][-1]['run_id'] != run_id:
+        if state and not state.get('worker_pool') and state.get('waves') and state['waves'][-1]['run_id'] != run_id:
             if any(wave['run_id'] == run_id for wave in state['waves']):
                 print(f'PROGRESS_RELAY_SUPERSEDED run={run_id}', flush=True)
                 return
@@ -1961,7 +2255,7 @@ def relay_progress(api, run_id, directory, *, campaign_id='', budget_seconds=180
             return
         primary = [job for job in jobs if job['name'] == 'progress']
         if len(primary) == 1 and primary[0]['status'] == 'completed':
-            if primary[0]['conclusion'] == 'success':
+            if primary[0]['conclusion'] in ('success', 'skipped'):
                 print(f'PROGRESS_RELAY_PRIMARY_COMPLETE run={run_id}', flush=True)
                 return
             if not state or not any(wave['run_id'] == run_id for wave in state.get('waves', [])):
@@ -1997,16 +2291,88 @@ def wake_ordered_queue(api, campaign_id):
     print(f'QUEUE_HANDOFF_DISPATCHED campaign={campaign_id}', flush=True)
 
 
+def pool_publisher(api, state, run_id):
+    """Lease one campaign publisher across overlapping worker allocations."""
+    path = state['worker_pool']['queue']
+    queue, sha = get_document(api, path)
+    lease = queue.get('pool_publisher', {})
+    if lease.get('run_id') != run_id and lease.get('expires_epoch', 0) > time.time():
+        return False
+    queue['pool_publisher'] = dict(run_id=run_id, expires_epoch=time.time() + 600)
+    try:
+        put_document(api, path, queue, sha)
+    except DocumentConflict as error:
+        raise PublicationConflict('Publisher lease changed concurrently') from error
+    return True
+
+
+def finish_pool(api, plan, wave, directory):
+    """Recover finished workers without waiting for other allocations."""
+    campaign_id = plan['campaign_id']
+    initial, _ = get_document(api, filename(campaign_id, 'state'))
+    live = pool_allocations(api, initial)
+    if any(item['legacy_finishing'] for item in live):
+        print('POOL_FINISH_DEFERRED existing final publication is active', flush=True)
+        return
+    recover_pool(api, plan, initial, live)
+    packets = read_packets(api, plan)
+    for attempt in range(32):
+        state, state_sha = get_document(api, filename(campaign_id, 'state'))
+        path = state['worker_pool']['queue']
+        queue, queue_sha = get_document(api, path)
+        state['completed'] = sorted(set(state['completed']) | {
+            task for task, packet in packets.items() if packet.get('state') == 'complete'})
+        unfinished = {task['id'] for task in plan['tasks']} - set(state['completed']) - set(state['blocked'])
+        live = pool_allocations(api, state)
+        if unfinished or any(item['active'] for item in live):
+            state['status'] = 'active' if plan['automatic_continue'] else 'paused'
+        else:
+            state['status'] = 'blocked' if state['blocked'] else 'complete'
+        state['updated_at'] = core.utc_now()
+        try:
+            put_documents(api, [(path, queue, queue_sha), (filename(campaign_id,'state'),state,state_sha)])
+            break
+        except (DocumentConflict, PublicationConflict):
+            if attempt == 31:
+                raise
+    if state['status'] == 'active':
+        replenish_pool(api, plan)
+    publish_datasets(api, plan, packets, directory, finished=state['status'] == 'complete')
+    write_outputs(dict(pending=len(unfinished), completed=len(state['completed']), blocked=len(state['blocked']),
+                       state=state['status']))
+    if state['status'] == 'complete':
+        # A single finalizer hands the completed campaign back to the ordered sequence.
+        latest, sha = get_document(api, filename(campaign_id,'state'))
+        if latest.get('pool_handoff_done'):
+            return
+        latest['pool_handoff_done'] = core.utc_now()
+        try:
+            put_document(api, filename(campaign_id,'state'), latest, sha)
+        except (DocumentConflict, PublicationConflict):
+            return
+        following = latest.get('next_platform_campaign')
+        if following:
+            inputs = dict(campaign_id=identifier(following['campaign_id']), platform=campaign_platform(following),
+                          max_parallel='16', rolling_workers='true')
+            api.request('POST', f'/actions/workflows/{WORKFLOW}/dispatches',
+                        dict(ref=latest.get('controller_tag',f'spectra-{campaign_id}'),inputs=inputs))
+        else:
+            wake_ordered_queue(api, campaign_id)
+
+
 def finish(api, campaign_id, directory):
     plan, _ = get_document(api, filename(campaign_id, 'plan'))
     state, state_sha = get_document(api, filename(campaign_id, 'state'))
     wave = next(item for item in reversed(state['waves']) if item['run_id'] == int(os.environ['GITHUB_RUN_ID']))
+    if state.get('worker_pool') and wave.get('pool'):
+        return finish_pool(api, plan, wave, directory)
     recover_artifacts(api, plan, wave)
     packets = read_packets(api, plan)
     attempted = wave['tasks']
     if wave.get('queue'):
         queue, _ = get_document(api, wave['queue'])
-        attempted = (sorted({queue['units'][identity]['task_id'] for identity in queue['claims']})
+        attempted = (sorted({queue['units'][identity]['task_id'] for identity, owner in queue['claims'].items()
+                               if not wave.get('pool') or owner in wave['workers']})
                      if queue.get('schema_version') == 2 else list(queue['claims']))
         if set(attempted) - set(wave['tasks']):
             raise ValueError('Spectrum queue contains claims outside the saved selection')
