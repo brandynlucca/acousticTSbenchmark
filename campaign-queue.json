@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "paused",
+  "status": "active",
   "requests": [
     {
       "key": "echo-existing",
@@ -584,10 +584,21 @@
       },
       "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
       "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43159316715"
+    },
+    "acousticts-windows": {
+      "run_id": 43391520242,
+      "campaign_id": "41694015656",
+      "inputs": {
+        "campaign_id": "41694015656",
+        "platform": "windows-latest",
+        "max_parallel": "16"
+      },
+      "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43391520242"
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-13T08:13:14.661379+00:00",
+  "updated_at": "2026-11-13T08:13:18.558170+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -727,17 +738,5 @@
         "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
       }
     }
-  ],
-  "reason": "Parallel predecessor was cancelled",
-  "dispatch_intent": {
-    "key": "acousticts-windows",
-    "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
-    "dispatch_ref": "spectra-41694015656-controller-ec21ea54a69c",
-    "inputs": {
-      "campaign_id": "41694015656",
-      "platform": "windows-latest",
-      "max_parallel": "16"
-    },
-    "created_at": "2026-11-13T08:13:14.661363+00:00"
-  }
+  ]
 }
