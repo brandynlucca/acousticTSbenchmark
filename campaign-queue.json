@@ -72,7 +72,26 @@
       }
     }
   ],
-  "dispatched": {},
+  "dispatched": {
+    "acousticts-windows-retry-a0-001": {
+      "run_id": 43485004297,
+      "campaign_id": "43485004297",
+      "inputs": {
+        "mode": "retry",
+        "platform": "windows-latest",
+        "software": "acousticts",
+        "semimajor_axes": "0.001",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330"
+      },
+      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
+      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43485004297"
+    }
+  },
   "created_at": "2026-11-13T18:40:57.261488+00:00",
   "previous_queue_sha": "c2973cc975f963a7ba41f50869888ea87c6ef249",
   "previous_sequence": {
@@ -823,23 +842,5 @@
     "original_campaign": "41694015656",
     "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
   },
-  "dispatch_intent": {
-    "key": "acousticts-windows-retry-a0-001",
-    "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
-    "dispatch_ref": "spectra-windows-failed-retry-20261113",
-    "inputs": {
-      "mode": "retry",
-      "platform": "windows-latest",
-      "software": "acousticts",
-      "semimajor_axes": "0.001",
-      "aspect_ratios": "1.001,1.01,5,10,50,100",
-      "incidences_deg": "0,37,90",
-      "boundaries": "rigid,pressure_release,liquid,gas",
-      "max_parallel": "16",
-      "automatic_continue": "true",
-      "timing_budget_minutes": "330"
-    },
-    "created_at": "2026-11-13T18:40:59.305638+00:00"
-  },
-  "updated_at": "2026-11-13T18:40:59.305654+00:00"
+  "updated_at": "2026-11-13T18:41:03.346084+00:00"
 }
