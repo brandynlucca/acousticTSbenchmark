@@ -10,7 +10,7 @@ Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial re
 | ----------------------------------- | ---------------- | ---------------------------------- | ----------------------------------------|
 | `acousticTS`                        | 2.1.0            | `R`, `Fortran`<sup>3</sup>, `C++`  | [`CRAN`](https://cran.r-project.org/web/packages/acousticTS/index.html), [`GitHub`](https://github.com/brandynlucca/acousticTS) | 
 | `echoSMs`                           | 0.26.0           | `Python`<sup>3</sup>               | [`PyPI`](https://pypi.org/project/echosms/), [`GitHub`](https://github.com/ices-tools-dev/echoSMs) |
-| `Prol_Spheroid`                     | 1.0 [Vectorized] | `Python`, `Fortran`<sup>3</sup>    | [`GitHub`](https://github.com/CRIMAC-WP4-Machine-learning/Prol_Spheroid) |
+| `Prol_Spheroid`                     | 1.0 [Vectorized] | `Python`, `Fortran`<sup>3</sup>    | [`GitHub`](https://github.com/CRIMAC-WP4-Machine-learning/Prol_Spheroid/tree/vectorized) |
 | `liquid_spheroid`                   | -                | `Julia`<sup>4</sup>                | [`GitHub`](https://github.com/elavia/liquid_spheroid)|
 | `scattering`<sup>1</sup>            | -                | `MATLAB`                           | [`GitHub`](https://github.com/radelman/scattering) |
 | `AcousticScattering.jl`<sup>2</sup> | 1.2.0            | `Julia`                            | [`Julia Registry`](https://platform.juliahub.com/ui/Packages/AcousticScattering), [`GitHub`](https://github.com/brandynlucca/AcousticScattering.jl) |
