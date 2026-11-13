@@ -2,7 +2,7 @@
 
 Comparative timing benchmarks for acoustic backscattering by prolate spheroids.
 
-Measures solve times, memory usage, $\Delta$, and $\emph{RMSE}$. 
+Measures solve times, memory usage, $\Delta TS$, and $RMSE$. 
 
 Times acousticTS, Prol_Spheroid (vectorized), echoSMs, and liquid_spheroid. AcousticScattering.jl supplies cached BEM/FEM-BEM references for ΔTS comparisons.
 
