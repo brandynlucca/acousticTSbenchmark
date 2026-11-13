@@ -869,5 +869,23 @@
     "original_campaign": "41694015656",
     "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
   },
-  "updated_at": "2026-11-13T20:17:13.348062+00:00"
+  "updated_at": "2026-11-13T20:17:31.371568+00:00",
+  "dispatch_intent": {
+    "key": "acousticts-windows-retry-a0-07",
+    "source_ref": "7bc4103ed94e3862c0c2a86ea39712ab77ba569a",
+    "dispatch_ref": "spectra-windows-publication-recovery-20261113",
+    "inputs": {
+      "mode": "retry",
+      "platform": "windows-latest",
+      "software": "acousticts",
+      "semimajor_axes": "0.07",
+      "aspect_ratios": "1.001,1.01,5,10,50,100",
+      "incidences_deg": "0,37,90",
+      "boundaries": "rigid,pressure_release,liquid,gas",
+      "max_parallel": "16",
+      "automatic_continue": "true",
+      "timing_budget_minutes": "330"
+    },
+    "created_at": "2026-11-13T20:17:31.371551+00:00"
+  }
 }
