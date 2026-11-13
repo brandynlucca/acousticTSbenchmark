@@ -31,6 +31,26 @@ class PreparationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_windows_r_restores_binary_dependencies_without_mutating_parent_environment(self):
+        environment = dict(R_LIBS_USER=str(self.path / 'library'), FC='custom compiler',
+            CC='custom compiler', CXX17='custom compiler', R_MAKEVARS_USER='source.Makevars',
+            BENCHMARK_TOOLCHAIN_FILE='toolchain.json', BENCHMARK_R_LIBRARY_CACHE_HIT='true',
+            PATH='verified Rtools path', RSPM='https://cloud.r-project.org')
+        before = copy.deepcopy(environment)
+        with patch.object(prepare, 'execute') as execute:
+            restored = prepare.prepare_windows_r(self.path / 'library', self.path, environment)
+        self.assertEqual(environment, before)
+        self.assertEqual(restored['PATH'], before['PATH'])
+        self.assertEqual(restored['R_LIBS_USER'], before['R_LIBS_USER'])
+        self.assertEqual(restored['BENCHMARK_R_LIBRARY_CACHE_HIT'], 'false')
+        for key in ('FC', 'CC', 'CXX17', 'R_MAKEVARS_USER', 'BENCHMARK_TOOLCHAIN_FILE'):
+            self.assertNotIn(key, restored)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[:3], ['Rscript', '--vanilla', '-e'])
+        self.assertIn('type = "win.binary"', command[3])
+        self.assertIn('c("Rcpp", "RcppArmadillo")', command[3])
+        self.assertEqual(execute.call_args.kwargs['env'], restored)
+
     def test_windows_prol_uses_same_compiler_without_r_setup(self):
         compiler = self.path / "x86_64-w64-mingw32.static.posix/bin/gfortran.exe"
         compiler.parent.mkdir(parents=True)

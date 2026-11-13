@@ -268,6 +268,26 @@ def obtain_source(name, source, directory):
     return destination
 
 
+def prepare_windows_r(library, workspace, environment):
+    """Retain the Rtools defaults and CRAN binaries used by saved Windows timings."""
+    environment = dict(environment)
+    for key in ("BENCHMARK_TOOLCHAIN_FILE", "R_MAKEVARS_USER", "CC", "CFLAGS", "CXX",
+                "CXX11", "CXX14", "CXX17", "CXX20", "CXX23", "CXXFLAGS", "CXX11FLAGS",
+                "CXX14FLAGS", "CXX17FLAGS", "CXX20FLAGS", "CXX23FLAGS", "FC", "FFLAGS",
+                "FCFLAGS", "FLIBS"):
+        environment.pop(key, None)
+    # Rebuild the target after restoring binary dependencies, including cache restores.
+    environment["BENCHMARK_R_LIBRARY_CACHE_HIT"] = "false"
+    code = ('library_path <- commandArgs(TRUE)[[1L]]; '
+            'repository <- Sys.getenv("RSPM", unset = ""); '
+            'if (!nzchar(repository)) repository <- "https://cloud.r-project.org"; '
+            'install.packages(c("Rcpp", "RcppArmadillo"), lib = library_path, '
+            'repos = repository, type = "win.binary", Ncpus = 1L)')
+    execute(["Rscript", "--vanilla", "-e", code, library], env=environment,
+            workspace=workspace, log_path=workspace / "setup-acousticts.log")
+    return environment
+
+
 def configure_windows_prol():
     """Use the same Rtools compiler for combined and Python-only campaigns."""
     root = Path(os.environ.get("RTOOLS45_HOME", "C:/rtools45"))
@@ -378,6 +398,8 @@ def main():
             library.mkdir(exist_ok=True)
             env = os.environ.copy()
             env["R_LIBS_USER"] = str(library)
+            if os.name == "nt":
+                env = prepare_windows_r(library, workspace, env)
             execute(["Rscript", "--vanilla", ROOT / "src/setup_r.R",
                      library, runtime["source_paths"]["acousticts"], workspace / "r-packages.json"],
                     env=env, workspace=workspace, log_path=workspace / "setup-acousticts.log")
