@@ -346,7 +346,7 @@ def validate_parallel_state(state, repository):
             if (not re.fullmatch(r"[1-9][0-9]*", campaign) or
                     set(inputs) - {"campaign_id", "platform", "max_parallel"}):
                 raise ValueError("Resume inputs must retain the immutable campaign selection")
-        elif (inputs.get("mode") not in {"repeat", "extend", "refresh"} or
+        elif (inputs.get("mode") not in {"repeat", "extend", "refresh", "retry"} or
                 inputs.get("software") not in SOFTWARE or not inputs.get("semimajor_axes") or
                 any(size.strip() not in {"0.001", "0.01", "0.07", "0.1", "0.5"}
                     for size in inputs["semimajor_axes"].split(",")) or

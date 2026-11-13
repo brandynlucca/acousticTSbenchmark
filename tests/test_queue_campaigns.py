@@ -733,6 +733,27 @@ class ParallelQueueTests(unittest.TestCase):
         saved = api.finish_campaign("echo-existing")
         return api, saved
 
+    def test_failed_only_size_stages_keep_retry_mode_and_wait_for_publication(self):
+        saved = parallel_state()
+        first = saved['requests'][0]
+        first['inputs'].update(mode='retry', software='acousticts', platform='windows-latest',
+                               semimajor_axes='0.001')
+        first['inputs'].pop('additional_repetitions')
+        second = copy.deepcopy(first)
+        second.update(key='retry-next-size')
+        second['inputs']['semimajor_axes'] = '0.01'
+        saved['requests'] = [first, second]
+        api = FakeParallelAPI(saved)
+        self.assertEqual(self.advance(api)['status'], 'dispatched')
+        self.assertEqual(self.advance(api)['status'], 'waiting')
+        self.assertEqual(len(api.dispatches()), 1)
+        api.finish_campaign(first['key'])
+        self.assertEqual(self.advance(api)['status'], 'dispatched')
+        calls = [entry['inputs'] for entry in api.dispatches()]
+        self.assertEqual([entry['semimajor_axes'] for entry in calls], ['0.001', '0.01'])
+        self.assertTrue(all(entry['mode'] == 'retry' and entry['max_parallel'] == '16'
+                            and 'additional_repetitions' not in entry for entry in calls))
+
     def test_new_then_resumed_campaign_preserve_independent_pins(self):
         api, saved = self.ready()
         self.assertEqual(api.state["dispatched"]["echo-existing"]["campaign_id"], "101")
