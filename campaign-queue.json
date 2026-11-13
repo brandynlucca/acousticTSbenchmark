@@ -1,611 +1,87 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "paused",
+  "status": "active",
   "requests": [
     {
-      "key": "echo-existing",
+      "key": "acousticts-windows-retry-a0-001",
+      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
+      "dispatch_ref": "spectra-windows-failed-retry-20261113",
       "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
-    },
-    {
-      "key": "echo-new-a0-001",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
+        "mode": "retry",
+        "platform": "windows-latest",
+        "software": "acousticts",
         "semimajor_axes": "0.001",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106"
-    },
-    {
-      "key": "echo-new-a0-07",
-      "inputs": {
-        "mode": "repeat",
         "aspect_ratios": "1.001,1.01,5,10,50,100",
         "incidences_deg": "0,37,90",
         "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
         "max_parallel": "16",
         "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "dispatch_ref": "spectra-five-replicates-20261106",
-      "approved_controllers": [
-        "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-        "94f40b109ccf9ab27c3f0128f130f3731148f85b",
-        "965dc063576cdee63ebca1601a7b3c4fdea412a5",
-        "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
-        "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d"
-      ],
-      "interrupted_runs": [
-        42336582198,
-        42368142841,
-        42387286032,
-        42399801281
-      ]
-    },
-    {
-      "key": "echo-new-a0-1",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
-      "dispatch_ref": "spectra-whole-sweep-20261107",
-      "approved_controllers": [
-        "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
-        "d8015e2f8fa979debed41049604b47633f9ef6af"
-      ]
-    },
-    {
-      "key": "prol-remaining-a0-001",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.001",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
-    },
-    {
-      "key": "prol-remaining-a0-01",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "dispatch_ref": "spectra-queue-handoff-20261108"
-    },
-    {
-      "key": "prol-remaining-a0-07",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109",
-      "approved_controllers": [
-        "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-        "af44f25b0333f2bf0e4d697ab6f35819bd590faa"
-      ]
-    },
-    {
-      "key": "prol-remaining-a0-1",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "8d752abb91a1d61a47b6a23498e17ce0300e4e6d",
-      "dispatch_ref": "spectra-compact-artifacts-20261109"
-    },
-    {
-      "key": "liquid-existing",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "dispatch_ref": "spectra-runtime-pool-20261109",
-      "approved_controllers": [
-        "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-        "862f94c67ee7e3d39112af905ca0ecd5f46c6888",
-        "362776017059f00c8e675493dd7f613b22f27b4d"
-      ],
-      "interrupted_runs": [
-        42763596562
-      ]
-    },
-    {
-      "key": "liquid-new-a0-001",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.001",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
-      "dispatch_ref": "spectra-liquid-checkpoints-20261110",
-      "approved_controllers": [
-        "362776017059f00c8e675493dd7f613b22f27b4d",
-        "31fa27afebe664a949eaea4f3610c3338fada13f"
-      ]
-    },
-    {
-      "key": "liquid-new-a0-07",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
-      "dispatch_ref": "spectra-batched-checkpoints-20261110"
-    },
-    {
-      "key": "liquid-new-a0-1",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
-      "dispatch_ref": "spectra-batched-checkpoints-20261110"
-    },
-    {
-      "key": "acousticts-macos",
-      "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
-      "dispatch_ref": "spectra-platform-runtime-pool-20261109",
-      "inputs": {
-        "campaign_id": "41692575909",
-        "platform": "macos-latest",
-        "max_parallel": "16"
+        "timing_budget_minutes": "330"
       }
     },
     {
-      "key": "acousticts-windows",
-      "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
-      "dispatch_ref": "spectra-41694015656-controller-ec21ea54a69c",
+      "key": "acousticts-windows-retry-a0-01",
+      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
+      "dispatch_ref": "spectra-windows-failed-retry-20261113",
       "inputs": {
-        "campaign_id": "41694015656",
+        "mode": "retry",
         "platform": "windows-latest",
-        "max_parallel": "16"
+        "software": "acousticts",
+        "semimajor_axes": "0.01",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330"
+      }
+    },
+    {
+      "key": "acousticts-windows-retry-a0-07",
+      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
+      "dispatch_ref": "spectra-windows-failed-retry-20261113",
+      "inputs": {
+        "mode": "retry",
+        "platform": "windows-latest",
+        "software": "acousticts",
+        "semimajor_axes": "0.07",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330"
+      }
+    },
+    {
+      "key": "acousticts-windows-retry-a0-1",
+      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
+      "dispatch_ref": "spectra-windows-failed-retry-20261113",
+      "inputs": {
+        "mode": "retry",
+        "platform": "windows-latest",
+        "software": "acousticts",
+        "semimajor_axes": "0.1",
+        "aspect_ratios": "1.001,1.01,5,10,50,100",
+        "incidences_deg": "0,37,90",
+        "boundaries": "rigid,pressure_release,liquid,gas",
+        "max_parallel": "16",
+        "automatic_continue": "true",
+        "timing_budget_minutes": "330"
       }
     }
   ],
-  "dispatched": {
-    "echo-existing": {
-      "run_id": 42312205111,
-      "campaign_id": "42312205111",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42312205111"
-    },
-    "echo-new-a0-001": {
-      "run_id": 42328954977,
-      "campaign_id": "42328954977",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.001",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42328954977"
-    },
-    "echo-new-a0-07": {
-      "run_id": 42336582198,
-      "campaign_id": "42336582198",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42336582198"
-    },
-    "echo-new-a0-1": {
-      "run_id": 42497534872,
-      "campaign_id": "42497534872",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "echosms",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42497534872"
-    },
-    "prol-remaining-a0-001": {
-      "run_id": 42646285392,
-      "campaign_id": "42646285392",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.001",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42646285392"
-    },
-    "prol-remaining-a0-01": {
-      "run_id": 42651798450,
-      "campaign_id": "42651798450",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42651798450"
-    },
-    "prol-remaining-a0-07": {
-      "run_id": 42666293775,
-      "campaign_id": "42666293775",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42666293775"
-    },
-    "prol-remaining-a0-1": {
-      "run_id": 42723999495,
-      "campaign_id": "42723999495",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "300",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "prol_spheroid",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "8d752abb91a1d61a47b6a23498e17ce0300e4e6d",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42723999495"
-    },
-    "liquid-existing": {
-      "run_id": 42761210946,
-      "campaign_id": "42761210946",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.01",
-        "additional_repetitions": "4"
-      },
-      "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42761210946"
-    },
-    "liquid-new-a0-001": {
-      "run_id": 42869432193,
-      "campaign_id": "42869432193",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.001",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42869432193"
-    },
-    "liquid-new-a0-07": {
-      "run_id": 42958957433,
-      "campaign_id": "42958957433",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.07",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42958957433"
-    },
-    "liquid-new-a0-1": {
-      "run_id": 43049632023,
-      "campaign_id": "43049632023",
-      "inputs": {
-        "mode": "repeat",
-        "aspect_ratios": "1.001,1.01,5,10,50,100",
-        "incidences_deg": "0,37,90",
-        "boundaries": "rigid,pressure_release,liquid,gas",
-        "frequency_start_khz": "1",
-        "frequency_end_khz": "99",
-        "frequency_interval_khz": "2",
-        "max_parallel": "16",
-        "automatic_continue": "true",
-        "timing_budget_minutes": "330",
-        "platform": "ubuntu-latest",
-        "software": "liquid_spheroid",
-        "semimajor_axes": "0.1",
-        "additional_repetitions": "5"
-      },
-      "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43049632023"
-    },
-    "acousticts-macos": {
-      "run_id": 43159316715,
-      "campaign_id": "41692575909",
-      "inputs": {
-        "campaign_id": "41692575909",
-        "platform": "macos-latest",
-        "max_parallel": "16"
-      },
-      "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43159316715"
-    },
-    "acousticts-windows": {
-      "run_id": 43391520242,
-      "campaign_id": "41694015656",
-      "inputs": {
-        "campaign_id": "41694015656",
-        "platform": "windows-latest",
-        "max_parallel": "16"
-      },
-      "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
-      "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43391520242"
-    }
-  },
-  "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-13T14:24:16.478413+00:00",
-  "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
-  "recovery_history": [
-    {
-      "recorded_at": "2026-11-07T02:18:06+00:00",
-      "reason": "The three-size echoSMs plan exceeded the 512 MiB serialized-state limit before worker dispatch. Split pending multi-size stages into sequential single-size campaigns.",
-      "failed_request": {
-        "key": "echo-new",
+  "dispatched": {},
+  "created_at": "2026-11-13T18:40:57.261488+00:00",
+  "previous_queue_sha": "c2973cc975f963a7ba41f50869888ea87c6ef249",
+  "previous_sequence": {
+    "schema_version": 2,
+    "repository": "brandynlucca/acousticTSbenchmark",
+    "status": "paused",
+    "requests": [
+      {
+        "key": "echo-existing",
         "inputs": {
           "mode": "repeat",
           "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -619,15 +95,35 @@
           "timing_budget_minutes": "330",
           "platform": "ubuntu-latest",
           "software": "echosms",
-          "semimajor_axes": "0.001,0.07,0.1",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "dispatch_ref": "spectra-five-replicates-20261106"
+      },
+      {
+        "key": "echo-new-a0-001",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.001",
           "additional_repetitions": "5"
         },
         "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
         "dispatch_ref": "spectra-five-replicates-20261106"
       },
-      "failed_receipt": {
-        "run_id": 42327640524,
-        "campaign_id": "42327640524",
+      {
+        "key": "echo-new-a0-07",
         "inputs": {
           "mode": "repeat",
           "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -641,60 +137,93 @@
           "timing_budget_minutes": "330",
           "platform": "ubuntu-latest",
           "software": "echosms",
-          "semimajor_axes": "0.001,0.07,0.1",
+          "semimajor_axes": "0.07",
           "additional_repetitions": "5"
         },
         "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42327640524"
+        "dispatch_ref": "spectra-five-replicates-20261106",
+        "approved_controllers": [
+          "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+          "94f40b109ccf9ab27c3f0128f130f3731148f85b",
+          "965dc063576cdee63ebca1601a7b3c4fdea412a5",
+          "9563a04b6519a6d91e303fde18b4be0dcd9d1569",
+          "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d"
+        ],
+        "interrupted_runs": [
+          42336582198,
+          42368142841,
+          42387286032,
+          42399801281
+        ]
       },
-      "split_stages": [
-        {
-          "original_key": "echo-new",
-          "original_sizes": [
-            "0.001",
-            "0.07",
-            "0.1"
-          ],
-          "replacements": [
-            "echo-new-a0-001",
-            "echo-new-a0-07",
-            "echo-new-a0-1"
-          ]
+      {
+        "key": "echo-new-a0-1",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "5"
         },
-        {
-          "original_key": "prol-remaining",
-          "original_sizes": [
-            "0.001",
-            "0.01",
-            "0.07",
-            "0.1"
-          ],
-          "replacements": [
-            "prol-remaining-a0-001",
-            "prol-remaining-a0-01",
-            "prol-remaining-a0-07",
-            "prol-remaining-a0-1"
-          ]
+        "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
+        "dispatch_ref": "spectra-whole-sweep-20261107",
+        "approved_controllers": [
+          "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
+          "d8015e2f8fa979debed41049604b47633f9ef6af"
+        ]
+      },
+      {
+        "key": "prol-remaining-a0-001",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.001",
+          "additional_repetitions": "4"
         },
-        {
-          "original_key": "liquid-new",
-          "original_sizes": [
-            "0.001",
-            "0.07",
-            "0.1"
-          ],
-          "replacements": [
-            "liquid-new-a0-001",
-            "liquid-new-a0-07",
-            "liquid-new-a0-1"
-          ]
-        }
-      ]
-    },
-    {
-      "recorded_at": "2026-11-09T17:36:05.494181+00:00",
-      "reason": "Planning exceeded the serialized-state size limit before publication or worker dispatch. Pool exact repeated runtime metadata and replace the unstarted campaign.",
-      "failed_request": {
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "dispatch_ref": "spectra-queue-handoff-20261108"
+      },
+      {
+        "key": "prol-remaining-a0-01",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "dispatch_ref": "spectra-queue-handoff-20261108"
+      },
+      {
         "key": "prol-remaining-a0-07",
         "inputs": {
           "mode": "repeat",
@@ -712,12 +241,287 @@
           "semimajor_axes": "0.07",
           "additional_repetitions": "4"
         },
-        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-        "dispatch_ref": "spectra-queue-handoff-20261108"
+        "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+        "dispatch_ref": "spectra-runtime-pool-20261109",
+        "approved_controllers": [
+          "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+          "af44f25b0333f2bf0e4d697ab6f35819bd590faa"
+        ]
       },
-      "failed_receipt": {
-        "run_id": 42660538323,
-        "campaign_id": "42660538323",
+      {
+        "key": "prol-remaining-a0-1",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "8d752abb91a1d61a47b6a23498e17ce0300e4e6d",
+        "dispatch_ref": "spectra-compact-artifacts-20261109"
+      },
+      {
+        "key": "liquid-existing",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+        "dispatch_ref": "spectra-runtime-pool-20261109",
+        "approved_controllers": [
+          "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+          "862f94c67ee7e3d39112af905ca0ecd5f46c6888",
+          "362776017059f00c8e675493dd7f613b22f27b4d"
+        ],
+        "interrupted_runs": [
+          42763596562
+        ]
+      },
+      {
+        "key": "liquid-new-a0-001",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.001",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
+        "dispatch_ref": "spectra-liquid-checkpoints-20261110",
+        "approved_controllers": [
+          "362776017059f00c8e675493dd7f613b22f27b4d",
+          "31fa27afebe664a949eaea4f3610c3338fada13f"
+        ]
+      },
+      {
+        "key": "liquid-new-a0-07",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.07",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+        "dispatch_ref": "spectra-batched-checkpoints-20261110"
+      },
+      {
+        "key": "liquid-new-a0-1",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+        "dispatch_ref": "spectra-batched-checkpoints-20261110"
+      },
+      {
+        "key": "acousticts-macos",
+        "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
+        "dispatch_ref": "spectra-platform-runtime-pool-20261109",
+        "inputs": {
+          "campaign_id": "41692575909",
+          "platform": "macos-latest",
+          "max_parallel": "16"
+        }
+      },
+      {
+        "key": "acousticts-windows",
+        "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
+        "dispatch_ref": "spectra-41694015656-controller-ec21ea54a69c",
+        "inputs": {
+          "campaign_id": "41694015656",
+          "platform": "windows-latest",
+          "max_parallel": "16"
+        }
+      }
+    ],
+    "dispatched": {
+      "echo-existing": {
+        "run_id": 42312205111,
+        "campaign_id": "42312205111",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42312205111"
+      },
+      "echo-new-a0-001": {
+        "run_id": 42328954977,
+        "campaign_id": "42328954977",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.001",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42328954977"
+      },
+      "echo-new-a0-07": {
+        "run_id": 42336582198,
+        "campaign_id": "42336582198",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.07",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42336582198"
+      },
+      "echo-new-a0-1": {
+        "run_id": 42497534872,
+        "campaign_id": "42497534872",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "echosms",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "aac3eb0b67b0042d15ce21b4a164425cb81e9e8d",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42497534872"
+      },
+      "prol-remaining-a0-001": {
+        "run_id": 42646285392,
+        "campaign_id": "42646285392",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.001",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42646285392"
+      },
+      "prol-remaining-a0-01": {
+        "run_id": 42651798450,
+        "campaign_id": "42651798450",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42651798450"
+      },
+      "prol-remaining-a0-07": {
+        "run_id": 42666293775,
+        "campaign_id": "42666293775",
         "inputs": {
           "mode": "repeat",
           "aspect_ratios": "1.001,1.01,5,10,50,100",
@@ -734,10 +538,289 @@
           "semimajor_axes": "0.07",
           "additional_repetitions": "4"
         },
-        "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
-        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
+        "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42666293775"
+      },
+      "prol-remaining-a0-1": {
+        "run_id": 42723999495,
+        "campaign_id": "42723999495",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "300",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "prol_spheroid",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "8d752abb91a1d61a47b6a23498e17ce0300e4e6d",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42723999495"
+      },
+      "liquid-existing": {
+        "run_id": 42761210946,
+        "campaign_id": "42761210946",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.01",
+          "additional_repetitions": "4"
+        },
+        "source_ref": "a20fa3370b1701a2636a2e47fa7e0860cc7a5585",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42761210946"
+      },
+      "liquid-new-a0-001": {
+        "run_id": 42869432193,
+        "campaign_id": "42869432193",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.001",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "362776017059f00c8e675493dd7f613b22f27b4d",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42869432193"
+      },
+      "liquid-new-a0-07": {
+        "run_id": 42958957433,
+        "campaign_id": "42958957433",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.07",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42958957433"
+      },
+      "liquid-new-a0-1": {
+        "run_id": 43049632023,
+        "campaign_id": "43049632023",
+        "inputs": {
+          "mode": "repeat",
+          "aspect_ratios": "1.001,1.01,5,10,50,100",
+          "incidences_deg": "0,37,90",
+          "boundaries": "rigid,pressure_release,liquid,gas",
+          "frequency_start_khz": "1",
+          "frequency_end_khz": "99",
+          "frequency_interval_khz": "2",
+          "max_parallel": "16",
+          "automatic_continue": "true",
+          "timing_budget_minutes": "330",
+          "platform": "ubuntu-latest",
+          "software": "liquid_spheroid",
+          "semimajor_axes": "0.1",
+          "additional_repetitions": "5"
+        },
+        "source_ref": "31fa27afebe664a949eaea4f3610c3338fada13f",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43049632023"
+      },
+      "acousticts-macos": {
+        "run_id": 43159316715,
+        "campaign_id": "41692575909",
+        "inputs": {
+          "campaign_id": "41692575909",
+          "platform": "macos-latest",
+          "max_parallel": "16"
+        },
+        "source_ref": "ddc007d833d846a6e89cb577108bfad5462e4d53",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43159316715"
+      },
+      "acousticts-windows": {
+        "run_id": 43391520242,
+        "campaign_id": "41694015656",
+        "inputs": {
+          "campaign_id": "41694015656",
+          "platform": "windows-latest",
+          "max_parallel": "16"
+        },
+        "source_ref": "ec21ea54a69c381a98c4e9316a2de10d446afb54",
+        "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/43391520242"
       }
-    }
-  ],
-  "reason": "Parallel predecessor was cancelled"
+    },
+    "created_at": "2026-11-06T23:36:48.306137+00:00",
+    "updated_at": "2026-11-13T14:24:16.478413+00:00",
+    "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
+    "recovery_history": [
+      {
+        "recorded_at": "2026-11-07T02:18:06+00:00",
+        "reason": "The three-size echoSMs plan exceeded the 512 MiB serialized-state limit before worker dispatch. Split pending multi-size stages into sequential single-size campaigns.",
+        "failed_request": {
+          "key": "echo-new",
+          "inputs": {
+            "mode": "repeat",
+            "aspect_ratios": "1.001,1.01,5,10,50,100",
+            "incidences_deg": "0,37,90",
+            "boundaries": "rigid,pressure_release,liquid,gas",
+            "frequency_start_khz": "1",
+            "frequency_end_khz": "300",
+            "frequency_interval_khz": "2",
+            "max_parallel": "16",
+            "automatic_continue": "true",
+            "timing_budget_minutes": "330",
+            "platform": "ubuntu-latest",
+            "software": "echosms",
+            "semimajor_axes": "0.001,0.07,0.1",
+            "additional_repetitions": "5"
+          },
+          "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+          "dispatch_ref": "spectra-five-replicates-20261106"
+        },
+        "failed_receipt": {
+          "run_id": 42327640524,
+          "campaign_id": "42327640524",
+          "inputs": {
+            "mode": "repeat",
+            "aspect_ratios": "1.001,1.01,5,10,50,100",
+            "incidences_deg": "0,37,90",
+            "boundaries": "rigid,pressure_release,liquid,gas",
+            "frequency_start_khz": "1",
+            "frequency_end_khz": "300",
+            "frequency_interval_khz": "2",
+            "max_parallel": "16",
+            "automatic_continue": "true",
+            "timing_budget_minutes": "330",
+            "platform": "ubuntu-latest",
+            "software": "echosms",
+            "semimajor_axes": "0.001,0.07,0.1",
+            "additional_repetitions": "5"
+          },
+          "source_ref": "4dc0583309375ed3603e73e41f446aa13cfb3cbd",
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42327640524"
+        },
+        "split_stages": [
+          {
+            "original_key": "echo-new",
+            "original_sizes": [
+              "0.001",
+              "0.07",
+              "0.1"
+            ],
+            "replacements": [
+              "echo-new-a0-001",
+              "echo-new-a0-07",
+              "echo-new-a0-1"
+            ]
+          },
+          {
+            "original_key": "prol-remaining",
+            "original_sizes": [
+              "0.001",
+              "0.01",
+              "0.07",
+              "0.1"
+            ],
+            "replacements": [
+              "prol-remaining-a0-001",
+              "prol-remaining-a0-01",
+              "prol-remaining-a0-07",
+              "prol-remaining-a0-1"
+            ]
+          },
+          {
+            "original_key": "liquid-new",
+            "original_sizes": [
+              "0.001",
+              "0.07",
+              "0.1"
+            ],
+            "replacements": [
+              "liquid-new-a0-001",
+              "liquid-new-a0-07",
+              "liquid-new-a0-1"
+            ]
+          }
+        ]
+      },
+      {
+        "recorded_at": "2026-11-09T17:36:05.494181+00:00",
+        "reason": "Planning exceeded the serialized-state size limit before publication or worker dispatch. Pool exact repeated runtime metadata and replace the unstarted campaign.",
+        "failed_request": {
+          "key": "prol-remaining-a0-07",
+          "inputs": {
+            "mode": "repeat",
+            "aspect_ratios": "1.001,1.01,5,10,50,100",
+            "incidences_deg": "0,37,90",
+            "boundaries": "rigid,pressure_release,liquid,gas",
+            "frequency_start_khz": "1",
+            "frequency_end_khz": "300",
+            "frequency_interval_khz": "2",
+            "max_parallel": "16",
+            "automatic_continue": "true",
+            "timing_budget_minutes": "330",
+            "platform": "ubuntu-latest",
+            "software": "prol_spheroid",
+            "semimajor_axes": "0.07",
+            "additional_repetitions": "4"
+          },
+          "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+          "dispatch_ref": "spectra-queue-handoff-20261108"
+        },
+        "failed_receipt": {
+          "run_id": 42660538323,
+          "campaign_id": "42660538323",
+          "inputs": {
+            "mode": "repeat",
+            "aspect_ratios": "1.001,1.01,5,10,50,100",
+            "incidences_deg": "0,37,90",
+            "boundaries": "rigid,pressure_release,liquid,gas",
+            "frequency_start_khz": "1",
+            "frequency_end_khz": "300",
+            "frequency_interval_khz": "2",
+            "max_parallel": "16",
+            "automatic_continue": "true",
+            "timing_budget_minutes": "330",
+            "platform": "ubuntu-latest",
+            "software": "prol_spheroid",
+            "semimajor_axes": "0.07",
+            "additional_repetitions": "4"
+          },
+          "source_ref": "d8015e2f8fa979debed41049604b47633f9ef6af",
+          "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
+        }
+      }
+    ],
+    "reason": "Parallel predecessor was cancelled"
+  },
+  "recovery": {
+    "requested_observations": 5097,
+    "original_campaign": "41694015656",
+    "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
+  }
 }
