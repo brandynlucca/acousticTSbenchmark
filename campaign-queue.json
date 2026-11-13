@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "active",
+  "status": "paused",
   "requests": [
     {
       "key": "acousticts-windows-retry-a0-001",
@@ -842,5 +842,6 @@
     "original_campaign": "41694015656",
     "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
   },
-  "updated_at": "2026-11-13T18:41:03.346084+00:00"
+  "updated_at": "2026-11-13T18:53:33.960199+00:00",
+  "reason": "Repair original Windows calculation build before continuing failed-only recovery"
 }
