@@ -100,6 +100,92 @@ class SyncDatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "download path"):
             api.download("https://example.com/data", self.root / "data.gz")
 
+    def test_streamed_dataset_download_retries_storage_503(self):
+        api = sync.DatasetAPI("owner/repository", "secret")
+        api.opener = Mock()
+        signed = "https://release-assets.githubusercontent.com/data?signed=private"
+        redirect = lambda: HTTPError("https://api.github.com/", 302, "redirect", {"Location": signed}, None)
+        api.opener.open.side_effect = [redirect(), HTTPError(signed, 503, "busy", {}, None),
+                                      redirect(), io.BytesIO(b"verified")]
+        path = self.root / "dataset.gz"
+        with patch.object(sync.time, "sleep"):
+            api.download("/releases/assets/123", path, hashlib.sha256(b"verified").hexdigest())
+        self.assertEqual(path.read_bytes(), b"verified")
+        self.assertIsNone(api.opener.open.call_args_list[1].args[0].get_header("Authorization"))
+        self.assertIsNone(api.opener.open.call_args_list[3].args[0].get_header("Authorization"))
+
+    def test_multipart_database_roundtrip_preserves_complete_sqlite_content(self):
+        connection, database_path = self.connection()
+        connection.execute("CREATE TABLE recovery_probe (payload BLOB)")
+        payload = b"".join(hashlib.sha256(str(i).encode()).digest() for i in range(256))
+        connection.execute("INSERT INTO recovery_probe VALUES (?)", (payload,))
+        connection.commit()
+        compressed = database_path.with_suffix(".sqlite.gz")
+        compressed.write_bytes(gzip.compress(database_path.read_bytes()))
+        uploaded = {}
+        def upload(release_id, path, name):
+            self.assertTrue(sync.ASSET_NAME.fullmatch(name))
+            self.assertLessEqual(path.stat().st_size, 1024)
+            identity = len(uploaded) + 1
+            uploaded[identity] = path.read_bytes()
+            return dict(id=identity, browser_download_url=f"https://example.com/{identity}")
+        self.api.upload.side_effect = upload
+        with patch.object(sync, "MAX_DOWNLOAD", 1024), patch.object(sync, "ASSET_PART_BYTES", 1024):
+            asset = sync.upload_asset(self.api, 9, compressed, "123-abcdef")
+            self.assertGreater(len(asset["parts"]), 1)
+            self.assertFalse(list(self.root.glob("*.part[0-9][0-9][0-9]")))
+            def download(path, destination, expected):
+                content = uploaded[int(path.rsplit("/", 1)[-1])]
+                self.assertEqual(hashlib.sha256(content).hexdigest(), expected)
+                Path(destination).write_bytes(content)
+            self.api.download.side_effect = download
+            restored = self.root / "restored"
+            restored.mkdir()
+            recovered, _ = sync.restore_database(self.api, {"assets": {"database": asset}}, restored)
+            try:
+                self.assertEqual(recovered.execute("SELECT payload FROM recovery_probe").fetchone()[0], payload)
+            finally:
+                recovered.close()
+
+    def test_multipart_checksum_failure_preserves_previous_destination(self):
+        destination = self.root / "previous.gz"
+        destination.write_bytes(b"previous")
+        asset = dict(bytes=3, sha256=hashlib.sha256(b"abc").hexdigest(),
+                     parts=[dict(id=1, bytes=3, sha256=hashlib.sha256(b"bad").hexdigest())])
+        self.api.download.side_effect = lambda path, output, expected: Path(output).write_bytes(b"bad")
+        with self.assertRaisesRegex(ValueError, "Assembled dataset checksum"):
+            sync.restore_asset(self.api, asset, destination)
+        self.assertEqual(destination.read_bytes(), b"previous")
+        self.assertFalse(list(self.root.glob("*.assembling")))
+        self.assertFalse(list(self.root.glob("*.download")))
+
+    def test_failed_multipart_upload_keeps_catalog_and_previous_release_assets(self):
+        connection, database_path = self.connection()
+        connection.execute("CREATE TABLE recovery_probe (payload BLOB)")
+        connection.execute("INSERT INTO recovery_probe VALUES (?)", (bytes(range(256)) * 32,))
+        connection.commit()
+        self.api.upload.side_effect = [dict(id=1, browser_download_url="https://example.com/1"), RuntimeError("upload failed")]
+        with patch.object(sync, "MAX_DOWNLOAD", 256), patch.object(sync, "ASSET_PART_BYTES", 256), \
+                patch.object(sync, "ensure_release", return_value={"id": 10}), patch.object(sync, "write_catalog") as write:
+            with self.assertRaisesRegex(RuntimeError, "upload failed"):
+                sync.publish_dataset(self.api, connection, database_path, {"assets": {}}, "previous", {}, [], 0)
+        write.assert_not_called()
+        self.api.request.assert_not_called()
+        self.assertFalse(list(self.root.glob("*.part[0-9][0-9][0-9]")))
+
+    def test_cleanup_retains_every_part_of_previous_database(self):
+        connection, path = self.connection()
+        old_assets = {"database": {"parts": [dict(id=1), dict(id=2)]}}
+        self.api.upload.side_effect = [dict(id=i, browser_download_url=f"https://example.com/{i}") for i in (11, 12, 13)]
+        self.api.request.side_effect = lambda method, url, *body: [
+            dict(id=i, name=f"dataset-100-abcdef-benchmarks.sqlite.gz.part00{i}") for i in (1, 2, 3)
+        ] if method == "GET" else {}
+        with patch.object(sync, "ensure_release", return_value={"id": 10, "html_url": "https://example.com/release"}), \
+                patch.object(sync, "write_catalog"):
+            sync.publish_dataset(self.api, connection, path, {"assets": old_assets}, "old", {}, [], 0)
+        self.assertEqual([call.args[1] for call in self.api.request.call_args_list if call.args[0] == "DELETE"],
+                         ["/releases/assets/3"])
+
     def test_restore_uses_catalog_checksum_and_checks_sqlite_integrity(self):
         source = self.root / "source.sqlite"
         connection = dataset.connect_database(source)

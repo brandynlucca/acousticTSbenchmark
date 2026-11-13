@@ -884,6 +884,40 @@ assert.deepEqual(benchmarkFrequencyWindow([],saved,{frequency_hz:[1000,300000]})
         with self.assertRaisesRegex(ValueError, "repetitions"):
             progress.pending_setup_cases(self.config_file(), "pilot", repetitions=0)
 
+    def test_artifact_storage_503_retries_with_fresh_redirect_without_token(self):
+        api = progress.GitHub("owner/repo", "test-token")
+        api.opener = Mock()
+        signed = "https://example.blob.core.windows.net/artifact?signature=private"
+        def redirect():
+            return HTTPError("https://api.github.com/artifact", 302, "Found", {"Location": signed}, None)
+        api.opener.open.side_effect = [redirect(), HTTPError(signed, 503, "Unavailable", {}, None),
+                                      redirect(), io.BytesIO(b"saved results")]
+        with patch.object(progress.time, "sleep") as sleep:
+            self.assertEqual(api.archive(7), b"saved results")
+        sleep.assert_called_once_with(1)
+        requests = [call.args[0] for call in api.opener.open.call_args_list]
+        self.assertEqual([r.get_header("Authorization") for r in requests],
+                         ["Bearer test-token", None, "Bearer test-token", None])
+
+    def test_artifact_retry_limit_preserves_failure_and_does_not_retry_permanent_errors(self):
+        for status, calls in ((503, 5), (404, 1), (403, 1)):
+            with self.subTest(status=status):
+                api = progress.GitHub("owner/repo", "token")
+                api.opener = Mock()
+                api.opener.open.side_effect = HTTPError("https://api.github.com/artifact", status, "failed", {}, None)
+                with patch.object(progress.time, "sleep"), self.assertRaises(progress.APIError):
+                    api.archive(7)
+                self.assertEqual(api.opener.open.call_count, calls)
+
+    def test_artifact_retry_respects_existing_deadline(self):
+        api = progress.GitHub("owner/repo", "token")
+        api.deadline = progress.time.monotonic() + 0.1
+        api.opener = Mock()
+        api.opener.open.side_effect = HTTPError("https://api.github.com/artifact", 503, "failed", {}, None)
+        with patch.object(progress.time, "sleep") as sleep, self.assertRaises(progress.APIError):
+            api.archive(7)
+        sleep.assert_not_called()
+
     def test_artifact_redirect_does_not_forward_github_token(self):
         api = progress.GitHub("owner/repo", "test-token")
         signed = "https://example.blob.core.windows.net/artifact?signature=example"

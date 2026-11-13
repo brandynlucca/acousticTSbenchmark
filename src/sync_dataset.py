@@ -28,7 +28,9 @@ MAX_DOWNLOAD = 2 * 1024 ** 3 - 1
 MAX_SPECTRUM_DOWNLOAD = 8 * 1024 ** 3
 MAX_DATABASE = 8 * 1024 ** 3
 MAX_CATALOG = 4 * 1024 ** 2
-ASSET_NAME = re.compile(r"dataset-\d+-[a-f0-9]+-(benchmarks\.sqlite|measurements\.csv|comparisons\.csv)\.gz\Z")
+ASSET_PART_BYTES = 512 * 1024 ** 2
+MAX_ASSET_BYTES = MAX_DATABASE + 64 * 1024 ** 2
+ASSET_NAME = re.compile(r"dataset-\d+-[a-f0-9]+-(benchmarks\.sqlite|measurements\.csv|comparisons\.csv)\.gz(?:\.part[0-9]{3})?\Z")
 TIMING_NAME = re.compile(r"(results|retained|compared-results)-(ubuntu-latest|windows-latest|macos-latest)\Z")
 CHECKPOINT_NAME = re.compile(r"checkpoint-(ubuntu-latest|windows-latest|macos-latest)-(\d+)-(\d+)\Z")
 REFERENCE_NAME = re.compile(r"references-\d+-\d+\Z")
@@ -50,6 +52,9 @@ class DatasetAPI(GitHub):
         return min(120, remaining)
 
     def download(self, path, destination, expected=None, maximum=MAX_DOWNLOAD):
+        return self._retry_download(lambda: self._download_once(path, destination, expected, maximum))
+
+    def _download_once(self, path, destination, expected=None, maximum=MAX_DOWNLOAD):
         """Stream a GitHub archive or release asset without forwarding credentials."""
         if not re.fullmatch(r"/actions/artifacts/\d+/zip|/releases/assets/\d+", path):
             raise ValueError("Unsupported dataset download path")
@@ -68,7 +73,10 @@ class DatasetAPI(GitHub):
                     (host.endswith(".githubusercontent.com") or host.endswith(".blob.core.windows.net") or
                      host.endswith(".actions.githubusercontent.com"))):
                 raise ValueError("Unsupported dataset storage host")
-            response = self.opener.open(Request(target.geturl()), timeout=self.timeout())
+            try:
+                response = self.opener.open(Request(target.geturl()), timeout=self.timeout())
+            except HTTPError as error:
+                raise APIError(error.code, "Dataset storage download failed") from None
         target = Path(destination)
         temporary = target.with_suffix(target.suffix + ".part")
         digest, size = hashlib.sha256(), 0
@@ -91,8 +99,10 @@ class DatasetAPI(GitHub):
 
     def upload(self, release_id, path, name):
         path = Path(path)
-        if not ASSET_NAME.fullmatch(name) or not 0 < path.stat().st_size <= MAX_DOWNLOAD:
-            raise ValueError("Invalid dataset asset name or size")
+        if not ASSET_NAME.fullmatch(name):
+            raise ValueError("Invalid dataset asset name")
+        if not 0 < path.stat().st_size <= MAX_DOWNLOAD:
+            raise ValueError(f"Dataset asset has {path.stat().st_size} bytes, exceeding the {MAX_DOWNLOAD}-byte upload limit")
         url = f"https://uploads.github.com/repos/{self.repository}/releases/{int(release_id)}/assets?" + urlencode({"name": name})
         with path.open("rb") as source:
             request = Request(url, data=source, method="POST", headers={
@@ -186,12 +196,89 @@ def select_artifacts(artifacts):
     return sorted(selected, key=lambda item: (item["created_at"], item["id"]), reverse=True)
 
 
+def asset_members(asset):
+    """Enumerate immutable release objects for single or multipart downloads."""
+    return asset.get("parts", [asset])
+
+
+def upload_asset(api, release_id, path, generation):
+    """Keep each release upload bounded without dropping database records."""
+    size = path.stat().st_size
+    checksum = sha256(path)
+    if size <= MAX_DOWNLOAD:
+        uploaded = api.upload(release_id, path, f"dataset-{generation}-{path.name}")
+        return dict(id=uploaded["id"], url=uploaded["browser_download_url"], bytes=size, sha256=checksum)
+    if size > MAX_ASSET_BYTES:
+        raise ValueError("Dataset compressed asset exceeds its total size limit")
+    part_size = min(ASSET_PART_BYTES, MAX_DOWNLOAD)
+    parts = []
+    with path.open("rb") as source:
+        while source.tell() < size:
+            part = path.with_name(f"{path.name}.part{len(parts) + 1:03d}")
+            try:
+                with part.open("wb") as output:
+                    remaining = min(part_size, size - source.tell())
+                    while remaining:
+                        block = source.read(min(1024 * 1024, remaining))
+                        if not block:
+                            raise ValueError("Dataset asset changed during publication")
+                        output.write(block)
+                        remaining -= len(block)
+                print(f"DATASET_UPLOAD_PART name={part.name} bytes={part.stat().st_size}", flush=True)
+                uploaded = api.upload(release_id, part, f"dataset-{generation}-{part.name}")
+                parts.append(dict(id=uploaded["id"], url=uploaded["browser_download_url"],
+                                  bytes=part.stat().st_size, sha256=sha256(part)))
+            finally:
+                part.unlink(missing_ok=True)
+    return dict(filename=path.name, bytes=size, sha256=checksum, parts=parts)
+
+
+def restore_asset(api, asset, destination):
+    """Verify every part and the assembled compressed stream before replacement."""
+    if "parts" not in asset:
+        api.download(f"/releases/assets/{int(asset['id'])}", destination, asset["sha256"])
+        return
+    parts = asset["parts"]
+    if (not isinstance(parts, list) or not parts or len(parts) > 32 or
+            any(type(part.get("bytes")) is not int or not 0 < part["bytes"] <= MAX_DOWNLOAD
+                for part in parts) or sum(part["bytes"] for part in parts) != asset.get("bytes") or
+            not 0 < asset["bytes"] <= MAX_ASSET_BYTES):
+        raise ValueError("Invalid multipart dataset size")
+    temporary = destination.with_suffix(destination.suffix + ".assembling")
+    part_path = destination.with_suffix(destination.suffix + ".download")
+    digest = hashlib.sha256()
+    try:
+        with temporary.open("wb") as output:
+            for part in parts:
+                api.download(f"/releases/assets/{int(part['id'])}", part_path, part["sha256"])
+                if part_path.stat().st_size != part["bytes"]:
+                    raise ValueError("Dataset part size mismatch")
+                with part_path.open("rb") as source:
+                    while block := source.read(1024 * 1024):
+                        digest.update(block)
+                        output.write(block)
+                part_path.unlink()
+        if digest.hexdigest() != asset["sha256"]:
+            raise ValueError("Assembled dataset checksum mismatch")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+        part_path.unlink(missing_ok=True)
+
+
+def asset_links(label, asset):
+    if "parts" not in asset:
+        return f"[{label}]({asset['url']})"
+    return label + ": " + " / ".join(
+        f"[part {index}]({part['url']})" for index, part in enumerate(asset["parts"], 1))
+
+
 def restore_database(api, catalog, directory):
     database = directory / "benchmarks.sqlite"
     if catalog:
         asset = catalog["assets"]["database"]
         compressed = directory / "previous.sqlite.gz"
-        api.download(f"/releases/assets/{int(asset['id'])}", compressed, asset["sha256"])
+        restore_asset(api, asset, compressed)
         temporary = database.with_suffix(".sqlite.tmp")
         try:
             with gzip.open(compressed, "rb") as source, temporary.open("wb") as output:
@@ -240,9 +327,7 @@ def publish_dataset(api, connection, database, catalog, previous_sha, processed,
     export_comparisons_csv(connection, files["comparisons"])
     assets = {}
     for key, path in files.items():
-        asset = api.upload(release["id"], path, f"dataset-{generation}-{path.name}")
-        assets[key] = dict(id=asset["id"], url=asset["browser_download_url"],
-                           bytes=path.stat().st_size, sha256=sha256(path))
+        assets[key] = upload_asset(api, release["id"], path, generation)
     value = dict(schema_version=1, repository=api.repository, generation=generation, updated_at=utc_now(),
         release_url=release["html_url"], assets=assets, summary=summary, processed=processed,
         pending_artifacts=remaining, import_errors=errors,
@@ -250,13 +335,17 @@ def publish_dataset(api, connection, database, catalog, previous_sha, processed,
     # Publish the pointer only after every immutable asset has uploaded. The
     # prior complete dataset stays downloadable if any earlier step fails.
     write_catalog(api, value, previous_sha)
-    body = (f"Updated {value['updated_at']}. **{summary['measurements']:,} measurements**.\n\n"
-            f"[SQLite database (.gz)]({assets['database']['url']}) Â· "
-            f"[Measurements CSV (.gz)]({assets['measurements']['url']}) Â· "
-            f"[Comparisons CSV (.gz)]({assets['comparisons']['url']})\n\n"
+    body = (f"Updated {value['updated_at']}. **{summary['measurements']:,} measurements**.\n\n" +
+            " | ".join(asset_links(label, assets[key]) for key, label in (
+                ("database", "SQLite database (.gz)"), ("measurements", "Measurements CSV (.gz)"),
+                ("comparisons", "Comparisons CSV (.gz)"))) + "\n\n" +
             f"Imports: {summary['artifacts']} complete, {remaining} pending, {len(errors)} errors.")
+    if any("parts" in asset for asset in assets.values()):
+        body += ("\n\nFor multipart downloads, concatenate the numbered parts in order into the named .gz file, "
+                 "then decompress. The dataset.json catalog records part and complete-file SHA-256 checksums.")
     api.request("PATCH", f"/releases/{release['id']}", dict(body=body))
-    keep = {asset["id"] for group in (assets, value["previous_assets"]) for asset in group.values()}
+    keep = {member["id"] for group in (assets, value["previous_assets"])
+            for asset in group.values() for member in asset_members(asset)}
     # Only this feature's obsolete snapshots on its dedicated release are
     # removed. Every observation remains inside each cumulative database.
     obsolete = []
