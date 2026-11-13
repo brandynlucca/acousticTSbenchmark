@@ -2,7 +2,7 @@
 
 Comparative timing benchmarks for acoustic backscattering by prolate spheroids.
 
-Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial references), and $\emph{RMSE}$ for various parameterized cases across different software.
+Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial references), and $\emph RMSE$ for various parameterized cases across different software.
 
 **Benchmarked software**
 
