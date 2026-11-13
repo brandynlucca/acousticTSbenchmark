@@ -408,10 +408,19 @@ def parallel_receipt(api, state, sha, identity):
     for delay in (0, 1, 2, 4, 8):
         if delay:
             time.sleep(delay)
-        run = checked_parallel_run(api, identity)
+        try:
+            run = checked_parallel_run(api, identity)
+        except APIError as error:
+            if error.status not in (404, 408, 429, 500, 502, 503, 504):
+                raise
+            run = None
+            continue
         if run.get("head_sha") == intent["source_ref"] and run.get("display_title") == parallel_title(intent["inputs"]):
             break
     else:
+        if run is None:
+            return dict(status="waiting", run_id=identity,
+                        reason="Dispatched workflow metadata is temporarily unavailable")
         return pause(api, state, sha, "Parallel dispatch metadata differs from the pinned request", "blocked")
     campaign = intent["inputs"].get("campaign_id") or str(identity)
     state["dispatched"][intent["key"]] = dict(run_id=identity, campaign_id=campaign,

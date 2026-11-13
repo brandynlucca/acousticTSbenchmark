@@ -914,6 +914,40 @@ class ParallelQueueTests(unittest.TestCase):
         post = next(index for index, call in enumerate(api.calls) if call[0] == "POST")
         self.assertLess(writes[0], post)
 
+    def test_dispatched_run_visibility_delay_retries_read_without_second_dispatch(self):
+        api = FakeParallelAPI()
+        checked = queue.checked_parallel_run
+        calls = []
+        def delayed(client, identity):
+            calls.append(identity)
+            if len(calls) < 3:
+                raise queue.APIError(404, "Run not visible yet")
+            return checked(client, identity)
+        with patch.object(queue, "checked_parallel_run", side_effect=delayed), patch.object(queue.time, "sleep"):
+            result = self.advance(api)
+        self.assertEqual(result["status"], "dispatched")
+        self.assertEqual(calls, [101, 101, 101])
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_unavailable_dispatch_receipt_stays_waiting_and_recovers_existing_run(self):
+        api = FakeParallelAPI()
+        with patch.object(queue, "checked_parallel_run", side_effect=queue.APIError(503, "Unavailable")), \
+                patch.object(queue.time, "sleep"):
+            result = self.advance(api)
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(api.state["status"], "active")
+        self.assertIn("dispatch_intent", api.state)
+        self.assertEqual(self.advance(api)["status"], "dispatched")
+        self.assertEqual(len(api.dispatches()), 1)
+
+    def test_dispatch_receipt_permission_error_is_not_masked(self):
+        api = FakeParallelAPI()
+        with patch.object(queue, "checked_parallel_run", side_effect=queue.APIError(403, "Forbidden")), \
+                patch.object(queue.time, "sleep") as sleep, self.assertRaises(queue.APIError):
+            self.advance(api)
+        sleep.assert_not_called()
+        self.assertEqual(len(api.dispatches()), 1)
+
     def test_missing_dispatch_receipt_recovers_without_duplicate(self):
         api = FakeParallelAPI()
         api.empty_receipt = True
