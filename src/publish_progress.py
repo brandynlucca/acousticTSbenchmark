@@ -6,6 +6,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 import gzip
 import hashlib
+from http.client import IncompleteRead
 import io
 import json
 import math
@@ -152,7 +153,26 @@ class GitHub:
             raise ValueError("Repository archives require an exact commit SHA")
         return self._download_archive(f"/zipball/{commit_sha}")
 
+    def _retry_download(self, operation):
+        """Retry transient read failures within the existing network deadline."""
+        for attempt in range(5):
+            try:
+                return operation()
+            except (APIError, OSError, IncompleteRead) as error:
+                if isinstance(error, APIError) and error.status not in (408, 429, 500, 502, 503, 504):
+                    raise
+                remaining = self.deadline - time.monotonic()
+                delay = min(2 ** attempt, 8)
+                if attempt == 4 or remaining <= delay:
+                    raise
+                print(f"DOWNLOAD_RETRY attempt={attempt + 1}/5 delay_seconds={delay} "
+                      f"error={safe_error_summary(error)}", flush=True)
+                time.sleep(delay)
+
     def _download_archive(self, path):
+        return self._retry_download(lambda: self._download_archive_once(path))
+
+    def _download_archive_once(self, path):
         request = Request(
             f"https://api.github.com/repos/{self.repository}{path}",
             headers={"Authorization": f"Bearer {self.token}",
