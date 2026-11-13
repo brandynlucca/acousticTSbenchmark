@@ -647,6 +647,49 @@ assert.ok(Math.abs(error.value-(Math.sqrt(.00125)+Math.sqrt(.005))/2)<1e-14);
         subprocess.run([shutil.which('node'),'-e',functions+harness],check=True,capture_output=True,text=True)
 
 
+class RetryFailedTests(unittest.TestCase):
+    def test_retry_replaces_failures_without_new_repetitions_or_changed_successes(self):
+        baseline,sources,_=fixture()
+        target=[row for row in baseline['rows'] if row['software']=='acousticts']
+        target[0].update(status='worker_error',elapsed_seconds=None,ts_db=None,message='Invalid timer')
+        target[1].update(status='nonconverged',elapsed_seconds=.3,ts_db=None)
+        target[2].update(status='pending',elapsed_seconds=None,ts_db=None)
+        before=copy.deepcopy(baseline)
+        data,pending=parallel.prepare_dataset(baseline,dict(mode='retry',software='acousticts',additional_repetitions=5),sources)
+        self.assertEqual({row['case_id'] for row in pending},{row['case_id'] for row in target[:2]})
+        self.assertEqual({row['repetition'] for row in pending},{1})
+        self.assertEqual(data['archived_rows'],target[:2])
+        repaired={row['case_id']:row for row in data['rows']}
+        for row in baseline['rows']:
+            if row['case_id'] not in {r['case_id'] for r in target[:3]}:
+                self.assertEqual(repaired[row['case_id']],row)
+            self.assertEqual(repaired[row['case_id']]['reference_ts_db'],row['reference_ts_db'])
+        self.assertEqual(baseline,before)
+        changed=copy.deepcopy(sources)
+        changed['sources']['acousticts']['sha']='f'*40
+        with self.assertRaisesRegex(ValueError,'revision changed'):
+            parallel.prepare_dataset(baseline,dict(mode='retry',software='acousticts'),changed)
+
+    def test_retry_does_not_create_new_frequency_cases(self):
+        baseline,sources,_=fixture()
+        data,pending=parallel.prepare_dataset(baseline,dict(mode='retry',software='acousticts',
+            frequency_start_khz=1,frequency_end_khz=9,frequency_interval_khz=2),sources)
+        self.assertEqual(pending,[])
+        self.assertEqual(data['archived_rows'],[])
+        self.assertEqual({row['case_id'] for row in data['rows']},{row['case_id'] for row in baseline['rows']})
+
+    def test_timer_dependency_does_not_relax_calculation_build_checks(self):
+        from refresh import _runtime_selection
+        _,_,runtime=fixture()
+        runtime['environment_compatibility']['r_packages']['packages']=[dict(Package='Rcpp',Version='1.1.0')]
+        updated=copy.deepcopy(runtime)
+        updated['environment_compatibility']['r_packages']['packages'].append(dict(Package='microbenchmark',Version='1.5.0'))
+        self.assertEqual(_runtime_selection(runtime,'acousticts'),_runtime_selection(updated,'acousticts'))
+        self.assertEqual(len(updated['environment_compatibility']['r_packages']['packages']),2)
+        updated['environment_compatibility']['r_packages']['packages'][0]['Version']='1.2.0'
+        self.assertNotEqual(_runtime_selection(runtime,'acousticts'),_runtime_selection(updated,'acousticts'))
+
+
 class PlatformTests(unittest.TestCase):
     def test_five_fresh_repetitions_archive_old_acousticts_and_keep_other_software(self):
         baseline,sources,_=fixture()

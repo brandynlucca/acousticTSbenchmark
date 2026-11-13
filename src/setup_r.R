@@ -13,7 +13,7 @@ if (!nzchar(repository)) repository <- "https://cloud.r-project.org"
 options(repos = c(CRAN = repository), Ncpus = 1L,
         HTTPUserAgent = sprintf("R/%s R (%s) on GitHub Actions", getRversion(),
           paste(getRversion(), R.version$platform, R.version$arch, R.version$os)))
-dependencies <- c("jsonlite", "pbapply", "Rcpp", "BH", "RcppArmadillo", "testthat")
+dependencies <- c("microbenchmark", "jsonlite", "pbapply", "Rcpp", "BH", "RcppArmadillo", "testthat")
 missing <- dependencies[!vapply(dependencies, function(package) {
   requireNamespace(package, lib.loc = library_path, quietly = TRUE)
 }, logical(1))]

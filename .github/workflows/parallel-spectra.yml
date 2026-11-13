@@ -5,12 +5,13 @@ run-name: ${{ inputs.campaign_id != '' && format('Continue spectra {0}', inputs.
   workflow_dispatch:
     inputs:
       mode:
-        description: Extend unfinished cases, refresh selected software, or append repetitions
+        description: Extend unfinished cases, refresh software, append repetitions, or retry failed observations
         type: choice
         options:
         - extend
         - refresh
         - repeat
+        - retry
         default: extend
       software:
         description: Selected software CSV

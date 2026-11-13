@@ -58,7 +58,7 @@ th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd}#legend span{disp
 <section id="benchmark-progress" aria-labelledby="completion-title"><div class="completion-heading"><h2 id="completion-title">Benchmark completion</h2><label>Scope <select id="progress-scope"><option value="all">Entire benchmark</option><option value="selected">Selected aspect ratio and incidence</option></select></label></div><p id="progress-context" class="note"></p><div id="software-progress"></div><p class="note">Only supported boundaries count toward completion. Solid color = successful, <span class="progress-key progress-timeout" aria-hidden="true"></span>horizontal stripes = timeout, <span class="progress-key progress-other" aria-hidden="true"></span>diagonal stripes = failed, gray = pending. Planned repetitions count separately. Percentages count recorded cases, not elapsed time.</p></section>
 <section id="reference-progress" aria-labelledby="reference-completion-title"><h2 id="reference-completion-title">Numerical reference completion</h2><p id="reference-progress-context" class="note"></p><div id="reference-bars"></div><p class="note">Uses the completion scope above. Counts qualified, published references on the benchmark frequency grid, once per physical case across software and repetitions. Missing includes cases not yet calculated or not qualified. Percentages measure coverage, not elapsed time.</p></section>
 <div id="legend"></div><div id="angle-legend" aria-label="Incidence line and marker styles"></div><p id="plot-status" class="note" role="status"></p><div id="panels"></div>
-<p class="note" id="failure-note">X = failed prediction at the recorded time to failure, colored by software. Failed repetitions appear separately. Failures without a positive recorded prediction duration remain in the coverage counts.</p>
+<p class="note" id="failure-note">X = failed prediction at the recorded time to failure, colored by software. Failed repetitions appear separately. X markers below the plots identify failures without valid durations. Vertical positions in the failure strip identify software, not solve time or TS.</p>
 <p class="note" id="timeout-note" hidden>Hollow circles in the timeout rows mark frequencies without completed predictions. Timeout markers have no measured vertical value. Hover for incidence and repetition counts.</p>
 <p class="note">Lines connect adjacent sampled frequencies only. Gaps include pending, failed and unsupported cases. Timings show arithmetic means of successful repetitions. Min–max is the observed range, not a confidence interval. A single repetition has no variability estimate. Timeout durations are not successful solve times. ΔTS uses references matched to the same physical inputs. Local references retain their manuscript spatial convergence checks. Independently qualified references also require Fourier checks. Convergence evidence remains in the downloadable records. <span id="refresh-note">This file refreshes every minute. Downloaded artifacts are snapshots.</span></p>
 <p class="note" id="memory-note" hidden>Memory is the sampled peak additional resident RAM during one prediction, above its warmed-up baseline, including child processes. Setup and warmup are excluded. Reusing allocated memory can produce zero additional RAM. Short-lived peaks between samples may be missed. Values are medians across successful repetitions, not cumulative allocated bytes.</p>
@@ -209,6 +209,7 @@ const measures={elapsed_seconds:'Solve time (s, log scale)',memory_delta_peak_by
 function valueFor(row,field){return field==='memory_delta_peak_bytes'?row[field]/1048576:row[field];}
 function validValue(row,field){return row.status==='ok'&&Number.isFinite(row[field])&&(field!=='elapsed_seconds'||row[field]>0)&&(field!=='memory_delta_peak_bytes'||row[field]>=0);}
 function timedFailure(row){return ['numerical_error','nonconverged','worker_error'].includes(row.status)&&Number.isFinite(row.elapsed_seconds)&&row.elapsed_seconds>0;}
+function untimedFailure(row){return ['numerical_error','nonconverged','worker_error'].includes(row.status)&&!timedFailure(row);}
 function isTimeout(row){return ['timeout','setup_timeout'].includes(row.status);}
 function formatted(value){return Math.abs(value)>0&&Math.abs(value)<.01?value.toExponential(2):value.toFixed(2);}
 function progressGroups(byAngle){
@@ -372,6 +373,27 @@ function timeoutStrip(parent,group,frequencyBounds){
  for(const fraction of [0,.5,1])svg.append(svgElement('text',{x:70+450*fraction,y:tickY,'text-anchor':'middle'},formatted((lo+(hi-lo)*fraction)/1000)));
  svg.append(svgElement('text',{x:295,y:height-2,'text-anchor':'middle'},'Timeout frequency (kHz)'));
 }
+function failureStrip(parent,group,frequencyBounds){
+ const failed=group.filter(row=>untimedFailure(row)&&Number.isFinite(row.frequency_hz));
+ if(!failed.length)return;
+ const programs=Object.keys(colors).filter(software=>failed.some(row=>row.software===software));
+ let [lo,hi]=frequencyBounds||[Math.min(...failed.map(row=>row.frequency_hz)),Math.max(...failed.map(row=>row.frequency_hz))];
+ if(lo===hi){const margin=Math.abs(lo)*.1||1000;lo-=margin;hi+=margin;}
+ const height=programs.length*15+43,svg=svgElement('svg',{class:'timeout-strip failure-strip',viewBox:`0 0 560 ${height}`,role:'img','aria-label':'Failed observations without a valid solve duration, grouped by software'});
+ parent.append(svg);svg.append(svgElement('text',{x:4,y:16},'Failures'));
+ const grouped=new Map();
+ for(const row of failed){const key=JSON.stringify([row.software,row.frequency_hz]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(row);}
+ for(const observations of grouped.values()){
+  const row=observations[0],x=70+450*(row.frequency_hz-lo)/(hi-lo),y=12+15*programs.indexOf(row.software),size=4.5;
+  const detail=observations.map(item=>`${item.incidence_deg}°, repetition ${item.repetition}: ${item.status.replaceAll('_',' ')}`).join(' · ');
+  const title=`${labels[row.software]}, ${row.frequency_hz/1000} kHz: ${observations.length} failed observations. ${detail}. No valid solve duration or TS comparison.`;
+  const node=svgElement('path',{class:'failure-observation untimed-failure-observation',fill:'none',stroke:colors[row.software],'stroke-width':2.3,role:'img','aria-label':title,'data-software':row.software,'data-frequency':row.frequency_hz,'data-count':observations.length,d:`M ${x-size} ${y-size} L ${x+size} ${y+size} M ${x-size} ${y+size} L ${x+size} ${y-size}`});
+  node.append(svgElement('title',{},title));svg.append(node);
+ }
+ const tickY=programs.length*15+15;
+ for(const fraction of [0,.5,1])svg.append(svgElement('text',{x:70+450*fraction,y:tickY,'text-anchor':'middle'},formatted((lo+(hi-lo)*fraction)/1000)));
+ svg.append(svgElement('text',{x:295,y:height-2,'text-anchor':'middle'},'Failure frequency (kHz)'));
+}
 function chartFrame(parent,title,label,xlabel,xrange,yrange,xlog=false,ylog=false){
  const chart=document.createElement('div'),heading=document.createElement('h3');heading.textContent=title;chart.append(heading);parent.append(chart);
  const svg=svgElement('svg',{viewBox:'0 0 560 300',role:'img','aria-label':label});chart.append(svg);
@@ -411,7 +433,7 @@ function render(){
  const selectedSoftware=new Set([...selected.map(r=>r.software),...plannedGroups.map(r=>r.software)]);
  for(const item of legend.querySelectorAll('[data-software]'))item.hidden=!selectedSoftware.has(item.dataset.software);
  document.getElementById('memory-note').hidden=field!=='memory_delta_peak_bytes';
- document.getElementById('failure-note').hidden=field!=='elapsed_seconds'||layout.value==='tradeoff';
+ document.getElementById('failure-note').hidden=!selected.some(untimedFailure)&&(field!=='elapsed_seconds'||layout.value==='tradeoff');
  document.getElementById('timeout-note').hidden=!timeouts.length;
  document.getElementById('reference-status').textContent=`BEM / FEM-BEM references: ${selectedReferences.length} verified predictions within the benchmark frequency range (${localCount} from local runs). ${compared.length} of ${measured.length} successful measurements have a matched reference for ΔTS. Thin green reference curves appear within that range in the TS view, including pending benchmark cases. Stored references beyond the range become visible when the benchmark is extended. Saved convergence checks distinguish the manuscript references from independently qualified references. References are reused across platforms.`;
  const allFreq=[...new Set([...spectrum.frequencies,...selectedReferences.map(r=>r.frequency_hz)])].sort((a,b)=>a-b);
@@ -422,7 +444,7 @@ function render(){
  if(repository&&incidence.value!=='all'&&!data.incidence_coverage)document.getElementById('coverage-note').textContent+=' This snapshot does not report pending counts by incidence.';
  const plotStatus=document.getElementById('plot-status');
  plotStatus.textContent=!allFreq.length?`No benchmark frequency range is available for this selection yet.`:!rows.length?'The run configuration is available. Timing points will appear after the first benchmark checkpoint.':!selected.some(r=>r.status!=='pending')?'No cases have been recorded for the selected size, incidence and aspect ratio yet.':(layout.value!=='single'||field==='delta_ts_db')&&!compared.length?'No matching references have been attached yet. The reference jobs save results independently, then update comparisons without repeating the timings.':layout.value==='tradeoff'?'Each point is one frequency and incidence. Time uses the arithmetic mean. RAM and absolute ΔTS use medians across matched successful repetitions.':'';
- if(!measured.length&&failures.length)plotStatus.textContent='Only failed predictions have been recorded for this selection. Recorded times to failure appear as X markers in the solve-time view. Failed predictions have no valid ΔTS.';
+ if(!measured.length&&selected.some(row=>timedFailure(row)||untimedFailure(row)))plotStatus.textContent='Only failed predictions have been recorded for this selection. X markers identify failures in the solve-time view or the frequency strip. Failed predictions have no valid ΔTS.';
  if(!measured.length&&timeouts.length)plotStatus.textContent=`${timeouts.length} timeouts recorded. Hollow circles mark timeout frequencies below the plots. No successful predictions are available for the selected cases.`;
  if(showReferences&&selectedReferences.length&&!measured.length)plotStatus.textContent='Qualified BEM / FEM-BEM reference predictions are shown in green. Software predictions are pending or unavailable for this selection.';
  if(field==='memory_delta_peak_bytes'&&!measured.some(r=>validValue(r,field)))plotStatus.textContent+=' No per-prediction memory measurements are available in this snapshot.';
@@ -451,6 +473,7 @@ function render(){
    const xr=extentFor(matched.map(r=>transform(valueFor(r,field)))),yr=extentFor(matched.map(r=>Math.abs(r.delta_ts_db)),true);yr[0]=0;
    const {svg,x,y,chart}=chartFrame(charts,'Absolute ΔTS (dB)',`${title.textContent}: cost versus absolute ΔTS`,measures[field],xr,yr,field==='elapsed_seconds');
    timeoutStrip(chart,timeouts.filter(row=>row.boundary===boundary),spectrum.bounds);
+   failureStrip(chart,selected.filter(row=>row.boundary===boundary),spectrum.bounds);
    let count=0;
    for(const observations of grouped.values()){
     const pairs=observations.filter(r=>r.boundary===boundary&&validValue(r,field)&&validValue(r,'delta_ts_db'));if(!pairs.length)continue;
@@ -468,6 +491,7 @@ function render(){
    const yr=extentFor([...valid,...timedFailures,...curveRows].map(r=>transform(valueFor(r,measure))),measure==='delta_ts_db');
    const {svg,x,y,chart}=chartFrame(charts,measures[measure],`${title.textContent}: ${measures[measure]} against ${axis.options[axis.selectedIndex].text}`,axis.options[axis.selectedIndex].text,[low,high],yr,false,measure==='elapsed_seconds');
    timeoutStrip(chart,timeouts.filter(row=>row.boundary===boundary),spectrum.bounds);
+   failureStrip(chart,selected.filter(row=>row.boundary===boundary),spectrum.bounds);
    if(measure==='delta_ts_db')svg.append(svgElement('line',{x1:70,x2:520,y1:y(0),y2:y(0),stroke:'#89949a','stroke-dasharray':'4 4'}));
    let count=0;
    const referenceLayer=svgElement('g',{class:'reference-layer'});

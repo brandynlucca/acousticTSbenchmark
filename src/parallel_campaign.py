@@ -1211,8 +1211,8 @@ def prepare_dataset(baseline, inputs, sources):
     previous = [row for row in baseline['rows'] if row['software'] in programs]
     repeats = max([row['repetition'] for row in previous] or [0])
     mode = inputs['mode']
-    if mode not in ('extend', 'refresh', 'repeat'):
-        raise ValueError('Mode must be extend, refresh or repeat')
+    if mode not in ('extend', 'refresh', 'repeat', 'retry'):
+        raise ValueError('Mode must be extend, refresh, repeat or retry')
     additional = int(inputs.get('additional_repetitions', 1))
     if not 1 <= additional <= 20:
         raise ValueError('Additional repetitions must be between 1 and 20')
@@ -1229,6 +1229,7 @@ def prepare_dataset(baseline, inputs, sources):
     active_physical = {(case['software'], case['physical_id']) for case in cases}
     by_id = {case['case_id']: case for case in cases}
     rows, original = [], {}
+    retry_ids = set()
     archived_rows = copy.deepcopy(baseline.get('archived_rows', []))
     reference_fields = {}
     for row in baseline['rows']:
@@ -1245,16 +1246,24 @@ def prepare_dataset(baseline, inputs, sources):
                 raise ValueError('Existing selected measurements use different solver settings')
             if row.get('source_sha') != sources['sources'][row['software']]['sha']:
                 raise ValueError('Selected software revision changed. Use refresh, not append or extend')
-            original[row['case_id']] = row
+            if mode == 'retry' and row['status'] in ('worker_error', 'numerical_error', 'nonconverged', 'timeout'):
+                archived_rows.append(copy.deepcopy(row))
+                retry_ids.add(row['case_id'])
+            else:
+                original[row['case_id']] = row
     pending = []
+    saved_case_ids = {row['case_id'] for row in baseline['rows']}
     for case in cases:
+        if mode == 'retry' and case['case_id'] not in saved_case_ids:
+            continue
         row = copy.deepcopy(original.get(case['case_id'], dict(case, status='pending')))
         row.pop('measurement_role', None)
         row.pop('retained_from_run_id', None)
         if case['case_id'] not in original:
             row.update(reference_fields.get(case['physical_id'], {}))
         rows.append(row)
-        if row['status'] == 'pending' and (mode != 'repeat' or case['repetition'] >= first_new):
+        if (row['status'] == 'pending' and (mode != 'repeat' or case['repetition'] >= first_new)
+                and (mode != 'retry' or case['case_id'] in retry_ids)):
             pending.append(case)
     compatibility = {}
     for program in programs:

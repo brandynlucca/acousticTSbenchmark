@@ -50,7 +50,12 @@ def _runtime_selection(runtime, program):
     elif program == "acousticts":
         if not evidence.get("r_packages"):
             raise ValueError("Reused acousticTS measurements lack R dependency evidence")
-        result["r_packages"] = evidence["r_packages"]
+        result["r_packages"] = copy.deepcopy(evidence["r_packages"])
+        # The timer dependency cannot alter the acoustic calculation or build.
+        packages = result["r_packages"].get("packages")
+        if isinstance(packages, list):
+            result["r_packages"]["packages"] = [row for row in packages
+                if row.get("Package") != "microbenchmark"]
     else:
         julia = evidence.get("julia_environments", {}).get(program)
         if not julia:

@@ -39,11 +39,51 @@ test_that("public PSMS results retain metre normalization for every boundary", {
     amplitude <- complex(real = answer$amplitude_real_m,
                          imaginary = answer$amplitude_imag_m)
     expect_equal(answer$ts_db, 20 * log10(Mod(amplitude)), tolerance = 1e-10)
-    expect_true(answer$elapsed_seconds >= 0)
+    expect_true(answer$elapsed_seconds > 0)
     expect_false(answer$diagnostics$reference_qualified)
   }
 })
 
 test_that("unsupported controls fail before any calculation", {
   expect_error(psms_controls(list(controls = list(m_max = 4))), "Unknown acousticTS controls")
+})
+
+
+test_that("short predictions retain positive high-resolution durations", {
+  skip_if_not_installed("acousticTS")
+  skip_if_not_installed("microbenchmark")
+  original <- psms_calculation
+  calls <- 0L
+  assign("psms_calculation", function(request, controls) {
+    calls <<- calls + 1L
+    list(ts_db = -20, amplitude = 0.1 + 0i, parameters = list())
+  }, envir = .GlobalEnv)
+  on.exit(assign("psms_calculation", original, envir = .GlobalEnv))
+  durations <- replicate(12, {
+    answer <- psms_worker(list(controls = list(), warmup = FALSE))
+    expect_identical(answer$status, "ok")
+    expect_equal(answer$ts_db, -20)
+    expect_identical(answer$diagnostics$timer, "microbenchmark::get_nanotime")
+    answer$elapsed_seconds
+  })
+  expect_equal(calls, 12L)
+  expect_true(all(is.finite(durations) & durations > 0))
+  expect_true(any(durations < 0.01))
+})
+
+test_that("timer conversion measures seconds without repeated calculations", {
+  skip_if_not_installed("acousticTS")
+  skip_if_not_installed("microbenchmark")
+  original <- psms_calculation
+  calls <- 0L
+  assign("psms_calculation", function(request, controls) {
+    calls <<- calls + 1L
+    Sys.sleep(0.05)
+    list(ts_db = -20, amplitude = 0.1 + 0i, parameters = list())
+  }, envir = .GlobalEnv)
+  on.exit(assign("psms_calculation", original, envir = .GlobalEnv))
+  answer <- psms_worker(list(controls = list(), warmup = FALSE))
+  expect_equal(calls, 1L)
+  expect_gte(answer$elapsed_seconds, 0.04)
+  expect_lt(answer$elapsed_seconds, 2)
 })

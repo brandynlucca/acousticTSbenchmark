@@ -1276,6 +1276,28 @@ assert.equal(noTimeouts.children.length,0);
 """
         self.run_node(harness)
 
+    def test_untimed_failure_markers_preserve_frequency_and_exclude_successful_rows(self):
+        harness = self.DOM + self.helpers("timedFailure", "untimedFailure", "formatted", "failureStrip") + r"""
+const base={software:'acousticts',status:'worker_error',frequency_hz:2000,incidence_deg:37,repetition:1,elapsed_seconds:null};
+const rows=[base,{...base,repetition:2},{...base,status:'numerical_error',frequency_hz:3000},
+ {...base,status:'ok'},{...base,status:'timeout'},{...base,status:'pending'},
+ {...base,status:'unsupported'},{...base,elapsed_seconds:.1},{...base,frequency_hz:null}];
+const parent=new Element('div');failureStrip(parent,rows,[1000,3000]);
+const crosses=descendants(parent).filter(node=>node.tag==='path');
+assert.equal(crosses.length,2);
+assert.deepEqual(crosses.map(node=>[node.attrs['data-frequency'],node.attrs['data-count']]),[['2000','2'],['3000','1']]);
+assert.ok(crosses.every(node=>node.attrs.class.includes('untimed-failure-observation')));
+assert.match(crosses[0].attrs.d,/M 290.5 /);
+assert.match(crosses[0].attrs['aria-label'],/repetition 2: worker error/);
+assert.match(crosses[0].attrs['aria-label'],/No valid solve duration/);
+assert.ok(crosses.every(node=>!('data-elapsed' in node.attrs)&&!('data-delta-ts' in node.attrs)));
+const changed=new Element('div');failureStrip(changed,rows.map(row=>({...row,ts_db:-999,delta_ts_db:999})),[1000,3000]);
+assert.deepEqual(descendants(changed).filter(node=>node.tag==='path').map(node=>node.attrs),crosses.map(node=>node.attrs));
+const single=new Element('div');failureStrip(single,[base],[2000,2000]);
+assert.match(descendants(single).find(node=>node.tag==='path').attrs.d,/M 290.5 /);
+"""
+        self.run_node(harness)
+
     def test_timeout_rows_never_enter_successful_timings_errors_or_memory(self):
         source = (progress.ROOT / "src/report.py").read_text(encoding="utf-8")
         helpers = source[source.index("function mean("):source.index("const measures=")]

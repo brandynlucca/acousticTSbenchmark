@@ -69,10 +69,12 @@ psms_worker <- function(request) {
   started <- NULL
   tryCatch(withCallingHandlers({
     if (!requireNamespace("acousticTS", quietly = TRUE)) stop("acousticTS is not installed")
+    if (!requireNamespace("microbenchmark", quietly = TRUE)) stop("microbenchmark is not installed")
+    clock <- microbenchmark::get_nanotime
     controls <- psms_controls(request)
     answer$diagnostics <- list(
       controls = controls, package_version = as.character(utils::packageVersion("acousticTS")),
-      package_path = find.package("acousticTS"), timer = "proc.time elapsed",
+      package_path = find.package("acousticTS"), timer = "microbenchmark::get_nanotime", timer_units = "nanoseconds",
       timing_scope = "fresh geometry, scatterer, public target_strength and result extraction",
       amplitude_convention = "-2i/k times the public PSMS f_bs modal sum, metres",
       convergence_assessed = isTRUE(controls$adaptive), reference_qualified = FALSE)
@@ -82,9 +84,9 @@ psms_worker <- function(request) {
       warm$semimajor_m <- 0.001
       warm$semiminor_m <- 0.0005
       warm$frequency_hz <- 1000
-      warm_started <- proc.time()[["elapsed"]]
+      warm_started <- clock()
       psms_calculation(warm, controls)
-      answer$warmup_seconds <- proc.time()[["elapsed"]] - warm_started
+      answer$warmup_seconds <- (clock() - warm_started) / 1e9
     }
     gc(verbose = FALSE)
     memory_boundary(request, "ready")
@@ -93,9 +95,9 @@ psms_worker <- function(request) {
       jsonlite::write_json(list(started_epoch = as.numeric(Sys.time()), phase = phase),
                            request$timing_started_path, auto_unbox = TRUE)
     }
-    started <- proc.time()[["elapsed"]]
+    started <- clock()
     value <- psms_calculation(request, controls)
-    answer$elapsed_seconds <- proc.time()[["elapsed"]] - started
+    answer$elapsed_seconds <- (clock() - started) / 1e9
     memory_boundary(request, "done")
     phase <- "postprocess"
     finite <- is.finite(value$ts_db) && is.finite(value$amplitude)
@@ -110,7 +112,7 @@ psms_worker <- function(request) {
     invokeRestart("muffleWarning")
   }), error = function(error) {
     if (!is.null(started)) {
-      if (is.null(answer$elapsed_seconds)) answer$elapsed_seconds <<- proc.time()[["elapsed"]] - started
+      if (is.null(answer$elapsed_seconds)) answer$elapsed_seconds <<- (clock() - started) / 1e9
       memory_boundary(request, "done")
     }
     detail <- conditionMessage(error)
