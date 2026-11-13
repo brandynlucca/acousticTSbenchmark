@@ -678,6 +678,20 @@ class RetryFailedTests(unittest.TestCase):
         self.assertEqual(data['archived_rows'],[])
         self.assertEqual({row['case_id'] for row in data['rows']},{row['case_id'] for row in baseline['rows']})
 
+    def test_test_only_package_updates_do_not_change_calculation_compatibility(self):
+        from refresh import _runtime_selection
+        _,_,runtime=fixture()
+        runtime['environment_compatibility']['r_packages'].update(
+            compiler_config=dict(FC='gfortran14'),
+            packages=[dict(Package='Rcpp',Version='1.1.0'),dict(Package='diffobj',Version='0.3.9'),
+                      dict(Package='otel',Version='0.2.0')])
+        updated=copy.deepcopy(runtime)
+        updated['environment_compatibility']['r_packages']['packages'][1]['Version']='0.3.10'
+        updated['environment_compatibility']['r_packages']['packages'][2]['Version']='0.3.0'
+        self.assertEqual(_runtime_selection(runtime,'acousticts'),_runtime_selection(updated,'acousticts'))
+        updated['environment_compatibility']['r_packages']['compiler_config']['FC']='different compiler'
+        self.assertNotEqual(_runtime_selection(runtime,'acousticts'),_runtime_selection(updated,'acousticts'))
+
     def test_timer_dependency_does_not_relax_calculation_build_checks(self):
         from refresh import _runtime_selection
         _,_,runtime=fixture()
