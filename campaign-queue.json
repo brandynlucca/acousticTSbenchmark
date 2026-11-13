@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "active",
+  "status": "paused",
   "requests": [
     {
       "key": "echo-existing",
@@ -598,7 +598,7 @@
     }
   },
   "created_at": "2026-11-06T23:36:48.306137+00:00",
-  "updated_at": "2026-11-13T08:13:18.558170+00:00",
+  "updated_at": "2026-11-13T14:24:16.478413+00:00",
   "previous_queue_sha": "ad8bfbfb68bef1c0c818e1cf6e1c9b4a5fdfe9bb",
   "recovery_history": [
     {
@@ -738,5 +738,6 @@
         "url": "https://github.com/brandynlucca/acousticTSbenchmark/actions/runs/42660538323"
       }
     }
-  ]
+  ],
+  "reason": "Parallel predecessor was cancelled"
 }
