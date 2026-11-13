@@ -2,6 +2,8 @@
 
 Comparative timing benchmarks for acoustic backscattering by prolate spheroids.
 
+Measures solve times, memory usage, $\Delta$, and $\emph{RMSE}$. 
+
 Times acousticTS, Prol_Spheroid (vectorized), echoSMs, and liquid_spheroid. AcousticScattering.jl supplies cached BEM/FEM-BEM references for ΔTS comparisons.
 
 In **Actions → Dense spheroid timings → Run workflow**, choose `new` and set the frequency range/interval (kHz), semimajor axis `a` (m), aspect ratios, incidences, boundaries, software, and platform. Defaults cover all four boundaries at 0°, 37°, and 90° with acousticTS and Prol_Spheroid from 1 to 300 kHz. Unsupported combinations are recorded as skips. **Complete each frequency sweep** finishes the full spectrum for one size, aspect ratio, incidence, and boundary combination before moving on, comparing the selected software sequentially at each frequency. Choose **Frequency by frequency** to visit all combinations before advancing frequency.
