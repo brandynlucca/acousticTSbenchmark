@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "repository": "brandynlucca/acousticTSbenchmark",
-  "status": "blocked",
+  "status": "active",
   "requests": [
     {
       "key": "acousticts-windows-retry-a0-001",
@@ -48,8 +48,8 @@
     },
     {
       "key": "acousticts-windows-retry-a0-07",
-      "source_ref": "e70269b35b673402d0d60e3fe3a3fe3c0d08654e",
-      "dispatch_ref": "spectra-windows-build-recovery-20261113",
+      "source_ref": "7bc4103ed94e3862c0c2a86ea39712ab77ba569a",
+      "dispatch_ref": "spectra-windows-publication-recovery-20261113",
       "inputs": {
         "mode": "retry",
         "platform": "windows-latest",
@@ -65,8 +65,8 @@
     },
     {
       "key": "acousticts-windows-retry-a0-1",
-      "source_ref": "e70269b35b673402d0d60e3fe3a3fe3c0d08654e",
-      "dispatch_ref": "spectra-windows-build-recovery-20261113",
+      "source_ref": "7bc4103ed94e3862c0c2a86ea39712ab77ba569a",
+      "dispatch_ref": "spectra-windows-publication-recovery-20261113",
       "inputs": {
         "mode": "retry",
         "platform": "windows-latest",
@@ -869,6 +869,5 @@
     "original_campaign": "41694015656",
     "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
   },
-  "updated_at": "2026-11-13T19:51:33.765379+00:00",
-  "reason": "Parallel campaign completion lacks a successful final publication"
+  "updated_at": "2026-11-13T20:17:13.348062+00:00"
 }
