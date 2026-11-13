@@ -18,12 +18,21 @@
         "max_parallel": "16",
         "automatic_continue": "true",
         "timing_budget_minutes": "330"
-      }
+      },
+      "approved_controllers": [
+        "0a26659140daeafc874c25bbfd5de59064827297",
+        "e70269b35b673402d0d60e3fe3a3fe3c0d08654e"
+      ],
+      "interrupted_runs": [
+        43485004297,
+        43486525416,
+        43486775289
+      ]
     },
     {
       "key": "acousticts-windows-retry-a0-01",
-      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
-      "dispatch_ref": "spectra-windows-failed-retry-20261113",
+      "source_ref": "e70269b35b673402d0d60e3fe3a3fe3c0d08654e",
+      "dispatch_ref": "spectra-windows-build-recovery-20261113",
       "inputs": {
         "mode": "retry",
         "platform": "windows-latest",
@@ -39,8 +48,8 @@
     },
     {
       "key": "acousticts-windows-retry-a0-07",
-      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
-      "dispatch_ref": "spectra-windows-failed-retry-20261113",
+      "source_ref": "e70269b35b673402d0d60e3fe3a3fe3c0d08654e",
+      "dispatch_ref": "spectra-windows-build-recovery-20261113",
       "inputs": {
         "mode": "retry",
         "platform": "windows-latest",
@@ -56,8 +65,8 @@
     },
     {
       "key": "acousticts-windows-retry-a0-1",
-      "source_ref": "0a26659140daeafc874c25bbfd5de59064827297",
-      "dispatch_ref": "spectra-windows-failed-retry-20261113",
+      "source_ref": "e70269b35b673402d0d60e3fe3a3fe3c0d08654e",
+      "dispatch_ref": "spectra-windows-build-recovery-20261113",
       "inputs": {
         "mode": "retry",
         "platform": "windows-latest",
@@ -842,6 +851,5 @@
     "original_campaign": "41694015656",
     "reason": "Partition failed-only recovery by size within the existing serialized-plan limit"
   },
-  "updated_at": "2026-11-13T18:53:33.960199+00:00",
-  "reason": "Repair original Windows calculation build before continuing failed-only recovery"
+  "updated_at": "2026-11-13T19:00:37.971237+00:00"
 }
