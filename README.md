@@ -2,7 +2,7 @@
 
 Comparative timing benchmarks for acoustic backscattering by prolate spheroids.
 
-Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial references), and $\textit{RMSE}$ for various parameterized cases across different software.
+Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial references), and $\emph{RMSE}$ for various parameterized cases across different software.
 
 **Benchmarked software**
 
@@ -15,7 +15,7 @@ Measures solve times, memory usage, $\Delta \textit{TS}$ (relative to spatial re
 | `scattering`<sup>1</sup>            | -                | `MATLAB`                           | [`GitHub`](https://github.com/radelman/scattering) |
 | `AcousticScattering.jl`<sup>2</sup> | 1.2.0            | `Julia`                            | [`Julia Registry`](https://platform.juliahub.com/ui/Packages/AcousticScattering), [`GitHub`](https://github.com/brandynlucca/AcousticScattering.jl) |
 
-<sup>1</sup> Used for **local** $\Delta \textit{TS}$ and $\textit{RMSE}$ comparisons, but solve times and memory usage were not benchmarked using `GitHub Actions` due to issues configuring a `MATLAB`-based workflow. <br>
+<sup>1</sup> Used for **local** $\Delta \textit{TS}$ and $\emph{RMSE}$ comparisons, but solve times and memory usage were not benchmarked using `GitHub Actions` due to issues configuring a `MATLAB`-based workflow. <br>
 <sup>2</sup> Used for the BEM and coupled FEM-BEM spatial references. <br>
 <sup>3</sup> These packages each adapt the `Fortran`-based spheroidal wave function kernels hosted by [Arnie Lee Van Buren (`MathieuandSpheroidalWaveFunctions`)](https://github.com/MathieuandSpheroidalWaveFunctions). <br>
 <sup>4</sup> `Liquid_Spheroid` adapts the same spheroidal wave function algorithms developed by the `scattering` library.
